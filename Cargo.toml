@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "backend/crates/core",
+    "backend/crates/model",
+    "backend/crates/db",
+    "backend/crates/infra",
+    "backend/crates/service",
+    "backend/crates/api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+filegate-core = { path = "backend/crates/core" }
+filegate-model = { path = "backend/crates/model" }
+filegate-db = { path = "backend/crates/db" }
+filegate-infra = { path = "backend/crates/infra" }
+filegate-service = { path = "backend/crates/service" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+axum = "0.8"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "uuid",
+    "chrono",
+    "json",
+    "migrate",
+    "macros",
+] }
+aws-config = { version = "1", default-features = false }
+aws-credential-types = "1"
+aws-sdk-s3 = { version = "1", default-features = false, features = [
+    "rustls",
+    "rt-tokio",
+    "sigv4a",
+] }
