@@ -1,7 +1,7 @@
 # ADR 002: 모든 바이트 접근은 lease다
 
-- Status: Accepted
-- Date: 2026-07-02 (개정 2026-07-03: capability 보안 모델 명시)
+- Status: Draft (최초 작성)
+- Date: 2026-07-03
 - 부모: [000-identity](000-identity.md) 공리 2 (바이트 불통과 — filegate는 컨트롤 플레인이다)
 
 ## 문제

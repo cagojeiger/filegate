@@ -1,7 +1,7 @@
 # ADR 001: provider는 코드가 아니라 설정이다
 
-- Status: Accepted
-- Date: 2026-07-02 (개정 2026-07-03: provider의 정체 명확화, 배치 후보 풀)
+- Status: Draft (최초 작성)
+- Date: 2026-07-03
 - 부모: [000-identity](000-identity.md) 공리 1 (소유 분리 — 물리는 filegate가 소유한다)
 
 ## 문제
