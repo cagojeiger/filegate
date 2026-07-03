@@ -19,6 +19,7 @@
 ## S3 호환 사용법
 
 - presigned GET/PUT/HEAD/DELETE, multipart 전부 지원
+- CORS는 서버 설정으로 제어 (기본 관대) — 브라우저 직접 업로드 가능
 - path-style 필수 (`force_path_style: true`)
 - docker-compose에서 presigned 서명 주의: 컨테이너 내부 주소(`minio:9000`)와 호스트 접근 주소(`localhost:9000`)가 달라 `endpoint` / `public_endpoint` 분리가 필요 (ADR 001의 내부/공개 주소 구분이 나온 배경)
 

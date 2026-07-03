@@ -15,6 +15,28 @@
 - **filegate가 발급한 URL은 소모품.** 저장·임베드·캐시 금지. 서비스가 영속화하는 것은 file_id뿐.
 - **표현은 발급 시점에 명시.** 사용자에게 보일 파일명·표시 방식은 lease 요청 때 서비스가 지정한다. 보관된 메타데이터를 filegate가 해석해 추측하지 않는다.
 
+## 흐름 — 다운로드 (안정 URL → redirect)
+
+사용자에게 URL(1)은 영원히 같고, 접근 수단(5~6)은 매번 새로 만들어진다. 사용자↔filegate 채널은 존재하지 않는다.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 사용자(브라우저)
+    participant S as 서비스
+    participant F as filegate
+    participant O as 저장소
+
+    U->>S: GET 안정 URL (서비스 도메인)
+    S->>S: 유저 권한 확인 (서비스 몫)
+    S->>F: 읽기 lease 요청 (file_id)
+    F->>F: 현재 위치 재해석 (이동했어도 추적)
+    F-->>S: presigned GET URL
+    S-->>U: 302 Redirect
+    U->>O: 바이트 직접 GET
+    O-->>U: 파일
+```
+
 ## 경계선
 
 - **redirect 홉은 비용이 아니라 권한 검사가 사는 자리다.** 병목이 증명되면 위임 토큰(서비스가 권한 확인 후 발급받아 사용자에게 전달) 확장이 가능 — 권한 판단이 서비스에 남는 한 이 ADR과 충돌하지 않는다.

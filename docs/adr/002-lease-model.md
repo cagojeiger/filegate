@@ -16,9 +16,38 @@
 - **lease가 유일한 감사 단위.** 접근 추적, 고아 탐지("만료 + 미확정"), 감사 기록이 전부 lease 하나에서 나온다. 생애: 발급 → 확정 | 만료 | 취소.
 - **보안 = capability.** 검문은 발급 *앞*에 있다(서비스의 유저 권한 검사 + filegate의 client 검사). 열쇠는 짧고 좁게 — 객체 하나, 동작 하나, 분 단위. 파일이 공개되는 게 아니라 그 파일로 통하는 문이 잠깐 생겼다 사라지는 것이다.
 
+## 흐름 — 업로드 (쓰기 lease)
+
+컨트롤(얇은 화살표)은 항상 인증 뒤에 있고, 바이트(7)는 filegate도 서비스도 지나지 않는다. 사용자↔filegate 채널은 존재하지 않는다.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 사용자(브라우저)
+    participant S as 서비스
+    participant F as filegate
+    participant O as 저장소
+
+    U->>S: 업로드 요청
+    S->>S: 유저 권한 확인 (서비스 몫)
+    S->>F: 파일 생성 (intent, 크기 선언)
+    F->>F: 배치 결정 + quota 예약
+    F-->>S: file_id + 쓰기 lease (PUT URL)
+    S-->>U: PUT URL 위임
+    U->>O: 바이트 직접 PUT
+    U->>S: 업로드 완료 알림
+    S->>F: commit (확정 요청)
+    F->>O: 실물 검증 (크기 대조)
+    F-->>S: active 확정 + 정산
+    S->>S: 자기 DB에 file_id 연결
+```
+
+6에서 서비스가 위임하지 않고 직접 PUT하는 변형(서버측 업로드)도 유효하다 — 바이트가 filegate를 안 지나는 것은 동일하다.
+
 ## 경계선
 
 - 실사용 시점은 모른다 — 저장소가 알려주지 않으므로 "사용됨" 상태는 없다.
+- **브라우저 위임 쓰기는 저장소의 CORS 지원이 전제다.** 브라우저의 교차 출처 PUT은 저장소가 preflight에 응답해야 성립한다. CORS는 provider capability로 선언하고, 미지원 저장소에서는 서버측 업로드로 폴백한다.
 - 취소는 나간 열쇠를 되부르지 못한다 — 실효는 "확정 거부 + 만료 후 회수". 그래서 TTL 짧게가 기본 철학.
 - 읽기는 용량을 소비하지 않는다. 용량 = 물리적 점유(purge 전까지).
 - 갱신·재개(resumable)는 필요가 증명될 때 lease의 확장으로.
