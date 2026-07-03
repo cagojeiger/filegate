@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-02 (개정 2026-07-03: 세 공리 구조로 재정리)
-- 관련: 001 ~ 003 (이 공리들에서 파생)
+- 관련: 001 ~ 004 (이 공리들에서 파생)
 
 ## 문제
 
@@ -67,4 +67,4 @@ filegate는 생태계 내부의 어떤 것에도 의존하지 않는다. 의존 
 - 스토리지 벤더 추가/교체는 filegate 설정 변경으로 끝난다. 서비스 변경 0.
 - filegate 장애는 "새 접근 허가 불가"이지 "파일 접근 불가"가 아니다.
 - 사용자 인증·권한, 파일의 도메인 의미는 filegate 밖에 머문다.
-- 다른 ADR이 모두 이 공리들을 부모로 둔다 — [멀티 provider](001-multi-provider.md)는 공리 1의 물리 축, [lease 모델](002-lease-model.md)은 공리 2의 접근 축, [URL 소유권](003-url-ownership.md)은 공리 1+2의 교차점.
+- 다른 ADR이 모두 이 공리들을 부모로 둔다 — [멀티 provider](001-multi-provider.md)는 공리 1의 물리 축, [lease 모델](002-lease-model.md)은 공리 2의 접근 축, [URL 소유권](003-url-ownership.md)은 공리 1+2의 교차점, [설정의 세 계층](004-config-layers.md)은 공리 1+3의 교차점.

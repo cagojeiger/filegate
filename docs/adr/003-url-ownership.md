@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-03
-- 부모: [000-identity](000-identity.md), [002-lease-model](002-lease-model.md)
+- 부모: [000-identity](000-identity.md) 공리 1 + 공리 2의 교차점, [002-lease-model](002-lease-model.md)
 
 ## 문제
 
