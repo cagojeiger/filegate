@@ -1,0 +1,48 @@
+# 개념 온톨로지 — 용어와 관계
+# 정본은 docs/adr/ontology.md(관계 트리플 표) — 이 파일은 뷰(view)다.
+
+direction: right
+
+semantic: "의미의 세계 (서비스 소유)" {
+  user: "사용자"
+  svc: "서비스"
+  perm: "권한 판단"
+  surl: "안정 URL"
+}
+
+boundary: "경계 (설정이 정의)" {
+  cl: "클라이언트\n(서비스의 등록)"
+  in: "intent\n(클라이언트별 어휘)"
+  pr: "profile\n(운영자 카탈로그)"
+  q: "quota"
+}
+
+physical: "물리의 세계 (filegate 소유)" {
+  f: "file\n(정체성, 불변 id)"
+  l: "location\n(위치, 가변 포인터)"
+  ls: "lease\n(접근 권한, 감사 단위)"
+  pv: "provider\n(접근 계약)"
+  cap: "capacity"
+  rc: "reconciler"
+  st: "저장소"
+}
+
+semantic.user -> semantic.svc: 인증·요청
+semantic.svc -> semantic.perm: 권한 확인
+semantic.svc -> semantic.surl: 소유
+semantic.svc -> boundary.cl: 등록됨
+boundary.cl -> boundary.in: 선언
+boundary.cl -> boundary.q: 제약받음
+boundary.in -> boundary.pr: 참조
+boundary.pr -> physical.pv: 후보 풀
+physical.pv -> physical.cap: 제약받음
+physical.pv -> physical.st: 접근
+
+semantic.svc -> physical.f: file_id만 영속화
+physical.f -> physical.l: 현재 위치
+physical.l -> physical.pv: 놓임
+physical.ls -> physical.f: 대상
+physical.ls -> boundary.q: 예약/정산
+physical.ls -> physical.cap: 예약/정산
+physical.rc -> physical.ls: 만료 lease 회수
+physical.rc -> physical.l: purge·이동
