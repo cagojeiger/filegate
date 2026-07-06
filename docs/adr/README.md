@@ -25,5 +25,3 @@ ADR은 방향, 구조, 원칙만 담는다. 구현 세부사항은 코드에 둔
 | [002](002-lease-model.md) | 모든 바이트 접근은 lease다 | 공리 2 |
 | [003](003-url-ownership.md) | 안정 URL은 서비스가 소유하고, filegate URL은 저장하지 않는다 | 공리 1+2 |
 | [004](004-config-layers.md) | intent는 서비스의 어휘고, 배치는 운영자의 카탈로그다 | 공리 1+3 |
-
-논리 구조는 [ontology.md](ontology.md)에 둔다. 문서와 그래프가 다르면 각 ADR 본문을 기준으로 한다.

@@ -15,27 +15,9 @@ filegate가 발급한 접근 수단은 수명이 짧고 계속 바뀐다. 사용
 - **filegate URL은 저장하지 않는다.** 저장, 임베드, 캐시를 금지한다. 서비스는 file_id만 저장한다.
 - **표현은 lease 요청 때 지정한다.** 파일명과 표시 방식은 서비스가 넘긴다. filegate는 메타데이터를 해석하지 않는다.
 
-## 흐름: 다운로드 (안정 URL → redirect)
+## 흐름
 
-사용자에게 보이는 URL은 고정된다. 실제 접근 수단은 요청마다 새로 만든다. 사용자와 filegate 사이의 직접 채널은 없다.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor U as 사용자(브라우저)
-    participant S as 서비스
-    participant F as filegate
-    participant O as 저장소
-
-    U->>S: GET 안정 URL (서비스 도메인)
-    S->>S: 유저 권한 확인 (서비스 몫)
-    S->>F: 읽기 lease 요청 (file_id)
-    F->>F: 현재 위치 재해석 (이동했어도 추적)
-    F-->>S: presigned GET URL
-    S-->>U: 302 Redirect
-    U->>O: 바이트 직접 GET
-    O-->>U: 파일
-```
+다운로드의 단계별 시퀀스(안정 URL → 읽기 lease → redirect)는 [spec 00](../../spec/00-operations.md)에 둔다. 사용자에게 보이는 URL은 고정되고, 실제 접근 수단은 요청마다 새로 만든다.
 
 ## 경계선
 
