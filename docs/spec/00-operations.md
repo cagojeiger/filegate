@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-07-07
-- 근거: ADR [000](../docs/adr/000-identity.md), [002](../docs/adr/002-lease-model.md), [003](../docs/adr/003-url-ownership.md)
+- 근거: ADR [000](../adr/000-identity.md), [002](../adr/002-lease-model.md), [003](../adr/003-url-ownership.md)
 
 이 문서는 filegate가 이번 범위에서 지원하는 오퍼레이션을 정한다. 단일 파일 업로드와 다운로드, 그리고 그에 필요한 조회와 삭제만 다룬다.
 

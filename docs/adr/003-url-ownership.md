@@ -17,7 +17,7 @@ filegate가 발급한 접근 수단은 수명이 짧고 계속 바뀐다. 사용
 
 ## 흐름
 
-다운로드의 단계별 시퀀스(안정 URL → 읽기 lease → redirect)는 [spec 00](../../spec/00-operations.md)에 둔다. 사용자에게 보이는 URL은 고정되고, 실제 접근 수단은 요청마다 새로 만든다.
+다운로드의 단계별 시퀀스(안정 URL → 읽기 lease → redirect)는 [spec 00](../spec/00-operations.md)에 둔다. 사용자에게 보이는 URL은 고정되고, 실제 접근 수단은 요청마다 새로 만든다.
 
 ## 경계선
 
