@@ -11,10 +11,12 @@ ADR은 방향, 구조, 원칙만 담는다. 구현 세부사항은 코드에 둔
 | **intent** | 클라이언트가 쓰는 파일 용도 이름. 클라이언트별 네임스페이스를 가진다 |
 | **profile** | 운영자가 정의한 배치·수명 정책 템플릿. intent가 참조한다 |
 | **file / location** | 파일의 정체성 / 물리 위치. location은 바뀔 수 있다 |
-| **lease** | 시간제한·취소가능·단일목적 접근 권한. 모든 바이트 접근의 단위다 |
+| **lease** | 시간제한·단일목적 접근 권한. 모든 바이트 접근의 단위다. 취소는 원장 기준이다 — 발급된 직결 URL은 만료로만 소멸한다 |
 | **quota** | 클라이언트에게 약속한 용량 몫 |
 | **capacity** | provider의 물리 한도 (무료 구간, 디스크) |
 | **reconciler** | 요청 경로 밖에서 물리 상태를 정리하는 작업 |
+| **detach / purge** | 삭제의 두 단계. detach는 서비스의 결정, purge는 reconciler의 물리 집행 |
+| **tiering** | capacity 압박 시 파일 location을 옮기는 재배치. reconciler가 집행한다 |
 
 ## 목록
 
@@ -24,4 +26,4 @@ ADR은 방향, 구조, 원칙만 담는다. 구현 세부사항은 코드에 둔
 | [001](001-multi-provider.md) | provider는 코드가 아니라 설정이다 | 공리 1 |
 | [002](002-lease-model.md) | 모든 바이트 접근은 lease다 | 공리 2 |
 | [003](003-url-ownership.md) | 안정 URL은 서비스가 소유하고, filegate URL은 저장하지 않는다 | 공리 1+2 |
-| [004](004-config-layers.md) | intent는 서비스의 어휘고, 배치는 운영자의 카탈로그다 | 공리 1+3 |
+| [004](004-config-layers.md) | intent는 서비스의 어휘고, 배치는 운영자의 카탈로그다 | 공유 전제 + 공리 1+3 |

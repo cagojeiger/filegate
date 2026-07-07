@@ -21,6 +21,8 @@
 - 갱신·재개(resumable) 업로드.
 - 위임 토큰, 중계 모드.
 
+배치는 이번 범위에서 단일 provider다. 프로덕션은 oci-std, 로컬 개발은 MinIO다. 벤더별 사실은 [docs/vendors/](../vendors/README.md)를 본다.
+
 ## 공통 원칙
 
 - 권한 검사는 서비스가 오퍼레이션 호출 전에 한다. filegate에는 유저 개념이 없다 (공리 1).
