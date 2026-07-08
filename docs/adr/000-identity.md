@@ -30,4 +30,4 @@
 - 서비스에는 file_id만 남는다.
 - 벤더 교체는 설정 변경으로 처리한다.
 - filegate 장애 시 새 발급은 실패한다. 이미 발급된 접근과 진행 중 전송은 계속된다.
-- 파생: [001](001-multi-provider.md) 물리 축, [002](002-lease-model.md) 접근 축, [003](003-url-ownership.md) 공리 1+2 교차, [004](004-config-layers.md) 공리 1+3 교차, [005](005-metadata-store.md) 메타데이터 저장소, [006](006-backend-language.md) 백엔드 언어.
+- 파생: [001](001-multi-provider.md) 물리 축, [002](002-lease-model.md) 접근 축, [003](003-url-ownership.md) 공리 1+2 교차, [004](004-config-layers.md) 공리 1+3 교차. 기술 선택(언어·저장소)은 [docs/stack/](../stack/README.md).

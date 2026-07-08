@@ -1,6 +1,6 @@
 # ADR
 
-ADR은 방향, 구조, 원칙만 담는다. 범위별 오퍼레이션 계약은 [docs/spec/](../spec/00-operations.md)에, 가격처럼 변하는 외부 사실은 [docs/vendors/](../vendors/README.md)에 둔다. 구현 세부사항은 코드에 둔다.
+ADR은 방향, 구조, 원칙만 담는다. 범위별 오퍼레이션 계약은 [docs/spec/](../spec/00-operations.md)에, 가격처럼 변하는 외부 사실은 [docs/vendors/](../vendors/README.md)에, 언어·프레임워크·크레이트 같은 기술 선택은 [docs/stack/](../stack/README.md)에 둔다. 구현 세부사항은 코드에 둔다.
 
 ## 용어
 
@@ -29,5 +29,3 @@ ADR은 방향, 구조, 원칙만 담는다. 범위별 오퍼레이션 계약은 
 | [002](002-lease-model.md) | 모든 바이트 접근은 lease다 | 공리 2 |
 | [003](003-url-ownership.md) | 안정 URL은 서비스가 소유하고, filegate URL은 저장하지 않는다 | 공리 1+2 |
 | [004](004-config-layers.md) | intent는 서비스의 어휘고, 배치는 운영자의 카탈로그다 | 공유 전제 + 공리 1+3 |
-| [005](005-metadata-store.md) | 메타데이터 저장소는 PostgreSQL이다 | 공리 3 + 002 + 004 |
-| [006](006-backend-language.md) | 백엔드는 Rust다 | 공리 3 + 002 + 005 |
