@@ -10,6 +10,11 @@ pub async fn connect(database_url: &str, max_connections: u32) -> Result<PgPool,
         .await
 }
 
+/// 마이그레이션 실행. 부팅 배선의 두 번째 단계다 (연결 직후).
+pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
+    sqlx::migrate!("./migrations").run(pool).await
+}
+
 /// DB 생존 확인 (healthz용).
 pub async fn ping(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT 1").execute(pool).await.map(|_| ())

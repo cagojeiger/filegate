@@ -1,7 +1,8 @@
 //! 도메인 독립 기반: 설정.
 //!
 //! 3계층 설정(providers / storage_profiles / clients — ADR 004)은 lease
-//! 오퍼레이션 구현과 함께 들어온다. 지금은 서버 부팅에 필요한 값만 다룬다.
+//! 오퍼레이션 구현과 함께 들어온다. 지금은 부팅과 연결 검증에 필요한 값만
+//! 다루며, 오브젝트 스토리지는 단일 provider(env)로 임시 표현한다.
 
 use std::net::SocketAddr;
 
@@ -10,6 +11,19 @@ pub struct Config {
     pub bind_addr: SocketAddr,
     pub database_url: String,
     pub db_max_connections: u32,
+    pub log_json: bool,
+    pub s3: S3Config,
+}
+
+/// 단일 S3 호환 provider 연결 정보. 3계층 설정이 오면 providers 블록으로 재편된다.
+#[derive(Debug, Clone)]
+pub struct S3Config {
+    pub endpoint: String,
+    pub region: String,
+    pub access_key: String,
+    pub secret_key: String,
+    pub bucket: String,
+    pub force_path_style: bool,
 }
 
 impl Config {
@@ -17,22 +31,37 @@ impl Config {
     pub fn load() -> anyhow::Result<Self> {
         let _ = dotenvy::dotenv();
 
-        let bind_addr = std::env::var("FILEGATE_BIND")
-            .unwrap_or_else(|_| "127.0.0.1:8080".to_owned())
-            .parse()?;
-        let database_url = std::env::var("FILEGATE_DATABASE_URL").unwrap_or_else(|_| {
-            "postgres://filegate:filegate@127.0.0.1:55432/filegate".to_owned()
-        });
+        let bind_addr = env_or("FILEGATE_BIND", "127.0.0.1:8080").parse()?;
+        let database_url = env_or(
+            "FILEGATE_DATABASE_URL",
+            "postgres://filegate:filegate@127.0.0.1:55432/filegate",
+        );
         let db_max_connections = std::env::var("FILEGATE_DB_MAX_CONNECTIONS")
             .ok()
             .map(|v| v.parse())
             .transpose()?
             .unwrap_or(5);
+        let log_json = env_or("FILEGATE_LOG_FORMAT", "pretty") == "json";
+
+        let s3 = S3Config {
+            endpoint: env_or("FILEGATE_S3_ENDPOINT", "http://127.0.0.1:9000"),
+            region: env_or("FILEGATE_S3_REGION", "us-east-1"),
+            access_key: env_or("FILEGATE_S3_ACCESS_KEY", "filegate"),
+            secret_key: env_or("FILEGATE_S3_SECRET_KEY", "filegate-secret"),
+            bucket: env_or("FILEGATE_S3_BUCKET", "filegate-std"),
+            force_path_style: env_or("FILEGATE_S3_FORCE_PATH_STYLE", "true") == "true",
+        };
 
         Ok(Self {
             bind_addr,
             database_url,
             db_max_connections,
+            log_json,
+            s3,
         })
     }
+}
+
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_owned())
 }
