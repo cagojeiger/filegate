@@ -19,6 +19,19 @@ async fn main() -> anyhow::Result<()> {
     // shutdown이 불가능한 프로세스가 되므로 부팅 자체를 중단한다.
     let mut signals = ShutdownSignals::install()?;
 
+    // 키 정책: 루트가 짧거나 비어 있으면 부팅 실패. 개발 기본값이면 경고.
+    let keys = filegate_core::KeyPolicy::from_lookup_root(
+        config.lookup_root_key_id.clone(),
+        &config.lookup_root_secret,
+    )?;
+    if config.dev_lookup_root {
+        tracing::warn!(
+            event = "security.dev_lookup_root",
+            "FILEGATE_LOOKUP_ROOT_SECRET 미설정 — 개발 기본값 사용 중. 프로덕션에서는 반드시 설정한다"
+        );
+    }
+    info!(event = "security.ready", lookup_key_id = %keys.lookup_key_id());
+
     let pool = filegate_db::connect(
         filegate_core::ExposeSecret::expose_secret(&config.database_url),
         config.db_max_connections,
@@ -42,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let state = routes::AppState {
         pool: pool.clone(),
         storage,
+        keys: Arc::new(keys),
     };
     let http_shutdown = shutdown.clone().cancelled_owned();
     let server = async move {

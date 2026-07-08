@@ -4,9 +4,12 @@
 //! 오퍼레이션 구현과 함께 들어온다. 지금은 부팅과 연결 검증에 필요한 값만
 //! 다루며, 오브젝트 스토리지는 단일 provider(env)로 임시 표현한다.
 
+mod security;
+
 use std::net::SocketAddr;
 
 pub use secrecy::{ExposeSecret, SecretString};
+pub use security::{KeyPolicy, HASH_VERSION};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -15,6 +18,10 @@ pub struct Config {
     pub db_max_connections: u32,
     pub log_json: bool,
     pub s3: S3Config,
+    pub lookup_root_key_id: String,
+    pub lookup_root_secret: SecretString,
+    /// 루트 시크릿이 개발용 기본값이면 true — 부팅 시 경고 대상.
+    pub dev_lookup_root: bool,
 }
 
 /// 단일 S3 호환 provider 연결 정보. 3계층 설정이 오면 providers 블록으로 재편된다.
@@ -54,12 +61,22 @@ impl Config {
             force_path_style: env_or("FILEGATE_S3_FORCE_PATH_STYLE", "true") == "true",
         };
 
+        let lookup_root_key_id = env_or("FILEGATE_LOOKUP_ROOT_KEY_ID", "local-dev");
+        let dev_lookup_root = std::env::var("FILEGATE_LOOKUP_ROOT_SECRET").is_err();
+        let lookup_root_secret = SecretString::from(env_or(
+            "FILEGATE_LOOKUP_ROOT_SECRET",
+            "filegate-local-dev-lookup-root-secret",
+        ));
+
         Ok(Self {
             bind_addr,
             database_url,
             db_max_connections,
             log_json,
             s3,
+            lookup_root_key_id,
+            lookup_root_secret,
+            dev_lookup_root,
         })
     }
 }
