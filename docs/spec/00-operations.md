@@ -107,7 +107,7 @@ OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](.
 - **운영자 표면이다. 클라이언트 API가 아니다.** 클라이언트 자격증명으로는 호출할 수 없다. 인증 방식은 구현의 영역이다.
 - 입력: 없음.
 - 출력: provider별 — capacity 한도, 예약량(pending 합), 확정량(active 합), purge 대기 점유(deleted이지만 미purge), 남은 여유. 남은 여유는 이 셋을 모두 뺀 값이다.
-- 회계 시점: 예약은 create, 정산은 commit, 해제는 purge에서 일어난다 (ADR 004). delete는 상태만 바꾸고 점유는 유지한다 — purge까지 물리 점유가 남기 때문이다.
+- 회계 시점: 예약은 create, 정산은 commit, 해제는 purge 또는 pending 만료 회수에서 일어난다 (ADR 004). delete는 상태만 바꾸고 점유는 유지한다 — purge까지 물리 점유가 남기 때문이다.
 - 이 총량이 배치 거부와 tiering 판단의 입력이다.
 
 ## 흐름: 업로드

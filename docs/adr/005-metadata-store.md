@@ -6,7 +6,7 @@
 
 ## 문제
 
-filegate의 진실은 전부 메타데이터다: file/location, lease 원장, capacity 회계. 쓰기 발급은 여러 후보 provider에 걸친 capacity 예약과 file_id 발급을 한 번에 해야 하고, 실패하면 전부 없던 일이 되어야 한다. 상태 전이는 동시 요청과 경합한다. 이 진실을 어디에 둘지 정해야 한다.
+filegate의 진실은 전부 메타데이터다: file/location, lease 원장, capacity 회계. 쓰기 발급은 후보 중 선택한 provider의 capacity 예약과 file_id 발급을 한 번에 해야 하고, 실패하면 전부 없던 일이 되어야 한다. 상태 전이는 동시 요청과 경합한다. 이 진실을 어디에 둘지 정해야 한다.
 
 ## 결정
 
