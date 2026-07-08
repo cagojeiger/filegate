@@ -30,7 +30,8 @@ pub fn app(state: AppState) -> Router {
     // SetRequestId → Trace → Propagate → Timeout → BodyLimit이 되도록 역순으로 쌓는다.
     Router::new()
         .route("/", get(root))
-        .route("/healthz", get(healthz))
+        .route("/health", get(health))
+        .route("/ready", get(ready))
         .with_state(state)
         .layer(RequestBodyLimitLayer::new(CONTROL_BODY_LIMIT))
         .layer(TimeoutLayer::with_status_code(
@@ -49,9 +50,24 @@ async fn root() -> impl IntoResponse {
     }))
 }
 
-async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
+/// Liveness: 프로세스가 살아 있다. 의존성 검사는 하지 않는다 (k8s livenessProbe).
+async fn health() -> impl IntoResponse {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+/// Readiness: DB에 닿을 수 있어야 트래픽을 받는다 (k8s readinessProbe).
+async fn ready(State(state): State<AppState>) -> impl IntoResponse {
     match filegate_db::ping(&state.pool).await {
-        Ok(()) => (StatusCode::OK, "ok"),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "db unreachable"),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "ready" })),
+        ),
+        Err(error) => {
+            tracing::error!(event = "ready.failed", %error);
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "status": "unavailable" })),
+            )
+        }
     }
 }

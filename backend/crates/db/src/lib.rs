@@ -15,7 +15,7 @@ pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
     sqlx::migrate!("./migrations").run(pool).await
 }
 
-/// DB 생존 확인 (healthz용).
+/// DB 생존 확인 (readiness probe용).
 pub async fn ping(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT 1").execute(pool).await.map(|_| ())
 }
@@ -43,7 +43,10 @@ pub async fn reconciler_run_once(pool: &PgPool) -> Result<bool, sqlx::Error> {
     if lock_acquired {
         // 자리표시 잡: lock을 쥔 채 hello-world를 찍고 잠깐 머문다. 스키마가
         // 들어오면 여기가 유계 배치가 된다 (pending 만료 회수 → purge → tiering).
-        tracing::info!(event = "reconciler.job", msg = "hello world — single worker holds the lock");
+        tracing::info!(
+            event = "reconciler.job",
+            msg = "hello world — single worker holds the lock"
+        );
         tokio::time::sleep(RECONCILER_JOB_HOLD).await;
     }
 
