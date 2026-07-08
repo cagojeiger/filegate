@@ -36,6 +36,7 @@ OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](.
 
 - 폴더·배치 업로드. 폴더는 filegate 개념이 아니다. 필요하면 서비스가 단일 업로드를 반복한다 (ADR 000 공리 1).
 - 갱신·재개(resumable) 업로드.
+- 단일 PUT 한계(5GiB)를 넘는 파일. multipart는 다음 범위다 — multipart의 ETag는 MD5가 아니라서 체크섬 대조는 단일 PUT에서만 성립한다 (실측).
 - 위임 토큰.
 - 클라이언트별 quota 집행. 도입하더라도 운영자 내부 가드레일이며 클라이언트에게 노출되지 않는다.
 
@@ -56,6 +57,7 @@ OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](.
 - 입력: intent, 선언 크기. 선택: content_type, 선언 MD5.
   - content_type은 지정하면 서명에 포함되어 강제된다. 서명 밖의 타입 제약은 성립하지 않는다 (실측).
   - 선언 MD5는 commit의 체크섬 대조에 쓴다. 단일 PUT의 ETag = MD5라서 성립한다 (실측).
+- 0바이트도 유효한 선언이다.
 - 처리: 배치 결정, capacity 예약, file_id 발급.
 - capacity는 경성 상한이다: 예약량 + 확정량 + 이번 선언 크기가 상한을 넘으면 발급하지 않는다. 모든 후보 provider가 상한에 걸리면 create는 실패한다. 거부 이유의 용량 상세는 클라이언트에 노출하지 않는다.
 - 출력: file_id, 만료가 있는 PUT URL. URL 구조는 계약이 아니다 — 직결이면 저장소 presigned, 중계면 filegate 바이트 엔드포인트다.
@@ -69,12 +71,13 @@ OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](.
 - 처리: 저장소 실물 크기를 선언 크기와 대조하고 정산한다. 선언 MD5가 있으면 ETag와도 대조한다. 확정 시점의 ETag를 기록한다.
 - 출력: 확정 결과.
 - 상태: `pending` → `active`. 검증 실패 시 확정하지 않는다.
+- 쓰기 URL은 확정 후에도 만료 전까지 재사용될 수 있다 (실측). 쓰기 TTL을 짧게 두고, 변조 의심은 기록된 ETag와 대조해 판정한다.
 
 ### read
 
 읽기 lease를 발급한다.
 
-- 입력: file_id.
+- 입력: file_id. 선택: 표현(파일명, 표시 방식) — RFC 5987(`filename*=UTF-8''…`)로 인코딩해 넘긴다 (ADR 003, 실측).
 - 처리: 현재 location을 재해석한다. 파일이 이동했어도 같은 file_id로 접근한다.
 - 출력: 만료가 있는 GET URL. 서비스는 이 URL로 302 redirect한다. URL 구조는 계약이 아니다.
 - 읽기는 용량을 소비하지 않는다.
@@ -87,6 +90,15 @@ OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](.
 - 출력: 상태(`pending` | `active` | `deleted`), 크기, intent. location과 URL은 반환하지 않는다.
 - 클라이언트는 자기 소유 file_id만 조회한다.
 
+### delete
+
+삭제를 결정한다.
+
+- 입력: file_id.
+- 처리: 서비스의 detach 결정을 기록한다. 실제 물리 purge는 reconciler가 요청 경로 밖에서 집행한다 (ADR 000 결정·집행 분리).
+- 상태: `active` → `deleted`. 이후 read·commit은 실패한다.
+- 정산: capacity는 purge 시점에 해제한다. purge는 멱등하다 — 없는 객체 삭제는 에러가 아니다 (실측).
+
 ### usage
 
 운영자 관점의 용량 총량을 조회한다. provider마다 지금 대략 얼마나 저장돼 있는지가 질문이다.
@@ -96,15 +108,6 @@ OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](.
 - 출력: provider별 — capacity 한도, 예약량(pending 합), 확정량(active 합), 남은 여유.
 - 회계 시점: 예약은 create, 정산은 commit, 해제는 purge에서 일어난다 (ADR 004).
 - 이 총량이 배치 거부와 tiering 판단의 입력이다.
-
-### delete
-
-삭제를 결정한다.
-
-- 입력: file_id.
-- 처리: 서비스의 detach 결정을 기록한다. 실제 물리 purge는 reconciler가 요청 경로 밖에서 집행한다 (ADR 000 결정·집행 분리).
-- 상태: `active` → `deleted`. 이후 read·commit은 실패한다.
-- 정산: capacity는 purge 시점에 해제한다.
 
 ## 흐름: 업로드
 
@@ -169,12 +172,6 @@ create ──▶ pending ──commit──▶ active ──delete──▶ dele
 ## 경계선
 
 - create와 commit은 별개 호출이다. 업로드 한 번은 호출 두 번이다.
-- 직결 PUT은 크기를 앞단에서 막지 못한다. commit이 사후 검증 게이트다 (presigned PUT 기준. POST policy는 업로드 시점 크기 강제가 가능하나 지원 편차가 있다).
-- capacity 상한은 경성이다. 상한을 넘는 실물은 파일이 될 수 없다 — 선언보다 큰 업로드는 commit이 거부하고 reconciler가 회수한다. 직결 모드에서는 회수 전까지 초과 바이트가 잠시 물리적으로 존재할 수 있다 (실측 — presigned PUT은 크기를 못 막는다). 중계 모드는 선언 크기에서 스트림을 차단한다.
-- 쓰기 URL은 commit 후에도 만료 전까지 재사용될 수 있다 (실측). 쓰기 TTL을 짧게 두고, 변조 의심은 commit이 기록한 ETag와 대조해 판정한다.
+- 직결 PUT은 크기를 앞단에서 막지 못한다 (실측). commit이 사후 검증 게이트다 (POST policy는 업로드 시점 크기 강제가 가능하나 지원 편차가 있다). 상한을 넘는 실물은 파일이 될 수 없다 — commit이 거부하고 reconciler가 회수하며, 회수 전까지 초과 바이트가 잠시 물리적으로 존재할 수 있다. 중계 모드는 선언 크기에서 스트림을 차단한다.
 - 전송 주체는 Content-Length를 보내야 한다. 길이 미상(chunked) 전송은 저장소가 거부한다 (실측).
-- 0바이트 파일은 허용한다. 선언 크기 0도 유효한 선언이다.
-- 파일명 표현은 RFC 5987(`filename*=UTF-8''…`)로 인코딩해 넘긴다.
-- 단일 PUT 한계(5GiB)를 넘는 선언 크기는 이번 범위 밖이다. multipart는 다음 범위이며, multipart의 ETag는 MD5가 아니므로 체크섬 대조는 단일 PUT에서만 성립한다 (실측).
-- 삭제는 결정만 동기다. 물리 purge와 용량 해제는 reconciler가 비동기로 집행한다. purge는 멱등하다 — 없는 객체 삭제는 에러가 아니다 (실측).
 - 중계 바이트 엔드포인트의 상세(PUT/GET/OPTIONS, CORS 응답, 스트림 중 크기 차단, fs의 임시 경로 + rename 원자성)는 spec 01로 둔다.
