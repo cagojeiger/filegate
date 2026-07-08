@@ -4,6 +4,7 @@
 mod reconciler;
 mod routes;
 
+use std::io;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -13,6 +14,10 @@ use tracing::info;
 async fn main() -> anyhow::Result<()> {
     let config = filegate_core::Config::load()?;
     init_tracing(config.log_json);
+
+    // 시그널 핸들러는 부팅 초기에 설치한다. 설치가 실패하면 graceful
+    // shutdown이 불가능한 프로세스가 되므로 부팅 자체를 중단한다.
+    let mut signals = ShutdownSignals::install()?;
 
     let pool = filegate_db::connect(
         filegate_core::ExposeSecret::expose_secret(&config.database_url),
@@ -34,54 +39,75 @@ async fn main() -> anyhow::Result<()> {
     let shutdown = CancellationToken::new();
     let worker = reconciler::spawn(pool.clone(), shutdown.clone());
 
-    {
-        let shutdown = shutdown.clone();
-        tokio::spawn(async move {
-            wait_for_signal().await;
-            info!(event = "server.shutting_down");
-            shutdown.cancel();
-        });
-    }
-
     let state = routes::AppState {
         pool: pool.clone(),
         storage,
     };
-    let serve_result = axum::serve(listener, routes::app(state))
-        .with_graceful_shutdown(shutdown.clone().cancelled_owned())
-        .await;
+    let http_shutdown = shutdown.clone().cancelled_owned();
+    let server = async move {
+        axum::serve(listener, routes::app(state))
+            .with_graceful_shutdown(http_shutdown)
+            .await
+    };
+    tokio::pin!(server);
 
+    // 서버가 스스로 끝나거나(에러), 종료 시그널이 오거나.
+    let server_result: Option<io::Result<()>> = tokio::select! {
+        result = &mut server => Some(result),
+        () = signals.wait() => None,
+    };
+
+    info!(event = "server.shutting_down");
     shutdown.cancel();
+
+    // 시그널로 나온 경우 진행 중 요청의 드레인을 끝까지 기다린다.
+    let server_result = match server_result {
+        Some(result) => result,
+        None => server.await,
+    };
+
     if let Err(error) = worker.await {
         tracing::warn!(event = "reconciler.join_failed", %error);
     }
     pool.close().await;
-    serve_result?;
+    info!(event = "shutdown.complete");
+
+    server_result?;
     Ok(())
 }
 
-/// SIGINT(Ctrl-C)와 SIGTERM(컨테이너 종료) 둘 다 기다린다.
-async fn wait_for_signal() {
-    let ctrl_c = tokio::signal::ctrl_c();
+/// SIGINT(Ctrl-C)와 SIGTERM(컨테이너 종료)을 함께 기다린다.
+struct ShutdownSignals {
     #[cfg(unix)]
-    {
-        let mut sigterm =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(signal) => signal,
-                Err(error) => {
-                    tracing::error!(event = "signal.install_failed", %error);
-                    let _ = ctrl_c.await;
-                    return;
-                }
-            };
-        tokio::select! {
-            _ = ctrl_c => {}
-            _ = sigterm.recv() => {}
+    sigterm: tokio::signal::unix::Signal,
+}
+
+impl ShutdownSignals {
+    fn install() -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            let sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            Ok(Self { sigterm })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {})
         }
     }
-    #[cfg(not(unix))]
-    {
-        let _ = ctrl_c.await;
+
+    async fn wait(&mut self) {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = self.sigterm.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
     }
 }
 

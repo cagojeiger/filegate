@@ -48,6 +48,19 @@ MCP 표면이 필요해지면 형제와 같은 `rmcp`를 쓴다.
 
 filegate의 reconciler 잡: pending 만료 회수(capacity 해제), deleted purge(물리 삭제 + 해제), 이후 tiering. 주의: fs/NFS provider를 멀티 파드로 쓰려면 모든 파드가 같은 마운트를 공유해야 한다 — 중계 요청이 어느 파드로 와도 같은 파일에 닿아야 하고, 임시 경로 + rename 원자성은 같은 마운트 안에서만 성립한다.
 
+## 비밀 저장 (notegate 검증 패턴, `core/security.rs` 참조)
+
+DB에 평문 비밀을 저장하지 않는다. notegate의 체계를 그대로 가져온다:
+
+- **루트 시크릿 2개**: ENC(암호화)·LOOKUP(해시) 루트를 env로 받고 각각 key_id를 가진다. 같은 값 재사용은 설정 검증 에러. 최소 32바이트.
+- **루트는 직접 쓰지 않는다.** HKDF-SHA256으로 용도별 라벨(`filegate/lookup/client-key-hmac/v1` 식)마다 서브키를 파생한다.
+- **검증만 필요한 값은 HMAC 해시로 저장한다**: 클라이언트 정적 키, 중계 lease secret. 행에 `hash_key_id`·`hash_version`을 같이 기록해 이중 키 회전을 지원한다 (notegate api_key_repo 패턴: prefix + hash + key_id + version).
+- **복원이 필요한 값만 AES-256-GCM**으로, AAD에 문맥(app·field·행 id·key_id·version)을 바인딩한다. 현 설계에서 DB에 이런 값은 없다 — provider 자격증명은 DB가 아니라 배포 설정에 산다 (ADR 004).
+
+크레이트: `hkdf`, `hmac`, `sha2`, `aes-gcm`, `secrecy` — 클라이언트 키 스키마가 들어올 때 함께 추가한다.
+
+구현 단계에서 notegate에서 더 가져올 것: `core/error.rs`(thiserror 에러 체계), `validator` 기반 설정 검증(시크릿 길이·key_id 형식), 필요 시 `moka` 캐시.
+
 ## 빌드 규율 (형제 공통)
 
 - clippy `warn`: `unwrap_used`, `expect_used`, `panic`, `todo`, `unreachable`, `indexing_slicing`, `unwrap_in_result`, `await_holding_lock`.
