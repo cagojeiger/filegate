@@ -37,6 +37,7 @@ OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](.
 - 폴더·배치 업로드. 폴더는 filegate 개념이 아니다. 필요하면 서비스가 단일 업로드를 반복한다 (ADR 000 공리 1).
 - 갱신·재개(resumable) 업로드.
 - 위임 토큰.
+- 클라이언트별 quota 집행과 조회. 이번 범위의 회계는 capacity(provider별 물리 총량) 한 축이다. ADR 004의 이중 회계는 방향으로 유지하고, 물리 축을 먼저 구현한다.
 
 ## 공통 원칙
 
@@ -54,7 +55,8 @@ OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](.
 - 입력: intent, 선언 크기. 선택: content_type, 선언 MD5.
   - content_type은 지정하면 서명에 포함되어 강제된다. 서명 밖의 타입 제약은 성립하지 않는다 (실측).
   - 선언 MD5는 commit의 체크섬 대조에 쓴다. 단일 PUT의 ETag = MD5라서 성립한다 (실측).
-- 처리: 배치 결정, quota와 capacity 예약, file_id 발급. 한쪽이라도 부족하면 발급을 거부한다 (ADR 004).
+- 처리: 배치 결정, capacity 예약, file_id 발급.
+- capacity는 경성 상한이다: 예약량 + 확정량 + 이번 선언 크기가 상한을 넘으면 발급하지 않는다. 모든 후보 provider가 상한에 걸리면 create는 실패한다.
 - 출력: file_id, 만료가 있는 PUT URL. URL 구조는 계약이 아니다 — 직결이면 저장소 presigned, 중계면 filegate 바이트 엔드포인트다.
 - 상태: 파일은 `pending`. commit 전까지 파일이 아니며, lease 만료 시 회수된다.
 
@@ -86,12 +88,13 @@ OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](.
 
 ### usage
 
-클라이언트 자신의 용량 회계를 조회한다.
+운영자 관점의 용량 총량을 조회한다. provider마다 지금 대략 얼마나 저장돼 있는지가 질문이다.
 
-- 입력: 없음. 클라이언트 인증이 대상을 결정한다.
-- 출력: quota 한도, 예약량(pending 합), 확정량(active 합), 남은 몫.
+- 입력: 없음.
+- 출력: provider별 — capacity 한도, 예약량(pending 합), 확정량(active 합), 남은 여유.
 - 회계 시점: 예약은 create, 정산은 commit, 해제는 purge에서 일어난다 (ADR 004).
-- 다른 클라이언트의 사용량은 볼 수 없다. 운영자 시점(공간별 합산)은 이번 범위 밖이다.
+- 이 총량이 배치 거부와 tiering 판단의 입력이다.
+- 클라이언트별 몫(quota)의 집행과 조회는 다음 범위다.
 
 ### delete
 
@@ -100,7 +103,7 @@ OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](.
 - 입력: file_id.
 - 처리: 서비스의 detach 결정을 기록한다. 실제 물리 purge는 reconciler가 요청 경로 밖에서 집행한다 (ADR 000 결정·집행 분리).
 - 상태: `active` → `deleted`. 이후 read·commit은 실패한다.
-- 정산: quota와 capacity는 purge 시점에 해제한다.
+- 정산: capacity는 purge 시점에 해제한다.
 
 ## 흐름: 업로드
 
@@ -117,7 +120,7 @@ sequenceDiagram
     U->>S: 업로드 요청
     S->>S: 유저 권한 확인 (서비스 몫)
     S->>F: create(intent, 크기)
-    F->>F: 배치 결정 + quota/capacity 예약
+    F->>F: 배치 결정 + capacity 예약
     F-->>S: file_id + PUT URL
     S-->>U: PUT URL 위임
     U->>O: 바이트 직접 PUT
@@ -164,6 +167,7 @@ create ──▶ pending ──commit──▶ active ──delete──▶ dele
 
 - create와 commit은 별개 호출이다. 업로드 한 번은 호출 두 번이다.
 - 직결 PUT은 크기를 앞단에서 막지 못한다. commit이 사후 검증 게이트다 (presigned PUT 기준. POST policy는 업로드 시점 크기 강제가 가능하나 지원 편차가 있다).
+- capacity 상한은 경성이다. 상한을 넘는 실물은 파일이 될 수 없다 — 선언보다 큰 업로드는 commit이 거부하고 reconciler가 회수한다. 직결 모드에서는 회수 전까지 초과 바이트가 잠시 물리적으로 존재할 수 있다 (실측 — presigned PUT은 크기를 못 막는다). 중계 모드는 선언 크기에서 스트림을 차단한다.
 - 쓰기 URL은 commit 후에도 만료 전까지 재사용될 수 있다 (실측). 쓰기 TTL을 짧게 두고, 변조 의심은 commit이 기록한 ETag와 대조해 판정한다.
 - 전송 주체는 Content-Length를 보내야 한다. 길이 미상(chunked) 전송은 저장소가 거부한다 (실측).
 - 0바이트 파일은 허용한다. 선언 크기 0도 유효한 선언이다.
