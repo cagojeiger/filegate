@@ -1,0 +1,10 @@
+[package]
+name = "filegate-model"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[lints]
+workspace = true
