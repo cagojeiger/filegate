@@ -35,6 +35,19 @@ MCP 표면이 필요해지면 형제와 같은 `rmcp`를 쓴다.
 - **core** 도메인 로직·불변식, **model** 타입, **db** sqlx 접근, **service** 오케스트레이션, **api** axum 핸들러.
 - provider adapter(s3, fs)는 저장소 경계이므로 `infra` 크레이트 또는 `service` 하위에 둔다 — 구현 시 결정.
 
+## 멀티 파드와 단일 워커 (notegate 검증 패턴)
+
+여러 파드로 떠도 reconciler는 DB당 하나만 돌아야 한다. notegate의 purge worker 패턴을 그대로 쓴다 (`purge_worker.rs` + `purge_repo.rs`).
+
+- **API 경로는 무상태 수평 확장.** 회계 원자성과 상태 전이 경합은 PG 트랜잭션·조건부 갱신이 담당하므로 파드 수와 무관하다 (ADR 004).
+- **워커는 모든 파드가 spawn하고, 실행은 락이 고른다.** 매 tick마다 트랜잭션을 열고 `pg_try_advisory_xact_lock(고정 i64 키)`을 시도한다. 못 잡으면 다른 파드가 돌고 있다는 뜻 — 조용히 skip. 리더 선출·전용 워커 배포가 따로 없다.
+- **잠금은 자가 회복이다.** xact 락은 트랜잭션 종료(커밋·롤백·커넥션 사망) 시 자동 해제라, 워커 파드가 죽어도 갱신·정리 절차 없이 다음 tick에 다른 파드가 이어받는다.
+- **루프 형태**: `tokio::time::interval` + `MissedTickBehavior::Delay` + `CancellationToken` graceful shutdown.
+- **배치는 유계**: CTE + `LIMIT`으로 한 run에 조금씩. run 결과는 tracing 구조화 로그로.
+- **부팅 배선** (notegate main.rs 순서): config 로드 → PG 연결·마이그레이션 → 상태 구성 → HTTP listen + worker spawn → `tokio::select`로 종료 신호 대기 → HTTP부터 순차 shutdown.
+
+filegate의 reconciler 잡: pending 만료 회수(capacity 해제), deleted purge(물리 삭제 + 해제), 이후 tiering. 주의: fs/NFS provider를 멀티 파드로 쓰려면 모든 파드가 같은 마운트를 공유해야 한다 — 중계 요청이 어느 파드로 와도 같은 파일에 닿아야 하고, 임시 경로 + rename 원자성은 같은 마운트 안에서만 성립한다.
+
 ## 빌드 규율 (형제 공통)
 
 - clippy `warn`: `unwrap_used`, `expect_used`, `panic`, `todo`, `unreachable`, `indexing_slicing`, `unwrap_in_result`, `await_holding_lock`.
