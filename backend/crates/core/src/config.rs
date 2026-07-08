@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
@@ -99,16 +99,25 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
+        if self.database.url.expose_secret().trim().is_empty() {
+            return Err(Error::config("database.url is empty"));
+        }
         if self.providers.is_empty() {
             return Err(Error::config("at least one provider must be configured"));
         }
         for (id, provider) in &self.providers {
-            if provider.bucket.trim().is_empty() {
-                return Err(Error::config(format!("provider '{id}': bucket is empty")));
-            }
-            if provider.endpoint.trim().is_empty() {
-                return Err(Error::config(format!("provider '{id}': endpoint is empty")));
-            }
+            let require = |field: &str, value: &str| {
+                if value.trim().is_empty() {
+                    Err(Error::config(format!("provider '{id}': {field} is empty")))
+                } else {
+                    Ok(())
+                }
+            };
+            require("endpoint", &provider.endpoint)?;
+            require("region", &provider.region)?;
+            require("access_key", &provider.access_key)?;
+            require("secret_key", provider.secret_key.expose_secret())?;
+            require("bucket", &provider.bucket)?;
         }
         Ok(())
     }
@@ -155,5 +164,19 @@ providers:
     fn unknown_field_is_rejected() {
         let yaml = format!("{SAMPLE}unexpected: true\n");
         assert!(Config::parse(&yaml).is_err());
+    }
+
+    #[test]
+    fn empty_required_provider_field_is_rejected() {
+        let yaml = SAMPLE.replace("access_key: filegate", "access_key: \"\"");
+        assert!(Config::parse(&yaml).is_err());
+    }
+
+    #[test]
+    fn debug_does_not_leak_secrets() {
+        let config = Config::parse(SAMPLE).unwrap();
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("filegate-secret"));
+        assert!(!rendered.contains("postgres://filegate:filegate"));
     }
 }

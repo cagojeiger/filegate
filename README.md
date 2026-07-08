@@ -8,10 +8,17 @@
 
 ## 개발 환경
 
+설정은 `filegate.yaml`에 있다 (로컬 개발 기본값 커밋됨). 프로덕션은 자기 설정을 별도로 두고 `FILEGATE_CONFIG`로 가리킨다. 설정이 없으면 부팅이 명확한 에러로 실패한다.
+
 ```sh
 docker compose up -d          # MinIO(9000/9001) + PostgreSQL(55432)
-cp .env.example .env          # 필요 시 값 조정
-cargo run --bin filegate      # http://127.0.0.1:8080
+cargo run --bin filegate      # filegate.yaml 로드, http://127.0.0.1:8080
+```
+
+컨테이너로 띄울 때는 설정을 마운트한다:
+
+```sh
+docker run -v ./filegate.yaml:/etc/filegate/filegate.yaml filegate:dev
 ```
 
 확인:
