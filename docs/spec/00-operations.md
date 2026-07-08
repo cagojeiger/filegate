@@ -15,6 +15,7 @@
 - 단일 파일 다운로드 (`read`)
 - 조회 (`stat`)
 - 삭제 (`delete`)
+- 사용량 조회 (`usage`)
 
 접근 모드는 둘 다 지원한다:
 
@@ -53,7 +54,7 @@ OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](.
 - 입력: intent, 선언 크기. 선택: content_type, 선언 MD5.
   - content_type은 지정하면 서명에 포함되어 강제된다. 서명 밖의 타입 제약은 성립하지 않는다 (실측).
   - 선언 MD5는 commit의 체크섬 대조에 쓴다. 단일 PUT의 ETag = MD5라서 성립한다 (실측).
-- 처리: 배치 결정, quota와 capacity 예약, file_id 발급.
+- 처리: 배치 결정, quota와 capacity 예약, file_id 발급. 한쪽이라도 부족하면 발급을 거부한다 (ADR 004).
 - 출력: file_id, 만료가 있는 PUT URL. URL 구조는 계약이 아니다 — 직결이면 저장소 presigned, 중계면 filegate 바이트 엔드포인트다.
 - 상태: 파일은 `pending`. commit 전까지 파일이 아니며, lease 만료 시 회수된다.
 
@@ -82,6 +83,15 @@ OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](.
 - 입력: file_id.
 - 출력: 상태(`pending` | `active` | `deleted`), 크기, intent. location과 URL은 반환하지 않는다.
 - 클라이언트는 자기 소유 file_id만 조회한다.
+
+### usage
+
+클라이언트 자신의 용량 회계를 조회한다.
+
+- 입력: 없음. 클라이언트 인증이 대상을 결정한다.
+- 출력: quota 한도, 예약량(pending 합), 확정량(active 합), 남은 몫.
+- 회계 시점: 예약은 create, 정산은 commit, 해제는 purge에서 일어난다 (ADR 004).
+- 다른 클라이언트의 사용량은 볼 수 없다. 운영자 시점(공간별 합산)은 이번 범위 밖이다.
 
 ### delete
 
