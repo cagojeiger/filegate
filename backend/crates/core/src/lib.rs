@@ -65,3 +65,18 @@ impl Config {
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_uses_local_defaults() -> anyhow::Result<()> {
+        let config = Config::load()?;
+        assert_eq!(config.db_max_connections, 5);
+        assert!(config.database_url.starts_with("postgres://"));
+        assert_eq!(config.s3.bucket, "filegate-std");
+        assert!(config.s3.force_path_style);
+        Ok(())
+    }
+}
