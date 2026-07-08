@@ -9,6 +9,13 @@ services:
     ports:
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - minio-data:/data
 
   postgres:
     image: postgres:17-alpine
@@ -18,3 +25,14 @@ services:
       POSTGRES_DB: filegate
     ports:
       - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "filegate", "-d", "filegate"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+
+volumes:
+  minio-data:
+  pg-data:

@@ -6,10 +6,12 @@
 
 use std::net::SocketAddr;
 
+pub use secrecy::{ExposeSecret, SecretString};
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bind_addr: SocketAddr,
-    pub database_url: String,
+    pub database_url: SecretString,
     pub db_max_connections: u32,
     pub log_json: bool,
     pub s3: S3Config,
@@ -21,7 +23,7 @@ pub struct S3Config {
     pub endpoint: String,
     pub region: String,
     pub access_key: String,
-    pub secret_key: String,
+    pub secret_key: SecretString,
     pub bucket: String,
     pub force_path_style: bool,
 }
@@ -32,10 +34,10 @@ impl Config {
         let _ = dotenvy::dotenv();
 
         let bind_addr = env_or("FILEGATE_BIND", "127.0.0.1:8080").parse()?;
-        let database_url = env_or(
+        let database_url = SecretString::from(env_or(
             "FILEGATE_DATABASE_URL",
             "postgres://filegate:filegate@127.0.0.1:55432/filegate",
-        );
+        ));
         let db_max_connections = std::env::var("FILEGATE_DB_MAX_CONNECTIONS")
             .ok()
             .map(|v| v.parse())
@@ -47,7 +49,7 @@ impl Config {
             endpoint: env_or("FILEGATE_S3_ENDPOINT", "http://127.0.0.1:9000"),
             region: env_or("FILEGATE_S3_REGION", "us-east-1"),
             access_key: env_or("FILEGATE_S3_ACCESS_KEY", "filegate"),
-            secret_key: env_or("FILEGATE_S3_SECRET_KEY", "filegate-secret"),
+            secret_key: SecretString::from(env_or("FILEGATE_S3_SECRET_KEY", "filegate-secret")),
             bucket: env_or("FILEGATE_S3_BUCKET", "filegate-std"),
             force_path_style: env_or("FILEGATE_S3_FORCE_PATH_STYLE", "true") == "true",
         };
@@ -74,7 +76,10 @@ mod tests {
     fn load_uses_local_defaults() -> anyhow::Result<()> {
         let config = Config::load()?;
         assert_eq!(config.db_max_connections, 5);
-        assert!(config.database_url.starts_with("postgres://"));
+        assert!(config
+            .database_url
+            .expose_secret()
+            .starts_with("postgres://"));
         assert_eq!(config.s3.bucket, "filegate-std");
         assert!(config.s3.force_path_style);
         Ok(())

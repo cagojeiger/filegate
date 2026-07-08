@@ -33,8 +33,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM chef AS builder
 
 COPY --from=planner /app/recipe.json recipe.json
-# sqlx 매크로는 커밋된 .sqlx 메타데이터로 검사한다 (라이브 DB 불필요).
-ENV SQLX_OFFLINE=true
+# sqlx query! 매크로를 쓰기 시작하면 SQLX_OFFLINE=true + .sqlx 메타데이터 COPY가 여기 들어온다.
 RUN --mount=type=cache,id=filegate-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=filegate-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=filegate-sccache,target=/sccache,sharing=locked \

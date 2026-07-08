@@ -1,7 +1,7 @@
 //! S3 호환 클라이언트 구성과 부팅 시 연결 검증.
 
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
-use filegate_core::S3Config;
+use filegate_core::{ExposeSecret, S3Config};
 
 #[derive(Debug, Clone)]
 pub struct S3Storage {
@@ -16,7 +16,7 @@ pub struct S3Storage {
 pub async fn connect(cfg: &S3Config) -> anyhow::Result<S3Storage> {
     let credentials = Credentials::new(
         cfg.access_key.clone(),
-        cfg.secret_key.clone(),
+        cfg.secret_key.expose_secret().to_owned(),
         None,
         None,
         "filegate-config",

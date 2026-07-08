@@ -24,18 +24,20 @@ pub struct AppState {
 }
 
 pub fn app(state: AppState) -> Router {
+    // Router::layer는 나중에 추가한 레이어가 바깥이다. 요청 기준 실행 순서가
+    // SetRequestId → Trace → Propagate → Timeout → BodyLimit이 되도록 역순으로 쌓는다.
     Router::new()
         .route("/", get(root))
         .route("/healthz", get(healthz))
         .with_state(state)
-        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-        .layer(TraceLayer::new_for_http())
-        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(RequestBodyLimitLayer::new(CONTROL_BODY_LIMIT))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,
         ))
-        .layer(RequestBodyLimitLayer::new(CONTROL_BODY_LIMIT))
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(TraceLayer::new_for_http())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
 }
 
 async fn root() -> impl IntoResponse {
