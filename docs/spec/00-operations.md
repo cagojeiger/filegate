@@ -37,6 +37,7 @@ OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](.
 - 폴더·배치 업로드. 폴더는 filegate 개념이 아니다. 필요하면 서비스가 단일 업로드를 반복한다 (ADR 000 공리 1).
 - 갱신·재개(resumable) 업로드.
 - 단일 PUT 한계(5GiB)를 넘는 파일. multipart는 다음 범위다 — multipart의 ETag는 MD5가 아니라서 체크섬 대조는 단일 PUT에서만 성립한다 (실측).
+- 명시적 lease 취소. pending은 lease 만료로만 회수한다. 발급 전 취소가 필요해지면 다음 범위에서 오퍼레이션으로 추가한다.
 - 위임 토큰.
 - 클라이언트별 quota 집행. 도입하더라도 운영자 내부 가드레일이며 클라이언트에게 노출되지 않는다.
 
@@ -59,9 +60,9 @@ OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](.
   - 선언 MD5는 commit의 체크섬 대조에 쓴다. 단일 PUT의 ETag = MD5라서 성립한다 (실측).
 - 0바이트도 유효한 선언이다.
 - 처리: 배치 결정, capacity 예약, file_id 발급.
-- capacity는 경성 상한이다: 예약량 + 확정량 + 이번 선언 크기가 상한을 넘으면 발급하지 않는다. 모든 후보 provider가 상한에 걸리면 create는 실패한다. 거부 이유의 용량 상세는 클라이언트에 노출하지 않는다.
+- capacity는 경성 상한이다: 예약량 + 확정량 + purge 대기 점유 + 이번 선언 크기가 상한을 넘으면 발급하지 않는다. purge 대기 점유를 세는 이유는 용량 = 물리적 점유(purge 전까지)이기 때문이다 (ADR 002). 모든 후보 provider가 상한에 걸리면 create는 실패한다. 거부 이유의 용량 상세는 클라이언트에 노출하지 않는다.
 - 출력: file_id, 만료가 있는 PUT URL. URL 구조는 계약이 아니다 — 직결이면 저장소 presigned, 중계면 filegate 바이트 엔드포인트다.
-- 상태: 파일은 `pending`. commit 전까지 파일이 아니며, lease 만료 시 회수된다.
+- 상태: 파일은 `pending`. commit 전까지 파일이 아니며, lease 만료 시 회수된다. 회수 시 예약한 capacity를 해제한다.
 
 ### commit
 
@@ -70,7 +71,7 @@ OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](.
 - 입력: file_id.
 - 처리: 저장소 실물 크기를 선언 크기와 대조하고 정산한다. 선언 MD5가 있으면 ETag와도 대조한다. 확정 시점의 ETag를 기록한다.
 - 출력: 확정 결과.
-- 상태: `pending` → `active`. 검증 실패 시 확정하지 않는다.
+- 상태: `pending` → `active`. 검증 실패 시 확정하지 않는다. 파일은 `pending`에 남아 lease 만료까지 재시도할 수 있고, 만료되면 회수된다.
 - 쓰기 URL은 확정 후에도 만료 전까지 재사용될 수 있다 (실측). 쓰기 TTL을 짧게 두고, 변조 의심은 기록된 ETag와 대조해 판정한다.
 
 ### read
@@ -105,8 +106,8 @@ OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](.
 
 - **운영자 표면이다. 클라이언트 API가 아니다.** 클라이언트 자격증명으로는 호출할 수 없다. 인증 방식은 구현의 영역이다.
 - 입력: 없음.
-- 출력: provider별 — capacity 한도, 예약량(pending 합), 확정량(active 합), 남은 여유.
-- 회계 시점: 예약은 create, 정산은 commit, 해제는 purge에서 일어난다 (ADR 004).
+- 출력: provider별 — capacity 한도, 예약량(pending 합), 확정량(active 합), purge 대기 점유(deleted이지만 미purge), 남은 여유. 남은 여유는 이 셋을 모두 뺀 값이다.
+- 회계 시점: 예약은 create, 정산은 commit, 해제는 purge에서 일어난다 (ADR 004). delete는 상태만 바꾸고 점유는 유지한다 — purge까지 물리 점유가 남기 때문이다.
 - 이 총량이 배치 거부와 tiering 판단의 입력이다.
 
 ## 흐름: 업로드
@@ -165,9 +166,10 @@ create ──▶ pending ──commit──▶ active ──delete──▶ dele
              └── lease 만료 ──▶ 회수
 ```
 
-- `pending`: 발급됨, 미확정. capacity 예약 상태.
+- `pending`: 발급됨, 미확정. capacity 예약 상태. 검증 실패한 commit도 여기 남는다 — 별도 실패 상태는 두지 않고 lease 만료 회수로 정리한다.
 - `active`: 확정됨. read 가능.
-- `deleted`: detach 결정됨. read·commit 실패. purge 대기.
+- `deleted`: detach 결정됨. read·commit 실패. purge 대기. purge 전까지 capacity를 계속 점유한다.
+- 예약한 capacity는 두 지점에서 해제된다: pending의 lease 만료 회수, deleted의 purge. commit은 예약을 확정으로 정산한다.
 
 ## 경계선
 
