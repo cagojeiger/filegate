@@ -890,6 +890,8 @@ name = "filegate-db"
 version = "0.1.0"
 dependencies = [
  "sqlx",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
