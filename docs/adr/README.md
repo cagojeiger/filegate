@@ -1,6 +1,6 @@
 # ADR
 
-ADR은 방향, 구조, 원칙만 담는다. 구현 세부사항은 코드에 둔다. 가격처럼 변하는 외부 사실은 `docs/vendors/`에 둔다.
+ADR은 방향, 구조, 원칙만 담는다. 범위별 오퍼레이션 계약은 [docs/spec/](../spec/00-operations.md)에, 가격처럼 변하는 외부 사실은 [docs/vendors/](../vendors/README.md)에 둔다. 구현 세부사항은 코드에 둔다.
 
 ## 용어
 

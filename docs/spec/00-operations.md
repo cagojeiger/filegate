@@ -2,10 +2,10 @@
 
 - Status: Draft
 - Date: 2026-07-07
-- 근거: ADR [000](../adr/000-identity.md), [002](../adr/002-lease-model.md), [003](../adr/003-url-ownership.md)
+- 근거: ADR [000](../adr/000-identity.md), [001](../adr/001-multi-provider.md), [002](../adr/002-lease-model.md), [003](../adr/003-url-ownership.md), [004](../adr/004-config-layers.md)
 - 실측: 2026-07-08, MinIO 싱글노드(마지막 커뮤니티 릴리스). "(실측)" 표기는 이 확인에서 나온 사실이다
 
-이 문서는 filegate가 이번 범위에서 지원하는 오퍼레이션을 정한다. 단일 파일 업로드와 다운로드, 그리고 그에 필요한 조회와 삭제만 다룬다.
+이 문서는 filegate가 이번 범위에서 지원하는 오퍼레이션을 정한다. 단일 파일 업로드와 다운로드, 그에 필요한 조회와 삭제, 그리고 운영자의 용량 조회를 다룬다.
 
 ## 범위
 
@@ -37,15 +37,15 @@ OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](.
 - 폴더·배치 업로드. 폴더는 filegate 개념이 아니다. 필요하면 서비스가 단일 업로드를 반복한다 (ADR 000 공리 1).
 - 갱신·재개(resumable) 업로드.
 - 위임 토큰.
-- 클라이언트별 quota 집행. 도입하더라도 운영자 내부 가드레일이며 클라이언트에게 노출되지 않는다. 이번 범위의 회계는 capacity(provider별 물리 총량) 한 축이다.
+- 클라이언트별 quota 집행. 도입하더라도 운영자 내부 가드레일이며 클라이언트에게 노출되지 않는다.
 
 ## 공통 원칙
 
 - 권한 검사는 서비스가 오퍼레이션 호출 전에 한다. filegate에는 유저 개념이 없다 (공리 1).
 - 바이트는 전송 주체와 저장소 사이에서 직접 오가는 것이 기본이다. filegate는 발급·기록·검증만 한다 (공리 2). 직접이 불가능한 provider는 filegate가 중계한다 — 계약은 같다.
 - 서비스가 영속화하는 filegate 산출물은 file_id뿐이다. URL은 저장하지 않는다 (ADR 003).
-- 모든 오퍼레이션은 등록된 클라이언트 인증 뒤에 있다. 익명 API는 없다. 예외는 둘: 중계 바이트 엔드포인트(lease별 secret 검증, ADR 003)와 usage(운영자 표면).
-- 용량은 운영자의 세계다. 클라이언트는 어떤 오퍼레이션에서도 용량 정보를 받지 않는다. 자기 사용량 관리가 필요한 서비스는 스스로 한다 (공리 1).
+- 모든 오퍼레이션은 등록된 클라이언트 인증 뒤에 있다. 예외는 둘 — 중계 바이트 엔드포인트는 lease별 secret으로, usage는 운영자 인증으로 지킨다. 익명 표면은 없다 (ADR 003).
+- 용량은 운영자의 세계다. 클라이언트는 어떤 오퍼레이션에서도 용량 정보를 받지 않는다. 자기 사용량 관리가 필요한 서비스는 스스로 한다 (공리 1). 이번 범위의 회계는 capacity(provider별 물리 총량) 한 축이다.
 
 ## 오퍼레이션
 
@@ -134,6 +134,8 @@ sequenceDiagram
 
 ## 흐름: 다운로드
 
+업로드와 같은 원칙이다: 아래는 직결 모드고, 중계 모드에서는 저장소(O) 자리에 filegate의 바이트 엔드포인트가 선다.
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -146,7 +148,7 @@ sequenceDiagram
     S->>S: 유저 권한 확인 (서비스 몫)
     S->>F: read(file_id)
     F->>F: 현재 위치 재해석
-    F-->>S: presigned GET URL
+    F-->>S: 만료가 있는 GET URL
     S-->>U: 302 Redirect
     U->>O: 바이트 직접 GET
     O-->>U: 파일
@@ -160,7 +162,7 @@ create ──▶ pending ──commit──▶ active ──delete──▶ dele
              └── lease 만료 ──▶ 회수
 ```
 
-- `pending`: 발급됨, 미확정. quota/capacity 예약 상태.
+- `pending`: 발급됨, 미확정. capacity 예약 상태.
 - `active`: 확정됨. read 가능.
 - `deleted`: detach 결정됨. read·commit 실패. purge 대기.
 
