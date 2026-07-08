@@ -41,9 +41,6 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 secrecy = "0.10"
-hkdf = "0.12"
-hmac = "0.12"
-sha2 = "0.10"
 dotenvy = "0.15"
 
 [workspace.lints.clippy]

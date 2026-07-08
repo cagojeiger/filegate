@@ -48,18 +48,17 @@ MCP 표면이 필요해지면 형제와 같은 `rmcp`를 쓴다.
 
 filegate의 reconciler 잡: pending 만료 회수(capacity 해제), deleted purge(물리 삭제 + 해제), 이후 tiering. 주의: fs/NFS provider를 멀티 파드로 쓰려면 모든 파드가 같은 마운트를 공유해야 한다 — 중계 요청이 어느 파드로 와도 같은 파일에 닿아야 하고, 임시 경로 + rename 원자성은 같은 마운트 안에서만 성립한다.
 
-## 비밀 저장 (notegate 검증 패턴, `core/security.rs` 참조)
+## 비밀 저장
 
-DB에 평문 비밀을 저장하지 않는다. notegate의 체계를 그대로 가져온다:
+**모든 설정은 배포 config다 — DB에 비밀을 저장하지 않는다** (ADR 004: 세 계층 모두 배포 설정 기준, admin 표면 없음).
 
-- **루트 시크릿 2개**: ENC(암호화)·LOOKUP(해시) 루트를 env로 받고 각각 key_id를 가진다. 같은 값 재사용은 설정 검증 에러. 최소 32바이트.
-- **루트는 직접 쓰지 않는다.** HKDF-SHA256으로 용도별 라벨(`filegate/lookup/client-key-hmac/v1` 식)마다 서브키를 파생한다.
-- **검증만 필요한 값은 HMAC 해시로 저장한다**: 클라이언트 정적 키, 중계 lease secret. 행에 `hash_key_id`·`hash_version`을 같이 기록해 이중 키 회전을 지원한다 (notegate api_key_repo 패턴: prefix + hash + key_id + version).
-- **복원이 필요한 값만 AES-256-GCM**으로, AAD에 문맥(app·field·행 id·key_id·version)을 바인딩한다. 현 설계에서 DB에 이런 값은 없다 — provider 자격증명은 DB가 아니라 배포 설정에 산다 (ADR 004).
+- provider 자격증명(벤더 access/secret 키)은 config 파일·환경 변수에 산다. DB에 안 들어가므로 at-rest 암호화 계층이 필요 없다.
+- 클라이언트 등록도 config다 — llmgate처럼 운영자가 외부에서 만들어 등록한다. filegate 안에 등록 테이블·등록 API가 없다.
+- 그래서 KeyPolicy(HKDF 파생·HMAC 해시·AES-GCM) 같은 crypto-at-rest 계층은 두지 않는다. DB에 저장되는 비밀이 하나도 없어 보호할 대상이 없기 때문이다.
+- 런타임에 메모리로 들고 있는 비밀은 `secrecy::SecretString`으로 감싸 Debug 유출을 막는다.
+- 클라이언트 키 검증은 요청이 제시한 키를 config 값과 상수 시간 비교한다 (인증 미들웨어와 함께 구현). 저장된 해시가 아니라 config 원본과 대조하므로 회전 = config 갱신 + 재배포다.
 
-크레이트: `hkdf`, `hmac`, `sha2`, `aes-gcm`, `secrecy` — 클라이언트 키 스키마가 들어올 때 함께 추가한다.
-
-구현 단계에서 notegate에서 더 가져올 것: `core/error.rs`(thiserror 에러 체계), `validator` 기반 설정 검증(시크릿 길이·key_id 형식), 필요 시 `moka` 캐시.
+구현 단계에서 형제(notegate/opsgate)에서 가져올 것: `core/error.rs`(thiserror 에러 체계), `validator` 기반 config 검증, 필요 시 `moka` 캐시.
 
 ## 빌드 규율 (형제 공통)
 

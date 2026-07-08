@@ -21,9 +21,6 @@ pub struct AppState {
     // lease 오퍼레이션(create/read)이 presign에 쓴다. 지금은 부팅 검증까지만.
     #[allow(dead_code)]
     pub storage: Arc<S3Storage>,
-    // 클라이언트 키 인증·lease secret 해시가 쓴다. 지금은 부팅 검증까지만.
-    #[allow(dead_code)]
-    pub keys: Arc<filegate_core::KeyPolicy>,
 }
 
 pub fn app(state: AppState) -> Router {
