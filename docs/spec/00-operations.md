@@ -16,20 +16,33 @@
 - 조회 (`stat`)
 - 삭제 (`delete`)
 
+접근 모드는 둘 다 지원한다:
+
+- **직결**이 기본이다. 계약 테스트의 기준도 직결이다.
+- **중계**는 provider capability가 강제할 때 자동으로 쓰인다. 서비스 계약은 두 모드에서 같다.
+- 모드는 provider·오퍼레이션 단위 capability 선언으로 결정된다 (ADR 001). 서비스는 선택하지 않는다.
+
+이번 범위의 provider는 둘이다:
+
+| provider | adapter | 모드 |
+|---|---|---|
+| MinIO | S3 호환 | 직결 (계약 기준) |
+| 로컬 파일시스템 (NFS 마운트) | fs | 중계 전용 (presigned 개념 없음) |
+
+OCI 등 외부 벤더는 다음 범위다. 벤더별 사실은 [docs/vendors/](../vendors/README.md)를 본다.
+
 지원하지 않는다 (다음 범위):
 
 - 폴더·배치 업로드. 폴더는 filegate 개념이 아니다. 필요하면 서비스가 단일 업로드를 반복한다 (ADR 000 공리 1).
 - 갱신·재개(resumable) 업로드.
-- 위임 토큰, 중계 모드.
-
-배치는 이번 범위에서 단일 provider다. 프로덕션은 oci-std, 로컬 개발은 MinIO다. 벤더별 사실은 [docs/vendors/](../vendors/README.md)를 본다.
+- 위임 토큰.
 
 ## 공통 원칙
 
 - 권한 검사는 서비스가 오퍼레이션 호출 전에 한다. filegate에는 유저 개념이 없다 (공리 1).
-- 바이트는 전송 주체와 저장소 사이에서 직접 오간다. filegate는 발급·기록·검증만 한다 (공리 2).
+- 바이트는 전송 주체와 저장소 사이에서 직접 오가는 것이 기본이다. filegate는 발급·기록·검증만 한다 (공리 2). 직접이 불가능한 provider는 filegate가 중계한다 — 계약은 같다.
 - 서비스가 영속화하는 filegate 산출물은 file_id뿐이다. URL은 저장하지 않는다 (ADR 003).
-- 모든 오퍼레이션은 등록된 클라이언트 인증 뒤에 있다. 익명 API는 없다.
+- 모든 오퍼레이션은 등록된 클라이언트 인증 뒤에 있다. 익명 API는 없다. 예외는 중계 바이트 엔드포인트뿐이며, lease별 secret으로 검증한다 (ADR 003).
 
 ## 오퍼레이션
 
@@ -41,7 +54,7 @@
   - content_type은 지정하면 서명에 포함되어 강제된다. 서명 밖의 타입 제약은 성립하지 않는다 (실측).
   - 선언 MD5는 commit의 체크섬 대조에 쓴다. 단일 PUT의 ETag = MD5라서 성립한다 (실측).
 - 처리: 배치 결정, quota와 capacity 예약, file_id 발급.
-- 출력: file_id, PUT URL (저장소 presigned).
+- 출력: file_id, 만료가 있는 PUT URL. URL 구조는 계약이 아니다 — 직결이면 저장소 presigned, 중계면 filegate 바이트 엔드포인트다.
 - 상태: 파일은 `pending`. commit 전까지 파일이 아니며, lease 만료 시 회수된다.
 
 ### commit
@@ -59,7 +72,7 @@
 
 - 입력: file_id.
 - 처리: 현재 location을 재해석한다. 파일이 이동했어도 같은 file_id로 접근한다.
-- 출력: presigned GET URL. 서비스는 이 URL로 302 redirect한다.
+- 출력: 만료가 있는 GET URL. 서비스는 이 URL로 302 redirect한다. URL 구조는 계약이 아니다.
 - 읽기는 용량을 소비하지 않는다.
 
 ### stat
@@ -80,6 +93,8 @@
 - 정산: quota와 capacity는 purge 시점에 해제한다.
 
 ## 흐름: 업로드
+
+아래 흐름은 직결 모드다. 중계 모드에서는 저장소(O) 자리에 filegate의 바이트 엔드포인트가 서고, 단계와 계약은 같다.
 
 ```mermaid
 sequenceDiagram
@@ -145,3 +160,4 @@ create ──▶ pending ──commit──▶ active ──delete──▶ dele
 - 파일명 표현은 RFC 5987(`filename*=UTF-8''…`)로 인코딩해 넘긴다.
 - 단일 PUT 한계(5GiB)를 넘는 선언 크기는 이번 범위 밖이다. multipart는 다음 범위이며, multipart의 ETag는 MD5가 아니므로 체크섬 대조는 단일 PUT에서만 성립한다 (실측).
 - 삭제는 결정만 동기다. 물리 purge와 용량 해제는 reconciler가 비동기로 집행한다. purge는 멱등하다 — 없는 객체 삭제는 에러가 아니다 (실측).
+- 중계 바이트 엔드포인트의 상세(PUT/GET/OPTIONS, CORS 응답, 스트림 중 크기 차단, fs의 임시 경로 + rename 원자성)는 spec 01로 둔다.
