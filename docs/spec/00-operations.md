@@ -3,6 +3,7 @@
 - Status: Draft
 - Date: 2026-07-07
 - 근거: ADR [000](../adr/000-identity.md), [002](../adr/002-lease-model.md), [003](../adr/003-url-ownership.md)
+- 실측: 2026-07-08, MinIO 싱글노드(마지막 커뮤니티 릴리스). "(실측)" 표기는 이 확인에서 나온 사실이다
 
 이 문서는 filegate가 이번 범위에서 지원하는 오퍼레이션을 정한다. 단일 파일 업로드와 다운로드, 그리고 그에 필요한 조회와 삭제만 다룬다.
 
@@ -36,7 +37,9 @@
 
 쓰기 lease를 발급한다.
 
-- 입력: intent, 선언 크기.
+- 입력: intent, 선언 크기. 선택: content_type, 선언 MD5.
+  - content_type은 지정하면 서명에 포함되어 강제된다. 서명 밖의 타입 제약은 성립하지 않는다 (실측).
+  - 선언 MD5는 commit의 체크섬 대조에 쓴다. 단일 PUT의 ETag = MD5라서 성립한다 (실측).
 - 처리: 배치 결정, quota와 capacity 예약, file_id 발급.
 - 출력: file_id, PUT URL (저장소 presigned).
 - 상태: 파일은 `pending`. commit 전까지 파일이 아니며, lease 만료 시 회수된다.
@@ -46,7 +49,7 @@
 업로드를 확정한다.
 
 - 입력: file_id.
-- 처리: 저장소 실물 크기를 선언 크기와 대조하고 정산한다.
+- 처리: 저장소 실물 크기를 선언 크기와 대조하고 정산한다. 선언 MD5가 있으면 ETag와도 대조한다. 확정 시점의 ETag를 기록한다.
 - 출력: 확정 결과.
 - 상태: `pending` → `active`. 검증 실패 시 확정하지 않는다.
 
@@ -136,4 +139,9 @@ create ──▶ pending ──commit──▶ active ──delete──▶ dele
 
 - create와 commit은 별개 호출이다. 업로드 한 번은 호출 두 번이다.
 - 직결 PUT은 크기를 앞단에서 막지 못한다. commit이 사후 검증 게이트다 (presigned PUT 기준. POST policy는 업로드 시점 크기 강제가 가능하나 지원 편차가 있다).
-- 삭제는 결정만 동기다. 물리 purge와 용량 해제는 reconciler가 비동기로 집행한다.
+- 쓰기 URL은 commit 후에도 만료 전까지 재사용될 수 있다 (실측). 쓰기 TTL을 짧게 두고, 변조 의심은 commit이 기록한 ETag와 대조해 판정한다.
+- 전송 주체는 Content-Length를 보내야 한다. 길이 미상(chunked) 전송은 저장소가 거부한다 (실측).
+- 0바이트 파일은 허용한다. 선언 크기 0도 유효한 선언이다.
+- 파일명 표현은 RFC 5987(`filename*=UTF-8''…`)로 인코딩해 넘긴다.
+- 단일 PUT 한계(5GiB)를 넘는 선언 크기는 이번 범위 밖이다. multipart는 다음 범위이며, multipart의 ETag는 MD5가 아니므로 체크섬 대조는 단일 PUT에서만 성립한다 (실측).
+- 삭제는 결정만 동기다. 물리 purge와 용량 해제는 reconciler가 비동기로 집행한다. purge는 멱등하다 — 없는 객체 삭제는 에러가 아니다 (실측).
