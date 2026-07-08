@@ -1,5 +1,6 @@
 //! HTTP 표면. 아직 인증은 없다 — 정적 키 미들웨어는 lease API와 함께 들어온다.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,9 +19,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
-    // lease 오퍼레이션(create/read)이 presign에 쓴다. 지금은 부팅 검증까지만.
+    // provider id → 클라이언트. lease 오퍼레이션(create/read)이 presign에 쓴다.
+    // 지금은 부팅 검증까지만.
     #[allow(dead_code)]
-    pub storage: Arc<S3Storage>,
+    pub storages: Arc<BTreeMap<String, Arc<S3Storage>>>,
 }
 
 pub fn app(state: AppState) -> Router {

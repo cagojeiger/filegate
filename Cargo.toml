@@ -38,9 +38,11 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-ve
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+thiserror = "2"
+config = { version = "0.15", default-features = false, features = ["yaml"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-secrecy = "0.10"
+secrecy = { version = "0.10", features = ["serde"] }
 dotenvy = "0.15"
 
 [workspace.lints.clippy]

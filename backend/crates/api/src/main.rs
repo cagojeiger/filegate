@@ -4,44 +4,51 @@
 mod reconciler;
 mod routes;
 
+use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 
+use filegate_core::{ExposeSecret, LogFormat};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = filegate_core::Config::load()?;
-    init_tracing(config.log_json);
+    init_tracing(config.server.log_format);
 
     // 시그널 핸들러는 부팅 초기에 설치한다. 설치가 실패하면 graceful
     // shutdown이 불가능한 프로세스가 되므로 부팅 자체를 중단한다.
     let mut signals = ShutdownSignals::install()?;
 
     let pool = filegate_db::connect(
-        filegate_core::ExposeSecret::expose_secret(&config.database_url),
-        config.db_max_connections,
+        config.database.url.expose_secret(),
+        config.database.max_connections,
     )
     .await?;
     filegate_db::migrate(&pool).await?;
     info!(
         event = "db.connected",
-        max_connections = config.db_max_connections
+        max_connections = config.database.max_connections
     );
 
-    let storage = Arc::new(filegate_infra::s3_connect(&config.s3).await?);
-    info!(event = "storage.connected", endpoint = %config.s3.endpoint, bucket = %storage.bucket);
+    // 정의된 provider를 모두 연결·검증한다. 하나라도 실패하면 부팅 중단 (ADR 001).
+    let mut storages = BTreeMap::new();
+    for (id, provider) in &config.providers {
+        let storage = filegate_infra::s3_connect(provider).await?;
+        info!(event = "storage.connected", provider = %id, endpoint = %provider.endpoint, bucket = %storage.bucket);
+        storages.insert(id.clone(), Arc::new(storage));
+    }
 
-    let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
-    info!(event = "server.listening", addr = %config.bind_addr);
+    let listener = tokio::net::TcpListener::bind(config.server.bind_addr).await?;
+    info!(event = "server.listening", addr = %config.server.bind_addr);
 
     let shutdown = CancellationToken::new();
     let worker = reconciler::spawn(pool.clone(), shutdown.clone());
 
     let state = routes::AppState {
         pool: pool.clone(),
-        storage,
+        storages: Arc::new(storages),
     };
     let http_shutdown = shutdown.clone().cancelled_owned();
     let server = async move {
@@ -111,13 +118,12 @@ impl ShutdownSignals {
     }
 }
 
-fn init_tracing(json: bool) {
+fn init_tracing(format: LogFormat) {
     let builder = tracing_subscriber::fmt().with_env_filter(
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
     );
-    if json {
-        builder.json().init();
-    } else {
-        builder.init();
+    match format {
+        LogFormat::Json => builder.json().init(),
+        LogFormat::Pretty => builder.init(),
     }
 }

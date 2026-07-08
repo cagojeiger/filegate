@@ -1,7 +1,7 @@
 //! S3 호환 클라이언트 구성과 부팅 시 연결 검증.
 
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
-use filegate_core::{ExposeSecret, S3Config};
+use filegate_core::{ExposeSecret, ProviderConfig};
 
 #[derive(Debug, Clone)]
 pub struct S3Storage {
@@ -13,7 +13,7 @@ pub struct S3Storage {
 ///
 /// 버킷이 없으면 만든다 — 관리 공간은 filegate 전유다 (ADR 000). 자격증명
 /// 오류나 연결 실패는 부팅 실패로 이어진다 (ADR 001: 깨진 설정은 부팅 실패).
-pub async fn connect(cfg: &S3Config) -> anyhow::Result<S3Storage> {
+pub async fn connect(cfg: &ProviderConfig) -> anyhow::Result<S3Storage> {
     let credentials = Credentials::new(
         cfg.access_key.clone(),
         cfg.secret_key.expose_secret().to_owned(),

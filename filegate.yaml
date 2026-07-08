@@ -1,0 +1,19 @@
+# 로컬 개발 설정. 프로덕션은 이 파일을 커밋하지 말고 별도로 마운트한다
+# (FILEGATE_CONFIG로 경로 지정). 여기 자격증명은 로컬 docker-compose 전용.
+server:
+  bind_addr: "127.0.0.1:8080"
+  log_format: pretty # pretty | json
+
+database:
+  url: "postgres://filegate:filegate@127.0.0.1:55432/filegate"
+  max_connections: 5
+
+# provider 정의(연결 계약). 상태(위치·용량)는 DB에 산다.
+providers:
+  minio-local:
+    endpoint: "http://127.0.0.1:9000"
+    region: us-east-1
+    access_key: filegate
+    secret_key: filegate-secret
+    bucket: filegate-std
+    force_path_style: true
