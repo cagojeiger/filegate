@@ -8,7 +8,7 @@
 
 ## 개발 환경
 
-설정은 `configs/filegate.yaml`에 있다 (로컬 개발 기본값 커밋됨). 프로덕션은 자기 설정을 별도로 두고 `FILEGATE_CONFIG`로 가리킨다. 설정이 없으면 부팅이 명확한 에러로 실패한다.
+설정은 두 파일을 병합해 읽는다: `configs/filegate.yaml`(본 설정, 비밀 없음)과 `configs/providers.yaml`(벤더 자격증명 — 배포에서는 ESO가 Secret으로 동기화). `FILEGATE_CONFIG`에 쉼표로 나열하며, 나열된 파일이 없으면 부팅이 명확한 에러로 실패한다.
 
 ```sh
 docker compose up -d          # MinIO(9000/9001) + PostgreSQL(55432) + 버킷 프로비저닝

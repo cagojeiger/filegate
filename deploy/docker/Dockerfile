@@ -56,10 +56,10 @@ RUN groupadd --gid 10001 app \
 WORKDIR /app
 COPY --from=builder /usr/local/bin/filegate /usr/local/bin/filegate
 
-# 설정은 이미지에 굽지 않는다 (dev 자격증명 혼입 방지). 운영자가 여기에
-# 자기 filegate.yaml을 마운트한다: -v ./filegate.yaml:/etc/filegate/filegate.yaml
-# 설정이 없으면 부팅이 명확한 에러로 실패한다 (fail-loud).
-ENV FILEGATE_CONFIG=/etc/filegate/filegate.yaml
+# 설정은 이미지에 굽지 않는다 (dev 자격증명 혼입 방지). 배포는 두 파일을
+# 마운트한다: 본 설정(ConfigMap) + providers(ESO가 동기화한 Secret).
+# 나열된 파일이 없으면 부팅이 명확한 에러로 실패한다 (fail-loud).
+ENV FILEGATE_CONFIG=/etc/filegate/filegate.yaml,/etc/filegate/providers.yaml
 EXPOSE 8080
 
 USER appuser

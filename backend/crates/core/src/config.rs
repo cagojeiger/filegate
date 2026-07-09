@@ -90,21 +90,29 @@ fn default_true() -> bool {
 }
 
 impl Config {
-    /// `FILEGATE_CONFIG`(기본 `configs/filegate.yaml`)에서 읽고 `FILEGATE__`
-    /// 환경 변수로 오버라이드한다 (`FILEGATE__DATABASE__MAX_CONNECTIONS` 식).
+    /// `FILEGATE_CONFIG`의 쉼표로 구분된 파일들을 순서대로 병합해 읽고,
+    /// `FILEGATE__` 환경 변수로 오버라이드한다 (`FILEGATE__DATABASE__MAX_CONNECTIONS` 식).
+    ///
+    /// 기본은 `configs/filegate.yaml,configs/providers.yaml` — 비밀이 없는 본 설정
+    /// (ConfigMap)과 벤더 자격증명(ESO가 동기화하는 Secret)을 따로 마운트하기
+    /// 위한 분리다. 나열된 파일은 전부 있어야 한다 — 없으면 부팅 실패.
     pub fn load() -> Result<Self> {
         let _ = dotenvy::dotenv();
-        let path =
-            std::env::var("FILEGATE_CONFIG").unwrap_or_else(|_| "configs/filegate.yaml".to_owned());
-        let raw = config::Config::builder()
-            .add_source(config::File::with_name(&path).format(config::FileFormat::Yaml))
+        let paths = std::env::var("FILEGATE_CONFIG")
+            .unwrap_or_else(|_| "configs/filegate.yaml,configs/providers.yaml".to_owned());
+        let mut builder = config::Config::builder();
+        for path in paths.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            builder =
+                builder.add_source(config::File::with_name(path).format(config::FileFormat::Yaml));
+        }
+        let raw = builder
             .add_source(
                 config::Environment::with_prefix("FILEGATE")
                     .separator("__")
                     .prefix_separator("__"),
             )
             .build()
-            .map_err(|error| Error::config(format!("{path}: {error}")))?;
+            .map_err(|error| Error::config(format!("{paths}: {error}")))?;
         Self::from_raw(raw)
     }
 
