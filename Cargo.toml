@@ -37,6 +37,8 @@ sqlx = { version = "0.8", default-features = false, features = [
 aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
 anyhow = "1"
 thiserror = "2"
 config = { version = "0.15", default-features = false, features = ["yaml"] }

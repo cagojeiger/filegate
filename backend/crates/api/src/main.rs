@@ -1,6 +1,7 @@
 //! filegate 진입점: config → PostgreSQL(+마이그레이션) → 오브젝트 스토리지
 //! 연결 검증 → HTTP + reconciler → graceful shutdown.
 
+mod metrics;
 mod reconciler;
 mod routes;
 
@@ -20,6 +21,9 @@ async fn main() -> anyhow::Result<()> {
     // 시그널 핸들러는 부팅 초기에 설치한다. 설치가 실패하면 graceful
     // shutdown이 불가능한 프로세스가 되므로 부팅 자체를 중단한다.
     let mut signals = ShutdownSignals::install()?;
+
+    // 메트릭 레코더는 첫 계측 전에 설치한다.
+    let metrics = Arc::new(metrics::install_recorder()?);
 
     let pool = filegate_db::connect(
         config.database.url.expose_secret(),
@@ -49,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
     let state = routes::AppState {
         pool: pool.clone(),
         storages: Arc::new(storages),
+        metrics,
     };
     let http_shutdown = shutdown.clone().cancelled_owned();
     let server = async move {

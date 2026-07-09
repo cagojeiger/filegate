@@ -14,6 +14,8 @@ filegate-infra = { workspace = true }
 
 anyhow = { workspace = true }
 axum = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

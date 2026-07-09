@@ -21,7 +21,7 @@
 | 저장소 | `aws-sdk-s3`, `aws-config` | **filegate 신규** — 형제엔 없음 |
 | 설정 | `config` 0.15 (toml), `dotenvy` | |
 | 에러 | `thiserror` 2, `anyhow` 1 | |
-| 관측 | `tracing`, `tracing-subscriber` (env-filter, json) | |
+| 관측 | `tracing`, `tracing-subscriber` (env-filter, json), `metrics` + `metrics-exporter-prometheus` | `/metrics` 스크레이프. 프로브·스크레이프는 메트릭·로그에서 제외 |
 | 직렬화·타입 | `serde`, `serde_json`, `uuid` v4, `chrono`/`time`, `validator`, `schemars` | |
 | 비밀·암호 | `secrecy`, `zeroize`, `subtle`, `sha2`, `hmac`, `aes-gcm`, `base64`, `rand` | 중계 lease secret·서명에 쓴다 |
 | HTTP 클라이언트 | `reqwest` 0.12 (rustls-tls) | |
