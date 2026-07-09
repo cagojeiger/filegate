@@ -11,10 +11,11 @@
 
 이번 범위: `create`→`commit`(업로드), `read`(다운로드), `stat`, `delete`, `usage`(운영자).
 
-접근 모드는 둘 다 지원한다. **직결**이 기본이자 계약 기준이고, **중계**는 provider capability가 직결을 막을 때 자동으로 쓰인다. 모드는 provider·오퍼레이션 단위 capability 선언이 정하고, 서비스 계약은 두 모드에서 같다 (ADR 001). v0 provider는 MinIO(S3 호환, 직결)와 로컬 파일시스템(NFS 마운트, fs adapter, 중계 전용) 둘이다. OCI 등은 다음 범위다.
+접근 모드의 계약은 둘(직결·중계)이지만, **v0는 직결만 구현한다.** 중계는 presigned를 지원하지 않는 저장소(로컬 fs/NFS, CORS 없는 벤더)를 위한 호환 기능이며, 그런 provider가 등장할 때 추가한다 — 서비스 계약은 두 모드에서 같다 (ADR 001·002). v0 provider는 MinIO(S3 호환, 직결)다.
 
 다음 범위로 미룬다:
 
+- 중계 모드와 fs provider(NFS) — presigned 미지원 저장소 호환. OCI 등 외부 벤더 추가도 이때.
 - 폴더·배치 업로드 — 폴더는 서비스가 단일 업로드를 반복해 표현한다 (공리 1).
 - 갱신·재개(resumable) 업로드.
 - 5GiB 초과 파일 — multipart는 ETag가 MD5가 아니라 체크섬 대조가 단일 PUT에서만 성립한다 (실측).
