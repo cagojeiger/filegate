@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  hygiene:
+    name: Hygiene
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Diff check
+        run: git diff --check
+
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: filegate
+          POSTGRES_PASSWORD: filegate
+          POSTGRES_DB: filegate
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U filegate -d filegate"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      FILEGATE_DATABASE_URL: postgres://filegate:filegate@localhost:5432/filegate
+      # sqlx query! 매크로가 컴파일 타임에 읽는 표준 변수 (offline 메타데이터 도입 전까지)
+      DATABASE_URL: postgres://filegate:filegate@localhost:5432/filegate
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check --workspace --all-targets
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace

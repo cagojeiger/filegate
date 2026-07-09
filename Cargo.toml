@@ -1,0 +1,64 @@
+[workspace]
+resolver = "2"
+members = [
+    "backend/crates/core",
+    "backend/crates/model",
+    "backend/crates/db",
+    "backend/crates/infra",
+    "backend/crates/service",
+    "backend/crates/api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+filegate-core = { path = "backend/crates/core" }
+filegate-model = { path = "backend/crates/model" }
+filegate-db = { path = "backend/crates/db" }
+filegate-infra = { path = "backend/crates/infra" }
+filegate-service = { path = "backend/crates/service" }
+
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+axum = { version = "0.8" }
+tower-http = { version = "0.6", features = ["trace", "request-id", "limit", "timeout"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "macros",
+    "migrate",
+    "uuid",
+    "chrono",
+    "json",
+] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
+anyhow = "1"
+thiserror = "2"
+config = { version = "0.15", default-features = false, features = ["yaml"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+secrecy = { version = "0.10", features = ["serde"] }
+dotenvy = "0.15"
+
+[workspace.lints.clippy]
+await_holding_lock = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unreachable = "warn"
+indexing_slicing = "warn"
+unwrap_in_result = "warn"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+debug = 1
