@@ -3,6 +3,9 @@
 mod config;
 mod error;
 
-pub use config::{Config, DatabaseConfig, LogFormat, ProviderConfig, ServerConfig};
+pub use config::{
+    ClientConfig, Config, DatabaseConfig, LogFormat, ProviderConfig, ServerConfig,
+    StorageProfileConfig,
+};
 pub use error::{Error, Result};
 pub use secrecy::{ExposeSecret, SecretString};

@@ -17,3 +17,17 @@ providers:
     secret_key: filegate-secret
     bucket: filegate-std
     force_path_style: true
+
+# 배치 카탈로그 (운영자 결정). providers는 후보 풀 — 하나면 pin과 같다.
+storage_profiles:
+  std:
+    providers: [minio-local]
+
+# 서비스 등록. 키는 sha256 해시로만 선언한다 (raw 키는 서비스가 보관).
+# 아래는 로컬 예시 — raw key: local-dev-key-001. 운영에는 그대로 쓰지 않는다.
+clients:
+  example-service:
+    key_hashes:
+      - sha256:6fdbd96019f1a7da41d41bee1262b9538d6f79a6fae129c4d1c4abca18e06ce2
+    intents:
+      avatar: std
