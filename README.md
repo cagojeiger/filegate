@@ -34,7 +34,7 @@ curl http://127.0.0.1:8080/metrics   # Prometheus 스크레이프
 
 ```sh
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
-docker build -f backend/Dockerfile -t filegate:dev .
+docker build -f deploy/docker/Dockerfile -t filegate:dev .
 ```
 
 릴리스는 `VERSION` 파일을 올려 main에 머지하면 GitHub Actions가 ghcr 이미지와 태그를 발행한다.
