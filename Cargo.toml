@@ -44,6 +44,10 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 secrecy = { version = "0.10", features = ["serde"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+subtle = "2"
 dotenvy = "0.15"
 
 [workspace.lints.clippy]

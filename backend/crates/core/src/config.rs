@@ -7,7 +7,7 @@
 
 use std::net::SocketAddr;
 
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::error::{Error, Result};
 
@@ -15,6 +15,31 @@ use crate::error::{Error, Result};
 pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
+    pub security: SecurityConfig,
+}
+
+/// 비밀 env 셋 (spec 01 "키와 비밀"). 마스터 키·운영자 토큰은 필수다 —
+/// 없으면 부팅 실패. 배포에서는 Terraform이 만든 k8s Secret이 공급한다.
+#[derive(Debug, Clone)]
+pub struct SecurityConfig {
+    /// provider 시크릿 암호화의 마스터 키 (최소 32바이트 검증은 Crypto::new가).
+    pub enc_root_secret: SecretString,
+    /// DB 행에 기록할 마스터 키 세대 (회전 대비). 기본 "v1".
+    pub enc_key_id: String,
+    /// 운영자 토큰 목록 — 메인/서브 두 개로 무중단 로테이션한다.
+    pub operator_tokens: Vec<SecretString>,
+}
+
+impl SecurityConfig {
+    /// 제시된 토큰이 목록 중 하나와 일치하는가 (상수시간 비교).
+    pub fn operator_token_matches(&self, presented: &str) -> bool {
+        use subtle::ConstantTimeEq;
+        self.operator_tokens.iter().any(|token| {
+            let token = token.expose_secret().as_bytes();
+            let presented = presented.as_bytes();
+            token.len() == presented.len() && token.ct_eq(presented).into()
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -69,14 +94,28 @@ impl Config {
                 .map_err(|e| Error::config(format!("FILEGATE_DB_MAX_CONNECTIONS: {e}")))?
                 .unwrap_or(5),
         };
-        Ok(Self { server, database })
+        let required =
+            |key: &str| env(key).ok_or_else(|| Error::config(format!("{key} is not set")));
+        let operator_tokens: Vec<SecretString> = required("FILEGATE_OPERATOR_TOKENS")?
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| SecretString::from(t.to_owned()))
+            .collect();
+        if operator_tokens.is_empty() {
+            return Err(Error::config("FILEGATE_OPERATOR_TOKENS is empty"));
+        }
+        let security = SecurityConfig {
+            enc_root_secret: SecretString::from(required("FILEGATE_ENC_ROOT_SECRET")?),
+            enc_key_id: env("FILEGATE_ENC_KEY_ID").unwrap_or_else(|| "v1".to_owned()),
+            operator_tokens,
+        };
+        Ok(Self {
+            server,
+            database,
+            security,
+        })
     }
-}
-
-/// provider 자격증명의 규약 env 이름: `FILEGATE_PROVIDER_<ID>_<SUFFIX>`.
-pub fn provider_env_key(provider_id: &str, suffix: &str) -> String {
-    let id = provider_id.to_uppercase().replace('-', "_");
-    format!("FILEGATE_PROVIDER_{id}_{suffix}")
 }
 
 #[cfg(test)]
@@ -85,12 +124,41 @@ mod tests {
 
     use super::*;
 
+    /// 필수 비밀 env를 채운 기본 환경.
+    fn base_env(key: &str) -> Option<String> {
+        match key {
+            "FILEGATE_ENC_ROOT_SECRET" => {
+                Some("filegate-test-enc-root-secret-32-bytes!".to_owned())
+            }
+            "FILEGATE_OPERATOR_TOKENS" => Some("fgop_main, fgop_sub".to_owned()),
+            _ => None,
+        }
+    }
+
     #[test]
-    fn defaults_apply_without_env() {
-        let config = Config::load_from(&|_| None).unwrap();
+    fn defaults_apply_with_required_env() {
+        let config = Config::load_from(&base_env).unwrap();
         assert_eq!(config.server.bind_addr.port(), 8080);
         assert_eq!(config.server.log_format, LogFormat::Pretty);
         assert_eq!(config.database.max_connections, 5);
+        assert_eq!(config.security.enc_key_id, "v1");
+        assert_eq!(config.security.operator_tokens.len(), 2);
+    }
+
+    #[test]
+    fn missing_required_env_fails() {
+        let without_root = |key: &str| {
+            (key != "FILEGATE_ENC_ROOT_SECRET")
+                .then(|| base_env(key))
+                .flatten()
+        };
+        assert!(Config::load_from(&without_root).is_err());
+        let without_tokens = |key: &str| {
+            (key != "FILEGATE_OPERATOR_TOKENS")
+                .then(|| base_env(key))
+                .flatten()
+        };
+        assert!(Config::load_from(&without_tokens).is_err());
     }
 
     #[test]
@@ -99,7 +167,7 @@ mod tests {
             "FILEGATE_BIND" => Some("0.0.0.0:9999".to_owned()),
             "FILEGATE_LOG_FORMAT" => Some("json".to_owned()),
             "FILEGATE_DB_MAX_CONNECTIONS" => Some("11".to_owned()),
-            _ => None,
+            other => base_env(other),
         })
         .unwrap();
         assert_eq!(config.server.bind_addr.port(), 9999);
@@ -109,17 +177,26 @@ mod tests {
 
     #[test]
     fn invalid_values_are_rejected() {
-        assert!(Config::load_from(&|k| (k == "FILEGATE_BIND").then(|| "nope".to_owned())).is_err());
-        assert!(
-            Config::load_from(&|k| (k == "FILEGATE_LOG_FORMAT").then(|| "xml".to_owned())).is_err()
-        );
+        let bad_bind = |key: &str| {
+            (key == "FILEGATE_BIND")
+                .then(|| "nope".to_owned())
+                .or_else(|| base_env(key))
+        };
+        assert!(Config::load_from(&bad_bind).is_err());
+        let bad_log = |key: &str| {
+            (key == "FILEGATE_LOG_FORMAT")
+                .then(|| "xml".to_owned())
+                .or_else(|| base_env(key))
+        };
+        assert!(Config::load_from(&bad_log).is_err());
     }
 
     #[test]
-    fn provider_env_key_convention() {
-        assert_eq!(
-            provider_env_key("minio-local", "SECRET_KEY"),
-            "FILEGATE_PROVIDER_MINIO_LOCAL_SECRET_KEY"
-        );
+    fn operator_token_match_is_list_based() {
+        let config = Config::load_from(&base_env).unwrap();
+        assert!(config.security.operator_token_matches("fgop_main"));
+        assert!(config.security.operator_token_matches("fgop_sub"));
+        assert!(!config.security.operator_token_matches("fgop_other"));
+        assert!(!config.security.operator_token_matches("fgop_mai"));
     }
 }

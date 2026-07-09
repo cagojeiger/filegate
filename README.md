@@ -8,7 +8,7 @@
 
 ## 개발 환경
 
-설정은 전부 **환경 변수**다 (로컬 `.env`, 배포는 ESO/env): 서버 설정과 provider 자격증명(규약 `FILEGATE_PROVIDER_<ID>_*`). 등록부(providers·profiles·clients)는 DB에 살고 운영자 API로 관리한다 ([spec 01](docs/spec/01-registry.md)).
+설정은 전부 **환경 변수**다 (로컬 `.env`, 배포는 Terraform이 만든 k8s Secret): 서버 설정 + 마스터 키 + 운영자 토큰. 등록부(providers·profiles·clients)는 DB에 살고 운영자 API로 관리하며, provider 시크릿은 암호화되어 등록부에 보관된다 ([spec 01](docs/spec/01-registry.md)).
 
 ```sh
 docker compose up -d          # MinIO(9000/9001) + PostgreSQL(55432) + 버킷 프로비저닝

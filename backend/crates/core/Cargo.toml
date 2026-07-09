@@ -4,8 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+aes-gcm = { workspace = true }
 dotenvy = { workspace = true }
+hkdf = { workspace = true }
 secrecy = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
 thiserror = { workspace = true }
 
 [lints]
