@@ -7,3 +7,4 @@ target
 .env
 docs
 *.md
+configs

@@ -66,11 +66,12 @@ fn default_true() -> bool {
 }
 
 impl Config {
-    /// `FILEGATE_CONFIG`(기본 `filegate.yaml`)에서 읽고 `FILEGATE__` 환경 변수로
-    /// 오버라이드한다 (`FILEGATE__DATABASE__MAX_CONNECTIONS` 식).
+    /// `FILEGATE_CONFIG`(기본 `configs/filegate.yaml`)에서 읽고 `FILEGATE__`
+    /// 환경 변수로 오버라이드한다 (`FILEGATE__DATABASE__MAX_CONNECTIONS` 식).
     pub fn load() -> Result<Self> {
         let _ = dotenvy::dotenv();
-        let path = std::env::var("FILEGATE_CONFIG").unwrap_or_else(|_| "filegate.yaml".to_owned());
+        let path =
+            std::env::var("FILEGATE_CONFIG").unwrap_or_else(|_| "configs/filegate.yaml".to_owned());
         let raw = config::Config::builder()
             .add_source(config::File::with_name(&path).format(config::FileFormat::Yaml))
             .add_source(
