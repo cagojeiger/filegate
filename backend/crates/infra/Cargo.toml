@@ -4,10 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-filegate-core = { workspace = true }
-
 anyhow = { workspace = true }
 aws-sdk-s3 = { workspace = true }
+secrecy = { workspace = true }
 
 [lints]
 workspace = true

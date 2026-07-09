@@ -10,7 +10,6 @@ path = "src/main.rs"
 [dependencies]
 filegate-core = { workspace = true }
 filegate-db = { workspace = true }
-filegate-infra = { workspace = true }
 
 anyhow = { workspace = true }
 axum = { workspace = true }

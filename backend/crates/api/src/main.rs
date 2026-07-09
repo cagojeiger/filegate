@@ -1,11 +1,12 @@
-//! filegate 진입점: config → PostgreSQL(+마이그레이션) → 오브젝트 스토리지
-//! 연결 검증 → HTTP + reconciler → graceful shutdown.
+//! filegate 진입점: env 설정 → PostgreSQL(+마이그레이션) → HTTP + reconciler
+//! → graceful shutdown.
+//!
+//! provider 접근 재검증은 등록부(0002)가 오면 부팅 배선에 복귀한다 (spec 01).
 
 mod metrics;
 mod reconciler;
 mod routes;
 
-use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 
@@ -36,14 +37,6 @@ async fn main() -> anyhow::Result<()> {
         max_connections = config.database.max_connections
     );
 
-    // 정의된 provider를 모두 연결·검증한다. 하나라도 실패하면 부팅 중단 (ADR 001).
-    let mut storages = BTreeMap::new();
-    for (id, provider) in &config.providers {
-        let storage = filegate_infra::s3_connect(provider).await?;
-        info!(event = "storage.connected", provider = %id, endpoint = %provider.endpoint, bucket = %storage.bucket);
-        storages.insert(id.clone(), Arc::new(storage));
-    }
-
     let listener = tokio::net::TcpListener::bind(config.server.bind_addr).await?;
     info!(event = "server.listening", addr = %config.server.bind_addr);
 
@@ -52,7 +45,6 @@ async fn main() -> anyhow::Result<()> {
 
     let state = routes::AppState {
         pool: pool.clone(),
-        storages: Arc::new(storages),
         metrics,
     };
     let http_shutdown = shutdown.clone().cancelled_owned();

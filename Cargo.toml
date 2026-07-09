@@ -41,7 +41,6 @@ metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false }
 anyhow = "1"
 thiserror = "2"
-config = { version = "0.15", default-features = false, features = ["yaml"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 secrecy = { version = "0.10", features = ["serde"] }

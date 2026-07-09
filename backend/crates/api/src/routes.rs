@@ -7,7 +7,6 @@
 //!   /metrics     Prometheus 스크레이프
 //!   /v1/*        클라이언트 API 상위 경로 (예정 — 지금은 빈 그룹, 자리만 잡음)
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,7 +16,6 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{middleware, Json, Router};
 use filegate_db::PgPool;
-use filegate_infra::S3Storage;
 use metrics_exporter_prometheus::PrometheusHandle;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
@@ -34,10 +32,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
-    // provider id → 클라이언트. lease 오퍼레이션(create/read)이 presign에 쓴다.
-    // 지금은 부팅 검증까지만.
-    #[allow(dead_code)]
-    pub storages: Arc<BTreeMap<String, Arc<S3Storage>>>,
     pub metrics: Arc<PrometheusHandle>,
 }
 

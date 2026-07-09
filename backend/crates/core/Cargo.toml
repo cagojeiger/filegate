@@ -4,10 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-config = { workspace = true }
 dotenvy = { workspace = true }
 secrecy = { workspace = true }
-serde = { workspace = true }
 thiserror = { workspace = true }
 
 [lints]

@@ -56,10 +56,9 @@ RUN groupadd --gid 10001 app \
 WORKDIR /app
 COPY --from=builder /usr/local/bin/filegate /usr/local/bin/filegate
 
-# 설정은 이미지에 굽지 않는다 (dev 자격증명 혼입 방지). 배포는 두 파일을
-# 마운트한다: 본 설정(ConfigMap) + providers(ESO가 동기화한 Secret).
-# 나열된 파일이 없으면 부팅이 명확한 에러로 실패한다 (fail-loud).
-ENV FILEGATE_CONFIG=/etc/filegate/filegate.yaml,/etc/filegate/providers.yaml
+# 설정은 전부 env다 (ADR 004): 서버 설정과 자격증명은 배포 env/ESO가 주고,
+# 등록부(providers·clients)는 DB에 산다 — 이미지에 설정 파일이 없다.
+ENV FILEGATE_BIND=0.0.0.0:8080
 EXPOSE 8080
 
 USER appuser

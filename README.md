@@ -8,17 +8,18 @@
 
 ## 개발 환경
 
-설정은 두 파일을 병합해 읽는다: `configs/filegate.yaml`(본 설정, 비밀 없음)과 `configs/providers.yaml`(벤더 자격증명 — 배포에서는 ESO가 Secret으로 동기화). `FILEGATE_CONFIG`에 쉼표로 나열하며, 나열된 파일이 없으면 부팅이 명확한 에러로 실패한다.
+설정은 전부 **환경 변수**다 (로컬 `.env`, 배포는 ESO/env): 서버 설정과 provider 자격증명(규약 `FILEGATE_PROVIDER_<ID>_*`). 등록부(providers·profiles·clients)는 DB에 살고 운영자 API로 관리한다 ([spec 01](docs/spec/01-registry.md)).
 
 ```sh
 docker compose up -d          # MinIO(9000/9001) + PostgreSQL(55432) + 버킷 프로비저닝
-cargo run --bin filegate      # configs/filegate.yaml 로드, http://127.0.0.1:8080
+cp .env.example .env          # 로컬 자격증명
+cargo run --bin filegate      # http://127.0.0.1:8080
 ```
 
-컨테이너로 띄울 때는 설정을 마운트한다:
+컨테이너로 띄울 때는 env만 준다:
 
 ```sh
-docker run -v ./configs/filegate.yaml:/etc/filegate/filegate.yaml filegate:dev
+docker run --env-file .env filegate:dev
 ```
 
 확인:
