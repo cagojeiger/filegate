@@ -26,11 +26,24 @@ pub struct SecurityConfig {
     pub enc_root_secret: SecretString,
     /// DB 행에 기록할 마스터 키 세대 (회전 대비). 기본 "v1".
     pub enc_key_id: String,
+    /// 회전 전환기의 이전 마스터 키 (복호 전용, spec 01 런북). 쌍으로만 유효.
+    pub enc_root_secret_prev: Option<SecretString>,
+    pub enc_key_id_prev: Option<String>,
     /// 운영자 토큰 목록 — 메인/서브 두 개로 무중단 로테이션한다.
     pub operator_tokens: Vec<SecretString>,
 }
 
 impl SecurityConfig {
+    /// provider 시크릿 암호기를 조립한다 (활성 + 선택적 PREV). 부팅에서 호출되어
+    /// 루트 길이·중복 key_id 같은 오설정을 여기서 잡는다.
+    pub fn crypto(&self) -> Result<crate::Crypto> {
+        let mut crypto = crate::Crypto::new(&self.enc_key_id, &self.enc_root_secret)?;
+        if let (Some(id), Some(root)) = (&self.enc_key_id_prev, &self.enc_root_secret_prev) {
+            crypto = crypto.with_prev(id, root)?;
+        }
+        Ok(crypto)
+    }
+
     /// 제시된 토큰이 목록 중 하나와 일치하는가 (상수시간 비교).
     pub fn operator_token_matches(&self, presented: &str) -> bool {
         use subtle::ConstantTimeEq;
@@ -105,9 +118,18 @@ impl Config {
         if operator_tokens.is_empty() {
             return Err(Error::config("FILEGATE_OPERATOR_TOKENS is empty"));
         }
+        let enc_root_secret_prev = env("FILEGATE_ENC_ROOT_SECRET_PREV").map(SecretString::from);
+        let enc_key_id_prev = env("FILEGATE_ENC_KEY_ID_PREV");
+        if enc_root_secret_prev.is_some() != enc_key_id_prev.is_some() {
+            return Err(Error::config(
+                "FILEGATE_ENC_ROOT_SECRET_PREV and FILEGATE_ENC_KEY_ID_PREV must be set together",
+            ));
+        }
         let security = SecurityConfig {
             enc_root_secret: SecretString::from(required("FILEGATE_ENC_ROOT_SECRET")?),
             enc_key_id: env("FILEGATE_ENC_KEY_ID").unwrap_or_else(|| "v1".to_owned()),
+            enc_root_secret_prev,
+            enc_key_id_prev,
             operator_tokens,
         };
         Ok(Self {
@@ -198,5 +220,49 @@ mod tests {
         assert!(config.security.operator_token_matches("fgop_sub"));
         assert!(!config.security.operator_token_matches("fgop_other"));
         assert!(!config.security.operator_token_matches("fgop_mai"));
+    }
+
+    #[test]
+    fn prev_key_envs_must_come_as_a_pair() {
+        let only_secret = |key: &str| match key {
+            "FILEGATE_ENC_ROOT_SECRET_PREV" => {
+                Some("filegate-test-prev-root-secret-32-bytes!".to_owned())
+            }
+            other => base_env(other),
+        };
+        assert!(Config::load_from(&only_secret).is_err());
+        let only_id = |key: &str| match key {
+            "FILEGATE_ENC_KEY_ID_PREV" => Some("v1".to_owned()),
+            other => base_env(other),
+        };
+        assert!(Config::load_from(&only_id).is_err());
+    }
+
+    #[test]
+    fn crypto_assembles_with_prev_for_rotation() {
+        let rotation_env = |key: &str| match key {
+            "FILEGATE_ENC_KEY_ID" => Some("v2".to_owned()),
+            "FILEGATE_ENC_ROOT_SECRET_PREV" => {
+                Some("filegate-test-prev-root-secret-32-bytes!".to_owned())
+            }
+            "FILEGATE_ENC_KEY_ID_PREV" => Some("v1".to_owned()),
+            other => base_env(other),
+        };
+        let config = Config::load_from(&rotation_env).unwrap();
+        let crypto = config.security.crypto().unwrap();
+        assert_eq!(crypto.active_key_id(), "v2");
+    }
+
+    #[test]
+    fn crypto_rejects_prev_id_equal_to_active() {
+        let bad_env = |key: &str| match key {
+            "FILEGATE_ENC_ROOT_SECRET_PREV" => {
+                Some("filegate-test-prev-root-secret-32-bytes!".to_owned())
+            }
+            "FILEGATE_ENC_KEY_ID_PREV" => Some("v1".to_owned()), // 활성 기본값과 동일
+            other => base_env(other),
+        };
+        let config = Config::load_from(&bad_env).unwrap();
+        assert!(config.security.crypto().is_err());
     }
 }
