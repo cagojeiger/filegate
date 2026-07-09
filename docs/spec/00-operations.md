@@ -37,9 +37,9 @@
 - 입력: intent, 선언 크기. 선택: content_type, 선언 MD5. 0바이트도 유효한 선언이다.
   - content_type은 서명에 포함해야 강제된다 (실측).
   - 선언 MD5는 commit이 ETag와 대조한다. 단일 PUT의 ETag = MD5다 (실측).
-- 처리: 배치 결정, capacity 예약, file_id 발급.
+- 처리: 선언 해석 (intent → profile → provider — [spec 01](01-registry.md), v0는 명시 선언 단일 대상), capacity 예약, file_id 발급.
 - 출력: file_id, 만료가 있는 PUT URL. URL 구조는 계약이 아니다 (직결이면 저장소 presigned, 중계면 filegate 엔드포인트).
-- capacity는 경성 상한이다: `예약량 + 확정량 + purge 대기 점유 + 선언 크기`가 상한을 넘으면 발급을 거부한다. 모든 후보 provider가 걸리면 create는 실패하고, 거부 이유의 용량 상세는 클라이언트에 노출하지 않는다.
+- capacity는 경성 상한이다: `예약량 + 확정량 + purge 대기 점유 + 선언 크기`가 상한을 넘으면 발급을 거부한다. 대상 provider가 상한에 걸리면 create는 실패하고, 거부 이유의 용량 상세는 클라이언트에 노출하지 않는다.
 - 상태: `pending`. commit 전까지 파일이 아니다.
 
 ### commit — 업로드 확정
@@ -88,7 +88,7 @@ sequenceDiagram
     U->>S: 업로드 요청
     S->>S: 유저 권한 확인 (서비스 몫)
     S->>F: create(intent, 크기)
-    F->>F: 배치 결정 + capacity 예약
+    F->>F: 선언 해석 + capacity 예약
     F-->>S: file_id + PUT URL
     S-->>U: PUT URL 위임
     U->>O: 바이트 직접 PUT
