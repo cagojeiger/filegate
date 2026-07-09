@@ -26,8 +26,6 @@
 | 비밀·암호 | `secrecy`, `aes-gcm`, `hkdf`, `sha2`, `subtle`, `rand` | provider 시크릿 암호화(opsgate 참조)·운영자 토큰 비교·클라이언트 키 해시 |
 | HTTP 클라이언트 | `reqwest` 0.12 (rustls-tls) | |
 
-MCP 표면이 필요해지면 형제와 같은 `rmcp`를 쓴다.
-
 ## 워크스페이스 레이아웃
 
 형제 표준을 따른다: `backend/crates/{core, model, db, service, api}`.
