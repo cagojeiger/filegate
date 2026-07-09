@@ -41,6 +41,7 @@ profile은 배치 방식을 선언한다. 두 가지다:
 부팅 시 참조 그래프 전체를 해석한다.
 
 - 모든 intent → profile 존재? → profile이 고르는 provider(들) 존재? → 그 provider 설정 유효? 하나라도 dangling이면 **부팅 실패** (ADR 004: 깨진 참조는 부팅 실패).
+- provider 접근도 검증한다: 설정된 저장 공간(S3 버킷·fs 경로)에 닿는지 확인하고, 없거나 권한이 없으면 부팅 실패한다. 프로비저닝은 운영자 몫이며, filegate는 만들지 않고 검증만 한다.
 - 해석 결과는 런타임이 쓰는 resolved map이다: intent → 후보 provider 풀. 이 map의 첫 소비자는 create의 배치 결정이다.
 - 검증은 요청 경로 밖, 부팅 1회다. 런타임에 config를 다시 읽지 않는다.
 

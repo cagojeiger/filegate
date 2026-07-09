@@ -1,7 +1,7 @@
 //! YAML 설정. 로드 순서: 파일 < 환경 변수 오버라이드. 값이 잘못되면 부팅 실패.
 //!
 //! provider "정의"(연결 계약·자격증명)는 여기 config에 산다. provider "상태"
-//! (위치·용량·배치)는 DB에 있다 (ADR 004/005). 관리 화면은 두지 않는다.
+//! (위치·용량 사용량·배치)는 DB에 있다 (ADR 004). 관리 화면은 두지 않는다.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;

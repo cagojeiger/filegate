@@ -69,7 +69,7 @@ filegate의 reconciler 잡: pending 만료 회수(capacity 해제), deleted purg
 | **info** | 부팅·종료 마일스톤 (1회성, 운영자에게 의미) | `db.connected`, `storage.connected`, `server.listening`, `reconciler.started`/`stopped`, `server.shutting_down`, `shutdown.complete` |
 | **info** | 실제 클라이언트 요청 (프로브 제외) | `request.end` |
 | **debug** | 주기적 시스템 틱 (반복, 노이즈) | `reconciler.job`, `reconciler.skipped` |
-| **warn** | 이상 징후 (치명적 아님) | `reconciler.join_failed`, `storage.bucket_created` |
+| **warn** | 이상 징후 (치명적 아님) | `reconciler.join_failed` |
 | **error** | 실패 | `ready.failed`, `reconciler.failed` |
 
 프로브·스크레이프(/health, /ready, /metrics)의 성공 요청은 로그·메트릭 양쪽에서 제외한다. 실패한 프로브는 남긴다.
