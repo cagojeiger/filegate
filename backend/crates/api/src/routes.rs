@@ -5,7 +5,7 @@
 //!   /health      liveness (무의존)
 //!   /ready       readiness (DB 체크)
 //!   /metrics     Prometheus 스크레이프
-//!   /v1/*        클라이언트 API (lease 오퍼레이션이 들어올 상위 경로)
+//!   /v1/*        클라이언트 API 상위 경로 (예정 — 지금은 빈 그룹, 자리만 잡음)
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
