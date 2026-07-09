@@ -30,7 +30,8 @@ pub fn spawn(pool: PgPool, shutdown: CancellationToken) -> JoinHandle<()> {
                 _ = ticker.tick() => match filegate_db::reconciler_run_once(&pool).await {
                     Ok(true) => {} // 잡 로그는 db가 lock을 쥔 채 찍는다
                     Ok(false) => {
-                        tracing::info!(event = "reconciler.skipped", reason = "lock_held")
+                        // 주기적 틱 — 다른 파드가 잡았다는 사실은 debug로만.
+                        tracing::debug!(event = "reconciler.skipped", reason = "lock_held")
                     }
                     Err(error) => tracing::error!(event = "reconciler.failed", %error),
                 },

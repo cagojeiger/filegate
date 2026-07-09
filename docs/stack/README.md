@@ -60,6 +60,20 @@ filegate의 reconciler 잡: pending 만료 회수(capacity 해제), deleted purg
 
 구현 단계에서 형제(notegate/opsgate)에서 가져올 것: `core/error.rs`(thiserror 에러 체계), `validator` 기반 config 검증, 필요 시 `moka` 캐시.
 
+## 로그 레벨 정책
+
+기본 필터는 `info`. 평시 로그는 라이프사이클 이벤트만 보이고, 주기적 시스템 틱은 debug로 내려 노이즈를 없앤다.
+
+| 레벨 | 대상 | 예 |
+|---|---|---|
+| **info** | 부팅·종료 마일스톤 (1회성, 운영자에게 의미) | `db.connected`, `storage.connected`, `server.listening`, `reconciler.started`/`stopped`, `server.shutting_down`, `shutdown.complete` |
+| **info** | 실제 클라이언트 요청 (프로브 제외) | `request.end` |
+| **debug** | 주기적 시스템 틱 (반복, 노이즈) | `reconciler.job`, `reconciler.skipped` |
+| **warn** | 이상 징후 (치명적 아님) | `reconciler.join_failed`, `storage.bucket_created` |
+| **error** | 실패 | `ready.failed`, `reconciler.failed` |
+
+프로브·스크레이프(/health, /ready, /metrics)의 성공 요청은 로그·메트릭 양쪽에서 제외한다. 실패한 프로브는 남긴다.
+
 ## 빌드 규율 (형제 공통)
 
 - clippy `warn`: `unwrap_used`, `expect_used`, `panic`, `todo`, `unreachable`, `indexing_slicing`, `unwrap_in_result`, `await_holding_lock`.

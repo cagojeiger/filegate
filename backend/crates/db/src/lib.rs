@@ -43,7 +43,8 @@ pub async fn reconciler_run_once(pool: &PgPool) -> Result<bool, sqlx::Error> {
     if lock_acquired {
         // 자리표시 잡: lock을 쥔 채 hello-world를 찍고 잠깐 머문다. 스키마가
         // 들어오면 여기가 유계 배치가 된다 (pending 만료 회수 → purge → tiering).
-        tracing::info!(
+        // 주기적 시스템 틱이라 debug 레벨 — 평시 info 로그를 어지럽히지 않는다.
+        tracing::debug!(
             event = "reconciler.job",
             msg = "hello world — single worker holds the lock"
         );
