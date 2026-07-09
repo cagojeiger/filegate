@@ -28,11 +28,11 @@
 ## 운영자 제어
 
 - **운영자 API가 유일한 제어점이다.** 등록 CRUD와 운영 동사(usage, 이후 plan/approve/pause)가 여기 산다. 인증은 정적 운영자 토큰(env).
-- 클라이언트는 셋이다: **CLI**(사람 — 조회·등록·운영 동사), **MCP**(AI — opsgate 경유), **Terraform provider**(선언 관리 — Go 위성 프로젝트, 같은 API의 번역기). 화면은 두지 않으며, 생기더라도 이 API의 얇은 클라이언트다.
+- 클라이언트: **Terraform provider**(선언 관리 — Go 위성 프로젝트, 같은 API의 번역기)와 **MCP**(AI — opsgate 경유)로 시작한다. CLI는 필요해지면 같은 API의 클라이언트로 추가한다. 화면은 두지 않으며, 생기더라도 이 API의 얇은 클라이언트다.
 - API는 클라이언트-친화 CRUD로 만든다: 안정 id, id 단건 조회, 명확한 404, 멱등 삭제 — Terraform의 Read/plan이 요구하는 성질이다.
 
 ## 경계선
 
 - 이 문서는 모양과 방향만 정한다. 스키마·엔드포인트·CLI 동사 목록은 구현의 영역이다.
-- 구축 순서는 도메인 우선이다: 등록 테이블+시드(SQL) → 도메인 오퍼레이션([spec 00](00-operations.md)) → 운영자 API → CLI → Terraform provider. 관리 표면은 파일이 흐른 뒤에 온다.
+- 구축 순서는 도메인 우선이다: 등록 테이블+시드(SQL) → 도메인 오퍼레이션([spec 00](00-operations.md)) → 운영자 API → Terraform provider. 관리 표면은 파일이 흐른 뒤에 온다.
 - 클라이언트 인증 미들웨어(키 해시 → client 신원 부착)는 인증이 필요한 첫 오퍼레이션과 함께 구현한다. filegate 자체 키다 — authgate에 의존하지 않는다 (공리 3).
