@@ -17,6 +17,19 @@ services:
     volumes:
       - minio-data:/data
 
+  # 버킷 프로비저닝은 운영자 몫이다 — filegate는 버킷을 만들지 않는다.
+  # 로컬에선 이 일회성 잡이 그 역할을 대신해 filegate-std 버킷을 만든다.
+  createbuckets:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 filegate filegate-secret &&
+      mc mb --ignore-existing local/filegate-std
+      "
+
   postgres:
     image: postgres:17-alpine
     environment:

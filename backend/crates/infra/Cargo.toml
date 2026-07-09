@@ -8,7 +8,6 @@ filegate-core = { workspace = true }
 
 anyhow = { workspace = true }
 aws-sdk-s3 = { workspace = true }
-tracing = { workspace = true }
 
 [lints]
 workspace = true

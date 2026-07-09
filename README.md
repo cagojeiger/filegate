@@ -11,7 +11,7 @@
 설정은 `filegate.yaml`에 있다 (로컬 개발 기본값 커밋됨). 프로덕션은 자기 설정을 별도로 두고 `FILEGATE_CONFIG`로 가리킨다. 설정이 없으면 부팅이 명확한 에러로 실패한다.
 
 ```sh
-docker compose up -d          # MinIO(9000/9001) + PostgreSQL(55432)
+docker compose up -d          # MinIO(9000/9001) + PostgreSQL(55432) + 버킷 프로비저닝
 cargo run --bin filegate      # filegate.yaml 로드, http://127.0.0.1:8080
 ```
 

@@ -912,7 +912,6 @@ dependencies = [
  "anyhow",
  "aws-sdk-s3",
  "filegate-core",
- "tracing",
 ]
 
 [[package]]
