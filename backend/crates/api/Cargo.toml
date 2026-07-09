@@ -10,9 +10,11 @@ path = "src/main.rs"
 [dependencies]
 filegate-core = { workspace = true }
 filegate-db = { workspace = true }
+filegate-infra = { workspace = true }
 
 anyhow = { workspace = true }
 axum = { workspace = true }
+serde = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 serde_json = { workspace = true }

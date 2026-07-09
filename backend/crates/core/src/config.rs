@@ -1,9 +1,8 @@
 //! 설정은 env로만 온다 (ADR 004): 서버(프로세스) 설정과 비밀.
-//! 로컬은 `.env`(dotenvy), 배포는 ESO/배포 env가 공급한다.
+//! 로컬은 `.env`(dotenvy), 배포는 Terraform이 만든 k8s Secret이 공급한다.
 //!
 //! 등록부(providers·profiles·clients)는 여기 없다 — 정본은 DB다 (spec 01).
-//! provider 자격증명은 규약 env `FILEGATE_PROVIDER_<ID>_ACCESS_KEY`/`_SECRET_KEY`
-//! (id는 대문자, `-`→`_`)로 오고, 등록부를 읽는 쪽이 이 규약으로 조회한다.
+//! provider 시크릿도 env가 아니라 DB의 암호문 컬럼에 산다 (core::crypto).
 
 use std::net::SocketAddr;
 

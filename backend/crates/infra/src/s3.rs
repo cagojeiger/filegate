@@ -1,12 +1,12 @@
 //! S3 호환 클라이언트 구성과 접근 검증.
 //!
-//! 입력은 등록부의 provider 행(비밀 없음) + 규약 env에서 온 자격증명이다.
-//! 등록 시점과 부팅 재검증이 이 connect를 호출한다 (spec 01).
+//! 입력은 등록부의 provider 행 + 복호된 시크릿이다 (spec 01).
+//! 등록 시점과 부팅 재검증이 이 connect를 호출한다.
 
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
 use secrecy::{ExposeSecret, SecretString};
 
-/// S3 호환 provider 접근 명세: 등록부 행 + env 자격증명.
+/// S3 호환 provider 접근 명세: 등록부 행 + 복호된 자격증명.
 #[derive(Debug, Clone)]
 pub struct S3ProviderSpec {
     pub endpoint: String,

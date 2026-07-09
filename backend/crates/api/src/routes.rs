@@ -1,10 +1,11 @@
-//! HTTP 표면. 아직 인증은 없다 — 정적 키 미들웨어는 lease API와 함께 들어온다.
+//! HTTP 표면. 클라이언트 키 미들웨어는 lease API와 함께 들어온다.
 //!
 //! 경로 구조:
 //!   /            서비스 정보
 //!   /health      liveness (무의존)
 //!   /ready       readiness (DB 체크)
 //!   /metrics     Prometheus 스크레이프
+//!   /admin/*     운영자 API (정적 운영자 토큰 — admin 모듈)
 //!   /v1/*        클라이언트 API 상위 경로 (예정 — 지금은 빈 그룹, 자리만 잡음)
 
 use std::sync::Arc;
@@ -33,6 +34,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct AppState {
     pub pool: PgPool,
     pub metrics: Arc<PrometheusHandle>,
+    pub security: filegate_core::SecurityConfig,
+    pub crypto: Arc<filegate_core::Crypto>,
 }
 
 pub fn app(state: AppState) -> Router {
@@ -41,6 +44,7 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/", get(root))
         .merge(system_routes())
+        .nest("/admin", admin_guarded(state.clone()))
         .merge(v1_routes())
         .with_state(state)
         .layer(RequestBodyLimitLayer::new(CONTROL_BODY_LIMIT))
@@ -69,6 +73,15 @@ fn system_routes() -> Router<AppState> {
 /// 클라이언트 API 상위 경로. lease 오퍼레이션이 여기 merge된다 (spec 00).
 fn v1_routes() -> Router<AppState> {
     Router::new()
+}
+
+/// 운영자 표면 — 전 경로가 토큰 미들웨어 뒤에 있다. route_layer라
+/// 매치 안 된 경로는 인증 없이 404로 떨어진다 (TF-친화의 명확한 404).
+fn admin_guarded(state: AppState) -> Router<AppState> {
+    crate::admin::admin_routes().route_layer(middleware::from_fn_with_state(
+        state,
+        crate::admin::require_operator,
+    ))
 }
 
 async fn root() -> impl IntoResponse {
