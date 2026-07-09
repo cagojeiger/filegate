@@ -23,7 +23,7 @@
 | 에러 | `thiserror` 2, `anyhow` 1 | |
 | 관측 | `tracing`, `tracing-subscriber` (env-filter, json), `metrics` + `metrics-exporter-prometheus` | `/metrics` 스크레이프. 프로브·스크레이프는 메트릭·로그에서 제외 |
 | 직렬화·타입 | `serde`, `serde_json`, `uuid` v4, `chrono`/`time`, `validator`, `schemars` | |
-| 비밀·암호 | `secrecy`, `zeroize`, `subtle`, `sha2`, `hmac`, `aes-gcm`, `base64`, `rand` | 중계 lease secret·서명에 쓴다 |
+| 비밀·암호 | `secrecy`, `aes-gcm`, `hkdf`, `sha2`, `subtle`, `rand` | provider 시크릿 암호화(opsgate 참조)·운영자 토큰 비교·클라이언트 키 해시 |
 | HTTP 클라이언트 | `reqwest` 0.12 (rustls-tls) | |
 
 MCP 표면이 필요해지면 형제와 같은 `rmcp`를 쓴다.
@@ -50,13 +50,13 @@ filegate의 reconciler 잡: pending 만료 회수(capacity 해제), deleted purg
 
 ## 비밀과 설정
 
-**비밀은 env로만 온다 — DB에도 YAML에도 넣지 않는다** (ADR 004 개정판).
+**비밀의 저장 방식은 성격이 정한다** (ADR 004, spec 01 "키와 비밀").
 
 - 서버(프로세스) 설정은 전부 env다: bind, 로그 포맷, DB URL, 커넥션 수. YAML 설정 파일은 두지 않는다.
-- 등록부(providers·profiles·clients)의 정본은 DB다. 등록부에 비밀은 없다 — provider 자격증명은 규약 env(`FILEGATE_PROVIDER_<ID>_ACCESS_KEY`/`_SECRET_KEY`)로 ESO가 공급한다.
-- 클라이언트 키는 sha256 해시로만 DB에 저장한다. 인증 = 제시된 키를 해시해 등록 해시에서 조회. 회전 = 해시 행 추가·삭제 (재배포 없음).
-- DB에 저장되는 비밀이 없으므로 crypto-at-rest 계층(HKDF·AES-GCM 등)은 두지 않는다. 메모리의 비밀은 `secrecy::SecretString`으로 Debug 유출을 막는다.
-- 운영자 API 인증은 정적 운영자 토큰(env), 상수 시간 비교.
+- env의 비밀은 셋뿐이다: 마스터 키(`FILEGATE_ENC_ROOT_SECRET`), 운영자 토큰(`FILEGATE_OPERATOR_TOKENS`, 쉼표 목록 — 메인/서브 로테이션), DB URL. Terraform이 k8s Secret으로 공급한다.
+- 클라이언트 키(검증 전용)는 sha256 해시로만 DB에 저장한다. 인증 = 제시된 키를 해시해 조회. 회전 = 해시 행 추가·삭제.
+- provider 시크릿(런타임 사용)은 AES-256-GCM으로 암호화해 DB에 저장한다 — AAD에 provider id 바인딩, 마스터 키는 env. opsgate의 credential 보관 방식을 참조한다.
+- 메모리의 비밀은 `secrecy::SecretString`으로 Debug 유출을 막는다. 토큰 비교는 상수 시간(`subtle`).
 
 구현 단계에서 형제(notegate/opsgate)에서 가져올 것: `core/error.rs`(thiserror 에러 체계), `validator` 기반 config 검증, 필요 시 `moka` 캐시.
 
