@@ -10,7 +10,7 @@ use axum::Json;
 use filegate_db::registry;
 use serde::{Deserialize, Serialize};
 
-use super::error::{not_found, ApiError};
+use crate::error::{not_found, ApiError};
 use crate::routes::AppState;
 
 #[derive(Deserialize)]

@@ -9,7 +9,6 @@
 
 mod bindings;
 mod clients;
-mod error;
 mod storages;
 
 pub use storages::verify_registered;
@@ -65,6 +64,6 @@ pub async fn require_operator(
         .and_then(|(scheme, token)| scheme.eq_ignore_ascii_case("bearer").then_some(token));
     match presented {
         Some(token) if state.security.operator_token_matches(token) => next.run(request).await,
-        _ => error::unauthorized().into_response(),
+        _ => crate::error::unauthorized().into_response(),
     }
 }

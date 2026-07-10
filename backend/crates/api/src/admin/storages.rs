@@ -9,13 +9,13 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use filegate_core::{Crypto, EncryptedSecret, SecretString};
+use filegate_core::{Crypto, SecretString};
 use filegate_db::registry::{self, StorageRow};
 use filegate_db::PgPool;
 use filegate_infra::{s3_connect, S3StorageSpec};
 use serde::{Deserialize, Serialize};
 
-use super::error::{bad_request, not_found, ApiError};
+use crate::error::{bad_request, not_found, ApiError};
 use crate::routes::AppState;
 
 /// 등록·갱신 본문. secret_key는 여기서만 원문으로 존재한다 — 검증에 쓰이고
@@ -85,6 +85,9 @@ async fn verified_row(
         .public_endpoint
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| body.endpoint.clone());
+    // 주소는 서명 URL의 재료다 — 등록 시점에 형식을 고정한다 (spec 01).
+    require_http_url(&body.endpoint, "endpoint")?;
+    require_http_url(&public_endpoint, "public_endpoint")?;
     let spec = S3StorageSpec {
         endpoint: body.endpoint,
         public_endpoint,
@@ -115,32 +118,11 @@ async fn verified_row(
     })
 }
 
-/// 행을 복호해 접근 명세로 되돌린다. 부팅 재검증(과 이후 서명 경로)의 입구.
-fn spec_from_row(crypto: &Crypto, row: &StorageRow) -> filegate_core::Result<S3StorageSpec> {
-    let secret_key = crypto.decrypt(
-        &row.enc_key_id,
-        &row.id,
-        &EncryptedSecret {
-            ciphertext: row.secret_key_ciphertext.clone(),
-            nonce: row.secret_key_nonce.clone(),
-        },
-    )?;
-    Ok(S3StorageSpec {
-        endpoint: row.endpoint.clone(),
-        public_endpoint: row.public_endpoint.clone(),
-        region: row.region.clone(),
-        bucket: row.bucket.clone(),
-        force_path_style: row.force_path_style,
-        access_key: row.access_key.clone(),
-        secret_key,
-    })
-}
-
 /// 부팅 재검증 — 등록된 모든 storage 행을 복호해 접근을 확인한다 (ADR 001).
 /// 실패하면 부팅 중단. 잘못된 마스터 키 설정도 여기서 잡힌다 (spec 01).
 pub async fn verify_registered(pool: &PgPool, crypto: &Crypto) -> anyhow::Result<()> {
     for row in registry::list_storages(pool).await? {
-        let spec = spec_from_row(crypto, &row)
+        let spec = crate::storage_access::spec_from_row(crypto, &row)
             .map_err(|error| anyhow::anyhow!("storage '{}': {error}", row.id))?;
         s3_connect(&spec)
             .await
@@ -201,4 +183,17 @@ pub(super) async fn delete(
         .map_err(ApiError::on_delete)?;
     tracing::info!(event = "storage.deleted", storage = %id);
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// http(s) URL 형식 검사 — presign이 이 주소로 서명하므로 등록에서 거른다.
+fn require_http_url(value: &str, field: &str) -> Result<(), ApiError> {
+    let parsed: Result<axum::http::Uri, _> = value.parse();
+    let valid = parsed
+        .map(|uri| matches!(uri.scheme_str(), Some("http" | "https")) && uri.host().is_some())
+        .unwrap_or(false);
+    if valid {
+        Ok(())
+    } else {
+        Err(bad_request(&format!("{field} must be an http(s) URL")))
+    }
 }

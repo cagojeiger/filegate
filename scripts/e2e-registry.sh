@@ -31,6 +31,7 @@ HASH_B="sha256:$(printf 'b%.0s' $(seq 64))"
 $PSQL "DELETE FROM files;" >/dev/null 2>&1
 $PSQL "DELETE FROM bindings;" >/dev/null 2>&1
 $PSQL "DELETE FROM clients;" >/dev/null 2>&1
+$PSQL "DELETE FROM storage_usage;" >/dev/null 2>&1
 $PSQL "DELETE FROM storages;" >/dev/null 2>&1
 
 echo "=== A. DB 제약 프로브 ==="

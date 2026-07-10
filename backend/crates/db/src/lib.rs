@@ -1,5 +1,6 @@
 //! PostgreSQL 접근. 풀 생성과 reconciler 단일 실행 보장이 여기 있다.
 
+pub mod files;
 pub mod registry;
 
 use sqlx::postgres::PgPoolOptions;

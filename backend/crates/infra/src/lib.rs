@@ -5,4 +5,7 @@
 
 mod s3;
 
-pub use s3::{connect as s3_connect, S3Storage, S3StorageSpec};
+pub use s3::{
+    client as s3_client, connect as s3_connect, head_object as s3_head_object,
+    presign_put as s3_presign_put, Address, S3Storage, S3StorageSpec,
+};

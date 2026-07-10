@@ -1,12 +1,13 @@
-//! 핸들러 에러 → HTTP 응답 번역. 핸들러는 `Result<_, ApiError>`를 돌려주고
-//! `?`로 전파한다 — 상태 코드 규칙이 이 파일 한 곳에 산다.
+//! 핸들러 에러 → HTTP 응답 번역 (운영자 API와 클라이언트 API 공용).
+//! 핸들러는 `Result<_, ApiError>`를 돌려주고 `?`로 전파한다 —
+//! 상태 코드 규칙이 이 파일 한 곳에 산다.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use filegate_db::registry::{self, WriteOp, WriteViolation};
 
-pub(super) enum ApiError {
+pub(crate) enum ApiError {
     /// 명시적 상태와 메시지 (400/401/404).
     Status(StatusCode, String),
     /// DB 쓰기 거부 — 분류는 IntoResponse에서 (중복 409, 참조 없음 404,
@@ -14,17 +15,19 @@ pub(super) enum ApiError {
     Db(filegate_db::DbError, WriteOp),
     /// 내부 실패 — 상세는 로그로, 응답은 일반 문구.
     Internal(filegate_core::Error),
+    /// 저장소 호출 실패 — 502, 상세는 로그로.
+    Storage(anyhow::Error),
 }
 
-pub(super) fn bad_request(message: &str) -> ApiError {
+pub(crate) fn bad_request(message: &str) -> ApiError {
     ApiError::Status(StatusCode::BAD_REQUEST, message.to_owned())
 }
 
-pub(super) fn not_found(message: &str) -> ApiError {
+pub(crate) fn not_found(message: &str) -> ApiError {
     ApiError::Status(StatusCode::NOT_FOUND, message.to_owned())
 }
 
-pub(super) fn unauthorized() -> ApiError {
+pub(crate) fn unauthorized() -> ApiError {
     ApiError::Status(
         StatusCode::UNAUTHORIZED,
         "operator token required".to_owned(),
@@ -34,7 +37,7 @@ pub(super) fn unauthorized() -> ApiError {
 impl ApiError {
     /// DELETE 경로의 DB 에러 — FK 위반을 "참조가 남아 삭제 불가"(409)로 읽는다.
     /// 나머지 경로는 `From`(Insert 방향: 참조 대상 없음 = 404)이 담당한다.
-    pub(super) fn on_delete(error: filegate_db::DbError) -> Self {
+    pub(crate) fn on_delete(error: filegate_db::DbError) -> Self {
         Self::Db(error, WriteOp::Delete)
     }
 }
@@ -77,13 +80,17 @@ impl IntoResponse for ApiError {
                     "invalid field (id slug, capacity_bytes >= 0, key hash format)",
                 ),
                 None => {
-                    tracing::error!(event = "admin.db_error", %error);
+                    tracing::error!(event = "api.db_error", %error);
                     payload(StatusCode::INTERNAL_SERVER_ERROR, "database error")
                 }
             },
             Self::Internal(error) => {
-                tracing::error!(event = "admin.internal", %error);
+                tracing::error!(event = "api.internal", %error);
                 payload(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            Self::Storage(error) => {
+                tracing::error!(event = "api.storage_error", %error);
+                payload(StatusCode::BAD_GATEWAY, "storage unavailable")
             }
         }
     }

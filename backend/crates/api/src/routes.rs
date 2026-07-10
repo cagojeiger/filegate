@@ -1,4 +1,4 @@
-//! HTTP 표면. 클라이언트 키 미들웨어는 lease API와 함께 들어온다.
+//! HTTP 표면 — 경로 배선과 공통 레이어만 안다.
 //!
 //! 경로 구조:
 //!   /            서비스 정보
@@ -6,7 +6,7 @@
 //!   /ready       readiness (DB 체크)
 //!   /metrics     Prometheus 스크레이프
 //!   /admin/*     운영자 API (정적 운영자 토큰 — admin 모듈)
-//!   /v1/*        클라이언트 API 상위 경로 (예정 — 지금은 빈 그룹, 자리만 잡음)
+//!   /v1/*        클라이언트 API (클라이언트 키 — v1 모듈)
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,7 +45,7 @@ pub fn app(state: AppState) -> Router {
         .route("/", get(root))
         .merge(system_routes())
         .nest("/admin", admin_guarded(state.clone()))
-        .merge(v1_routes())
+        .nest("/v1", v1_guarded(state.clone()))
         .with_state(state)
         .layer(RequestBodyLimitLayer::new(CONTROL_BODY_LIMIT))
         .layer(TimeoutLayer::with_status_code(
@@ -70,9 +70,12 @@ fn system_routes() -> Router<AppState> {
         .route("/metrics", get(metrics_scrape))
 }
 
-/// 클라이언트 API 상위 경로. lease 오퍼레이션이 여기 merge된다 (spec 00).
-fn v1_routes() -> Router<AppState> {
-    Router::new()
+/// 클라이언트 API — 전 경로가 클라이언트 키 미들웨어 뒤에 있다 (spec 00).
+fn v1_guarded(state: AppState) -> Router<AppState> {
+    crate::v1::v1_routes().route_layer(middleware::from_fn_with_state(
+        state,
+        crate::v1::require_client,
+    ))
 }
 
 /// 운영자 표면 — 전 경로가 토큰 미들웨어 뒤에 있다. route_layer라

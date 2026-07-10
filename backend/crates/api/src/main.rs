@@ -2,9 +2,12 @@
 //! → HTTP + reconciler → graceful shutdown.
 
 mod admin;
+mod error;
 mod metrics;
 mod reconciler;
 mod routes;
+mod storage_access;
+mod v1;
 
 use std::io;
 use std::sync::Arc;
