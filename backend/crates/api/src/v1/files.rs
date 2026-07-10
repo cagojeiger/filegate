@@ -11,7 +11,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
-use filegate_db::files::{self, CreateOutcome, CreateSpec};
+use filegate_db::files::{self, CreateOutcome, CreateSpec, DeleteOutcome};
 use filegate_infra::{s3_client, s3_head_object, s3_presign_get, s3_presign_put, Address};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -261,6 +261,41 @@ pub(super) async fn stat(
         intent: stat.intent,
     })
     .into_response())
+}
+
+/// delete = detach 결정 기록 (spec 00). 물리 purge는 reconciler 몫이다.
+pub(super) async fn delete(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientId>,
+    Path(file_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    match files::mark_deleted(&state.pool, &client.0, file_id).await? {
+        DeleteOutcome::Deleted => {
+            tracing::info!(event = "file.deleted", file = %file_id, client = %client.0);
+            Ok(deleted_response(file_id))
+        }
+        // 멱등 — 재삭제는 같은 답.
+        DeleteOutcome::AlreadyDeleted => Ok(deleted_response(file_id)),
+        DeleteOutcome::NotCommitted => Err(ApiError::Status(
+            StatusCode::CONFLICT,
+            "file is not committed".to_owned(),
+        )),
+        DeleteOutcome::NotFound => Err(not_found("file not found")),
+    }
+}
+
+#[derive(Serialize)]
+struct DeleteOut {
+    file_id: Uuid,
+    state: &'static str,
+}
+
+fn deleted_response(file_id: Uuid) -> Response {
+    Json(DeleteOut {
+        file_id,
+        state: "deleted",
+    })
+    .into_response()
 }
 
 fn committed_response(file_id: Uuid, etag: String) -> Response {

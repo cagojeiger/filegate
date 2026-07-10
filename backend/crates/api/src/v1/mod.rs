@@ -23,7 +23,7 @@ pub struct ClientId(pub String);
 pub fn v1_routes() -> Router<AppState> {
     Router::new()
         .route("/files", post(files::create))
-        .route("/files/{id}", get(files::stat))
+        .route("/files/{id}", get(files::stat).delete(files::delete))
         .route("/files/{id}/commit", post(files::commit))
         .route("/files/{id}/read", post(files::read))
 }

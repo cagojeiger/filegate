@@ -321,3 +321,25 @@ pub fn write_violation(error: &sqlx::Error, op: WriteOp) -> Option<WriteViolatio
         _ => None,
     }
 }
+
+// ---- usage (운영자 조회) ----
+
+/// storage별 회계 스냅샷 (spec 00 usage): 한도와 세 버킷.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct UsageRow {
+    pub storage_id: String,
+    pub capacity_bytes: i64,
+    pub reserved_bytes: i64,
+    pub active_bytes: i64,
+    pub purge_pending_bytes: i64,
+}
+
+pub async fn usage_report(pool: &PgPool) -> Result<Vec<UsageRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT s.id AS storage_id, s.capacity_bytes, u.reserved_bytes, u.active_bytes, \
+         u.purge_pending_bytes \
+         FROM storages s JOIN storage_usage u ON u.storage_id = s.id ORDER BY s.id",
+    )
+    .fetch_all(pool)
+    .await
+}

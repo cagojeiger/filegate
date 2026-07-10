@@ -6,7 +6,7 @@
 mod s3;
 
 pub use s3::{
-    client as s3_client, connect as s3_connect, head_object as s3_head_object,
-    presign_get as s3_presign_get, presign_put as s3_presign_put, Address, S3Storage,
-    S3StorageSpec,
+    client as s3_client, connect as s3_connect, delete_object as s3_delete_object,
+    head_object as s3_head_object, presign_get as s3_presign_get, presign_put as s3_presign_put,
+    Address, S3Storage, S3StorageSpec,
 };

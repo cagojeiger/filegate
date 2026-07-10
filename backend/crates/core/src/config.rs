@@ -61,6 +61,8 @@ impl SecurityConfig {
 pub struct ServerConfig {
     pub bind_addr: SocketAddr,
     pub log_format: LogFormat,
+    /// reconciler tick 간격 (기본 60초). 테스트에서만 줄인다.
+    pub reconciler_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -98,6 +100,11 @@ impl Config {
                     )))
                 }
             },
+            reconciler_interval_secs: env("FILEGATE_RECONCILER_INTERVAL_SECS")
+                .map(|v| v.parse())
+                .transpose()
+                .map_err(|e| Error::config(format!("FILEGATE_RECONCILER_INTERVAL_SECS: {e}")))?
+                .unwrap_or(60),
         };
         let database = DatabaseConfig {
             url: SecretString::from(env("FILEGATE_DATABASE_URL").unwrap_or_else(|| {

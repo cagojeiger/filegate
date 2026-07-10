@@ -159,6 +159,19 @@ fn rfc5987_encode(value: &str) -> String {
     out
 }
 
+/// 물리 삭제 (reconciler의 purge·회수). S3 DeleteObject는 없는 키에도
+/// 성공한다 — purge는 멱등하다 (spec 00, 실측).
+pub async fn delete_object(storage: &S3Storage, object_key: &str) -> anyhow::Result<()> {
+    storage
+        .client
+        .delete_object()
+        .bucket(&storage.bucket)
+        .key(object_key)
+        .send()
+        .await?;
+    Ok(())
+}
+
 /// 실물 메타 조회 (commit의 사후 검증). 없으면 None.
 /// 반환: (크기, ETag — 따옴표 제거. 단일 PUT이면 MD5와 같다, 실측).
 pub async fn head_object(

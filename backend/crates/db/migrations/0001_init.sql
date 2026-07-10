@@ -3,14 +3,17 @@
 -- 상태 전이의 집행은 repo의 조건부 갱신 몫이다 (docs/stack). 여기서는 값
 -- 도메인, 상태-시각 정합, 음수 회계를 DB가 거부하게 한다.
 
--- 파일 정체성. 상태: pending(미확정) → active(확정) → deleted(purge 대기).
+-- 파일 정체성. 상태: pending(미확정) → active(확정) → deleted(purge 대기),
+-- 그리고 pending → reclaimed(lease 만료 회수 — 파일이 되지 못한 흔적).
 -- purge 후에도 행은 deleted로 남는다 — stat이 계속 답한다 (spec 00).
+-- reclaimed도 행이 남는다 — lease 원장(FK)이 파일 행을 참조하기 때문이고,
+-- 회수와 늦은 commit의 경합을 상태 전이 하나로 끊는 장치이기도 하다.
 CREATE TABLE files (
     id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     client_id     text NOT NULL,
     intent        text NOT NULL,
     state         text NOT NULL DEFAULT 'pending'
-                  CHECK (state IN ('pending', 'active', 'deleted')),
+                  CHECK (state IN ('pending', 'active', 'deleted', 'reclaimed')),
     declared_size bigint NOT NULL CHECK (declared_size >= 0),
     content_type  text,
     declared_md5  text,

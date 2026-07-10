@@ -90,6 +90,33 @@ expect "reserved_bytes" "999" "$($PSQL "SELECT reserved_bytes FROM storage_usage
 expect "파일1 active" "active" "$($PSQL "SELECT state FROM files WHERE id='$FILE_ID';" | tr -d ' ')"
 expect "쓰기 lease 정산" "committed" "$($PSQL "SELECT state FROM leases WHERE file_id='$FILE_ID' AND kind='write';" | tr -d ' ')"
 
+echo "=== delete(detach) → reconciler purge ==="
+DEL=$(curl -s -w '\n%{http_code}' -H "$AUTH" -X DELETE $BASE/v1/files/$FILE_ID)
+expect "delete 200" 200 "$(printf '%s' "$DEL" | tail -1)"
+expect "delete 멱등 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE $BASE/v1/files/$FILE_ID)"
+expect "삭제 후 read 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$FILE_ID/read)"
+expect "삭제 후 commit 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$FILE_ID/commit)"
+expect "pending 파일 delete 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE $BASE/v1/files/$F2)"
+expect "purge 대기 회계" "$SIZE" "$($PSQL "SELECT purge_pending_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
+
+echo "=== 운영자 usage 조회 ==="
+USAGE=$(curl -s -H "Authorization: Bearer fgop_local-dev" $BASE/admin/usage)
+case "$USAGE" in *'"purge_pending_bytes":'$SIZE*) ok;; *) bad "usage purge_pending 불일치: $USAGE";; esac
+case "$USAGE" in *'"reserved_bytes":999'*) ok;; *) bad "usage reserved 불일치: $USAGE";; esac
+expect "클라이언트 키로 usage 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" $BASE/admin/usage)"
+
+echo "=== reconciler: 만료 회수 + purge (tick 대기) ==="
+# pending 파일(F2)의 쓰기 lease를 강제 만료시킨다 (테스트 전용)
+$PSQL "UPDATE leases SET expires_at = now() - interval '1 second' WHERE file_id='$F2' AND kind='write';" >/dev/null
+sleep 7   # FILEGATE_RECONCILER_INTERVAL_SECS=2 기준 tick 3회 이상
+expect "pending → reclaimed" "reclaimed" "$($PSQL "SELECT state FROM files WHERE id='$F2';" | tr -d ' ')"
+expect "회수 후 reserved 0" "0" "$($PSQL "SELECT reserved_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
+expect "purge 후 대기 0" "0" "$($PSQL "SELECT purge_pending_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
+expect "purge 후에도 stat은 답한다(deleted)" "deleted" "$($PSQL "SELECT state FROM files WHERE id='$FILE_ID';" | tr -d ' ')"
+expect "location 제거됨" "0" "$($PSQL "SELECT count(*) FROM locations;" | tr -d ' ')"
+DL=$(curl -s -o /dev/null -w '%{http_code}' "$GET_URL")
+expect "purge 후 기존 GET URL 404" 404 "$DL"
+
 # 정리 — 로컬 개발 DB 전용 (TF destroy가 막히지 않게)
 $PSQL "DELETE FROM leases;" >/dev/null 2>&1
 $PSQL "DELETE FROM locations;" >/dev/null 2>&1
