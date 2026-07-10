@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -153,7 +154,7 @@ func (r *storageResource) Read(
 
 	var remote storageAPIModel
 	status, err := r.client.do(
-		ctx, http.MethodGet, "/admin/storages/"+state.ID.ValueString(), nil, &remote,
+		ctx, http.MethodGet, "/admin/storages/"+url.PathEscape(state.ID.ValueString()), nil, &remote,
 	)
 	if status == http.StatusNotFound {
 		// 등록부에서 사라졌다 — state에서도 지워 재생성 계획이 서게 한다.
@@ -188,7 +189,7 @@ func (r *storageResource) Update(
 
 	body := apiModelFrom(plan)
 	body.ID = "" // id는 경로로 간다
-	path := "/admin/storages/" + plan.ID.ValueString()
+	path := "/admin/storages/" + url.PathEscape(plan.ID.ValueString())
 	if _, err := r.client.do(ctx, http.MethodPut, path, body, nil); err != nil {
 		response.Diagnostics.AddError("provider update failed", err.Error())
 		return
@@ -207,7 +208,7 @@ func (r *storageResource) Delete(
 		return
 	}
 
-	path := "/admin/storages/" + state.ID.ValueString()
+	path := "/admin/storages/" + url.PathEscape(state.ID.ValueString())
 	if _, err := r.client.do(ctx, http.MethodDelete, path, nil, nil); err != nil {
 		// 사용 중(참조되는) provider의 삭제는 filegate가 409로 거부한다.
 		response.Diagnostics.AddError("provider delete failed", err.Error())

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -79,7 +80,8 @@ func (r *clientKeyResource) Configure(
 }
 
 func (r *clientKeyResource) keyPath(model clientKeyResourceModel) string {
-	return "/admin/clients/" + model.ClientID.ValueString() + "/keys/" + model.KeyHash.ValueString()
+	return "/admin/clients/" + url.PathEscape(model.ClientID.ValueString()) +
+		"/keys/" + url.PathEscape(model.KeyHash.ValueString())
 }
 
 func (r *clientKeyResource) Create(
@@ -93,7 +95,7 @@ func (r *clientKeyResource) Create(
 		return
 	}
 
-	path := "/admin/clients/" + plan.ClientID.ValueString() + "/keys"
+	path := "/admin/clients/" + url.PathEscape(plan.ClientID.ValueString()) + "/keys"
 	body := map[string]string{"key_hash": plan.KeyHash.ValueString()}
 	if _, err := r.client.do(ctx, http.MethodPost, path, body, nil); err != nil {
 		response.Diagnostics.AddError("client key registration failed", err.Error())

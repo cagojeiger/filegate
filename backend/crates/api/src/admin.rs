@@ -15,7 +15,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use filegate_core::{Crypto, EncryptedSecret, SecretString};
-use filegate_db::registry::{self, BindingRow, StorageRow, WriteViolation};
+use filegate_db::registry::{self, BindingRow, StorageRow, WriteOp, WriteViolation};
 use filegate_infra::{s3_connect, S3StorageSpec};
 use serde::{Deserialize, Serialize};
 
@@ -40,7 +40,10 @@ pub fn admin_routes() -> Router<AppState> {
         )
         .route(
             "/clients/{id}/bindings/{intent}",
-            get(binding_get).put(binding_put).delete(binding_delete),
+            get(binding_get)
+                .post(binding_create)
+                .put(binding_update)
+                .delete(binding_delete),
         )
 }
 
@@ -54,7 +57,8 @@ pub async fn require_operator(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
+        .and_then(|value| value.split_once(' '))
+        .and_then(|(scheme, token)| scheme.eq_ignore_ascii_case("bearer").then_some(token));
     match presented {
         Some(token) if state.security.operator_token_matches(token) => next.run(request).await,
         _ => error_response(StatusCode::UNAUTHORIZED, "operator token required"),
@@ -116,6 +120,13 @@ async fn verified_row(
     id: &str,
     body: StorageSpecBody,
 ) -> Result<StorageRow, Response> {
+    // 싼 검증이 먼저다 — 네트워크 검증(head_bucket) 전에 거른다.
+    if body.capacity_bytes < 0 {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "capacity_bytes must be >= 0",
+        ));
+    }
     let spec = S3StorageSpec {
         endpoint: body.endpoint,
         region: body.region,
@@ -160,7 +171,7 @@ async fn storage_create(
             tracing::info!(event = "storage.registered", storage = %row.id);
             (StatusCode::CREATED, Json(StorageOut::from(row))).into_response()
         }
-        Err(error) => db_error_response(&error),
+        Err(error) => db_error_response(&error, WriteOp::Insert),
     }
 }
 
@@ -169,6 +180,12 @@ async fn storage_update(
     Path(id): Path<String>,
     Json(body): Json<StorageSpecBody>,
 ) -> Response {
+    // 없는 행의 갱신은 네트워크 검증 전에 404로 끝낸다.
+    match registry::get_storage(&state.pool, &id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return not_found("storage not found"),
+        Err(error) => return db_error_response(&error, WriteOp::Insert),
+    }
     let row = match verified_row(&state.crypto, &id, body).await {
         Ok(row) => row,
         Err(response) => return response,
@@ -179,7 +196,7 @@ async fn storage_update(
             (StatusCode::OK, Json(StorageOut::from(row))).into_response()
         }
         Ok(false) => not_found("storage not found"),
-        Err(error) => db_error_response(&error),
+        Err(error) => db_error_response(&error, WriteOp::Insert),
     }
 }
 
@@ -187,7 +204,7 @@ async fn storage_get(State(state): State<AppState>, Path(id): Path<String>) -> R
     match registry::get_storage(&state.pool, &id).await {
         Ok(Some(row)) => Json(StorageOut::from(row)).into_response(),
         Ok(None) => not_found("storage not found"),
-        Err(error) => db_error_response(&error),
+        Err(error) => db_error_response(&error, WriteOp::Insert),
     }
 }
 
@@ -196,7 +213,7 @@ async fn storage_list(State(state): State<AppState>) -> Response {
         Ok(rows) => {
             Json(rows.into_iter().map(StorageOut::from).collect::<Vec<_>>()).into_response()
         }
-        Err(error) => db_error_response(&error),
+        Err(error) => db_error_response(&error, WriteOp::Insert),
     }
 }
 
@@ -206,7 +223,7 @@ async fn storage_delete(State(state): State<AppState>, Path(id): Path<String>) -
             tracing::info!(event = "storage.deleted", storage = %id);
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(error) => db_error_response(&error),
+        Err(error) => db_error_response(&error, WriteOp::Delete),
     }
 }
 
@@ -250,7 +267,7 @@ async fn client_create(
             )
                 .into_response()
         }
-        Err(error) => db_error_response(&error),
+        Err(error) => db_error_response(&error, WriteOp::Insert),
     }
 }
 
@@ -258,14 +275,14 @@ async fn client_get(State(state): State<AppState>, Path(id): Path<String>) -> Re
     match registry::client_exists(&state.pool, &id).await {
         Ok(true) => Json(serde_json::json!({ "id": id })).into_response(),
         Ok(false) => not_found("client not found"),
-        Err(error) => db_error_response(&error),
+        Err(error) => db_error_response(&error, WriteOp::Insert),
     }
 }
 
 async fn client_list(State(state): State<AppState>) -> Response {
     match registry::list_clients(&state.pool).await {
         Ok(ids) => Json(ids).into_response(),
-        Err(error) => db_error_response(&error),
+        Err(error) => db_error_response(&error, WriteOp::Insert),
     }
 }
 
@@ -275,7 +292,7 @@ async fn client_delete(State(state): State<AppState>, Path(id): Path<String>) ->
             tracing::info!(event = "client.deleted", client = %id);
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(error) => db_error_response(&error),
+        Err(error) => db_error_response(&error, WriteOp::Delete),
     }
 }
 
@@ -300,7 +317,7 @@ async fn client_key_create(
             )
                 .into_response()
         }
-        Err(error) => db_error_response(&error),
+        Err(error) => db_error_response(&error, WriteOp::Insert),
     }
 }
 
@@ -312,14 +329,14 @@ async fn client_key_get(
         Ok(true) => Json(serde_json::json!({ "client_id": client_id, "key_hash": key_hash }))
             .into_response(),
         Ok(false) => not_found("client key not found"),
-        Err(error) => db_error_response(&error),
+        Err(error) => db_error_response(&error, WriteOp::Insert),
     }
 }
 
 async fn client_key_list(State(state): State<AppState>, Path(client_id): Path<String>) -> Response {
     match registry::list_client_keys(&state.pool, &client_id).await {
         Ok(hashes) => Json(hashes).into_response(),
-        Err(error) => db_error_response(&error),
+        Err(error) => db_error_response(&error, WriteOp::Insert),
     }
 }
 
@@ -332,7 +349,7 @@ async fn client_key_delete(
             tracing::info!(event = "client_key.deleted", client = %client_id);
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(error) => db_error_response(&error),
+        Err(error) => db_error_response(&error, WriteOp::Delete),
     }
 }
 
@@ -343,7 +360,7 @@ struct BindingPutBody {
     storage_id: String,
 }
 
-async fn binding_put(
+async fn binding_create(
     State(state): State<AppState>,
     Path((client_id, intent)): Path<(String, String)>,
     Json(body): Json<BindingPutBody>,
@@ -353,7 +370,7 @@ async fn binding_put(
         intent,
         storage_id: body.storage_id,
     };
-    match registry::upsert_binding(&state.pool, &row).await {
+    match registry::insert_binding(&state.pool, &row).await {
         Ok(()) => {
             tracing::info!(
                 event = "binding.bound",
@@ -361,9 +378,35 @@ async fn binding_put(
                 intent = %row.intent,
                 storage = %row.storage_id,
             );
+            (StatusCode::CREATED, Json(binding_json(&row))).into_response()
+        }
+        Err(error) => db_error_response(&error, WriteOp::Insert),
+    }
+}
+
+/// 갱신 전용 — 없는 binding은 404다. 생성은 POST가 한다 (TF Create/Update 대칭).
+async fn binding_update(
+    State(state): State<AppState>,
+    Path((client_id, intent)): Path<(String, String)>,
+    Json(body): Json<BindingPutBody>,
+) -> Response {
+    let row = BindingRow {
+        client_id,
+        intent,
+        storage_id: body.storage_id,
+    };
+    match registry::update_binding(&state.pool, &row).await {
+        Ok(true) => {
+            tracing::info!(
+                event = "binding.rebound",
+                client = %row.client_id,
+                intent = %row.intent,
+                storage = %row.storage_id,
+            );
             Json(binding_json(&row)).into_response()
         }
-        Err(error) => db_error_response(&error),
+        Ok(false) => not_found("binding not found"),
+        Err(error) => db_error_response(&error, WriteOp::Insert),
     }
 }
 
@@ -374,7 +417,7 @@ async fn binding_get(
     match registry::get_binding(&state.pool, &client_id, &intent).await {
         Ok(Some(row)) => Json(binding_json(&row)).into_response(),
         Ok(None) => not_found("binding not found"),
-        Err(error) => db_error_response(&error),
+        Err(error) => db_error_response(&error, WriteOp::Insert),
     }
 }
 
@@ -387,7 +430,7 @@ async fn binding_delete(
             tracing::info!(event = "binding.deleted", client = %client_id, intent = %intent);
             StatusCode::NO_CONTENT.into_response()
         }
-        Err(error) => db_error_response(&error),
+        Err(error) => db_error_response(&error, WriteOp::Delete),
     }
 }
 
@@ -414,8 +457,8 @@ fn internal_error(error: filegate_core::Error) -> Response {
     error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
 }
 
-fn db_error_response(error: &filegate_db::DbError) -> Response {
-    match registry::write_violation(error) {
+fn db_error_response(error: &filegate_db::DbError, op: WriteOp) -> Response {
+    match registry::write_violation(error, op) {
         Some(WriteViolation::Duplicate) => error_response(StatusCode::CONFLICT, "already exists"),
         Some(WriteViolation::MissingRef(constraint)) => {
             // 없는 부모를 가리키는 쓰기 — 어느 노드가 없는지 제약 이름이 말해준다.

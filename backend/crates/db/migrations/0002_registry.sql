@@ -60,6 +60,9 @@ CREATE TABLE bindings (
     PRIMARY KEY (client_id, intent)
 );
 
+-- storage 삭제 시 FK RESTRICT 검사가 이 인덱스를 탄다 (PK는 client 쪽만 커버).
+CREATE INDEX bindings_storage_idx ON bindings (storage_id);
+
 -- 도메인 테이블(0001)의 느슨한 text id를 등록부에 묶는다.
 -- 파일을 가진 client, 위치·회계가 남은 storage는 삭제가 거부된다 (ADR 004).
 ALTER TABLE files

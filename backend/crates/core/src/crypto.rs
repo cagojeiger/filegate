@@ -72,7 +72,9 @@ fn derive(key_id: &str, root: &SecretString) -> Result<KeyEntry> {
     }
     let hk = Hkdf::<Sha256>::new(None, root_bytes);
     let mut key = [0_u8; KEY_LEN];
-    hk.expand(STORAGE_SECRET_LABEL, &mut key)
+    // key_id를 파생에 섞는다 — 라벨이 이름표가 아니라 키의 일부가 된다.
+    // 같은 루트에 다른 key_id를 주면(회전 실수) 키도 달라져 복호가 실패한다.
+    hk.expand_multi_info(&[STORAGE_SECRET_LABEL, b"/", key_id.as_bytes()], &mut key)
         .map_err(|_e| Error::internal("hkdf expand failed"))?;
     Ok(KeyEntry {
         key,
@@ -244,6 +246,20 @@ mod tests {
             .unwrap()
             .with_prev("v1", &root("two"));
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn same_root_with_different_key_id_derives_a_different_key() {
+        // 회전 실수(같은 루트를 다른 라벨로 재사용)가 조용히 같은 키가 되지
+        // 않는다 — key_id가 HKDF 파생에 섞이므로 세대마다 키가 다르다.
+        let v1 = crypto_v1();
+        let enc = v1
+            .encrypt("oci-std", &SecretString::from("s".to_owned()))
+            .unwrap();
+        let same_conditions = Crypto::new("v1", &root("one")).unwrap();
+        assert!(same_conditions.decrypt("v1", "oci-std", &enc).is_ok());
+        let same_root_new_id = Crypto::new("v2", &root("one")).unwrap();
+        assert!(same_root_new_id.decrypt("v2", "oci-std", &enc).is_err());
     }
 
     #[test]

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -103,7 +104,7 @@ func (r *clientResource) Read(
 	}
 
 	status, err := r.client.do(
-		ctx, http.MethodGet, "/admin/clients/"+state.ID.ValueString(), nil, nil,
+		ctx, http.MethodGet, "/admin/clients/"+url.PathEscape(state.ID.ValueString()), nil, nil,
 	)
 	if status == http.StatusNotFound {
 		response.State.RemoveResource(ctx)
@@ -137,7 +138,7 @@ func (r *clientResource) Delete(
 		return
 	}
 
-	path := "/admin/clients/" + state.ID.ValueString()
+	path := "/admin/clients/" + url.PathEscape(state.ID.ValueString())
 	if _, err := r.client.do(ctx, http.MethodDelete, path, nil, nil); err != nil {
 		// binding·file이 남아 있으면 filegate가 409로 거부한다.
 		response.Diagnostics.AddError("client delete failed", err.Error())

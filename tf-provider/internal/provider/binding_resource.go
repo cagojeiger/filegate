@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -84,14 +85,19 @@ func (r *bindingResource) Configure(
 }
 
 func (r *bindingResource) bindingPath(model bindingResourceModel) string {
-	return "/admin/clients/" + model.ClientID.ValueString() +
-		"/bindings/" + model.Intent.ValueString()
+	return "/admin/clients/" + url.PathEscape(model.ClientID.ValueString()) +
+		"/bindings/" + url.PathEscape(model.Intent.ValueString())
 }
 
-// PUT은 upsert라 Create와 Update가 같은 호출이다.
-func (r *bindingResource) put(ctx context.Context, model bindingResourceModel) error {
+// Create=POST(중복이면 409 — 기존 binding을 조용히 덮지 않는다),
+// Update=PUT(갱신 전용, 없으면 404). TF 라이프사이클과 1:1이다.
+func (r *bindingResource) send(
+	ctx context.Context,
+	method string,
+	model bindingResourceModel,
+) error {
 	body := map[string]string{"storage_id": model.StorageID.ValueString()}
-	_, err := r.client.do(ctx, http.MethodPut, r.bindingPath(model), body, nil)
+	_, err := r.client.do(ctx, method, r.bindingPath(model), body, nil)
 	return err
 }
 
@@ -105,7 +111,7 @@ func (r *bindingResource) Create(
 	if response.Diagnostics.HasError() {
 		return
 	}
-	if err := r.put(ctx, plan); err != nil {
+	if err := r.send(ctx, http.MethodPost, plan); err != nil {
 		response.Diagnostics.AddError("binding failed", err.Error())
 		return
 	}
@@ -149,7 +155,7 @@ func (r *bindingResource) Update(
 	if response.Diagnostics.HasError() {
 		return
 	}
-	if err := r.put(ctx, plan); err != nil {
+	if err := r.send(ctx, http.MethodPut, plan); err != nil {
 		response.Diagnostics.AddError("binding update failed", err.Error())
 		return
 	}

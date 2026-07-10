@@ -199,18 +199,26 @@ pub struct BindingRow {
     pub storage_id: String,
 }
 
-/// upsert — 같은 (client, intent)의 storage 포인터 교체가 배치 변경이다 (spec 01).
-pub async fn upsert_binding(pool: &PgPool, row: &BindingRow) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO bindings (client_id, intent, storage_id) VALUES ($1, $2, $3) \
-         ON CONFLICT (client_id, intent) DO UPDATE SET storage_id = EXCLUDED.storage_id",
-    )
-    .bind(&row.client_id)
-    .bind(&row.intent)
-    .bind(&row.storage_id)
-    .execute(pool)
-    .await
-    .map(|_| ())
+pub async fn insert_binding(pool: &PgPool, row: &BindingRow) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO bindings (client_id, intent, storage_id) VALUES ($1, $2, $3)")
+        .bind(&row.client_id)
+        .bind(&row.intent)
+        .bind(&row.storage_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
+/// storage 포인터 교체 = 배치 변경 (spec 01). 행이 없으면 false — 생성이 아니다.
+pub async fn update_binding(pool: &PgPool, row: &BindingRow) -> Result<bool, sqlx::Error> {
+    let result =
+        sqlx::query("UPDATE bindings SET storage_id = $3 WHERE client_id = $1 AND intent = $2")
+            .bind(&row.client_id)
+            .bind(&row.intent)
+            .bind(&row.storage_id)
+            .execute(pool)
+            .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn get_binding(
@@ -243,37 +251,41 @@ pub async fn delete_binding(
 
 // ---- 쓰기 거부 분류 ----
 
+/// 쓰기 종류 — FK 위반(23503)의 의미가 방향에 따라 다르다. 같은 제약이
+/// 양방향에서 걸리므로(예: bindings_storage_id_fkey는 INSERT와 storage DELETE
+/// 모두에서), 방향은 에러가 아니라 호출부가 안다. PG 에러 메시지는
+/// lc_messages에 따라 번역되므로 파싱하지 않는다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOp {
+    /// INSERT/UPDATE — FK 위반 = 가리키는 노드가 없다
+    Insert,
+    /// DELETE — FK 위반 = 참조가 남아 있어 삭제 거부
+    Delete,
+}
+
 /// 쓰기 거부의 원인 분류 — HTTP 응답 코드는 호출자(api)가 정한다.
-/// FK 위반은 제약 이름으로 "참조 대상 없음"과 "참조가 남아 삭제 불가"를 가른다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteViolation {
     /// 23505: id 충돌 (이미 존재)
     Duplicate,
-    /// 23503 (INSERT/UPDATE 쪽): 가리키는 노드가 없다 — 제약 이름 포함
+    /// 23503 + Insert: 가리키는 노드가 없다 — 제약 이름 포함
     MissingRef(String),
-    /// 23503 (DELETE 쪽): 참조가 남아 있어 삭제 거부
+    /// 23503 + Delete: 참조가 남아 있어 삭제 거부
     InUse,
     /// 23514: CHECK 위반 (슬러그 형식, 음수 capacity 등)
     Invalid,
 }
 
-pub fn write_violation(error: &sqlx::Error) -> Option<WriteViolation> {
+pub fn write_violation(error: &sqlx::Error, op: WriteOp) -> Option<WriteViolation> {
     let db_error = error.as_database_error()?;
     match db_error.code()?.as_ref() {
         "23505" => Some(WriteViolation::Duplicate),
-        "23503" => {
-            // INSERT가 없는 부모를 가리키면 위반 테이블은 자식(fk 제약 소유자)이고,
-            // DELETE가 참조 중인 부모를 지우면 메시지가 자식 테이블을 가리킨다.
-            // PG 에러 메시지로 방향을 가른다: "insert or update" vs "delete".
-            let message = db_error.message();
-            if message.starts_with("insert or update") {
-                Some(WriteViolation::MissingRef(
-                    db_error.constraint().unwrap_or("foreign key").to_owned(),
-                ))
-            } else {
-                Some(WriteViolation::InUse)
-            }
-        }
+        "23503" => match op {
+            WriteOp::Insert => Some(WriteViolation::MissingRef(
+                db_error.constraint().unwrap_or("foreign key").to_owned(),
+            )),
+            WriteOp::Delete => Some(WriteViolation::InUse),
+        },
         "23514" => Some(WriteViolation::Invalid),
         _ => None,
     }
