@@ -39,16 +39,8 @@ async fn main() -> anyhow::Result<()> {
         max_connections = config.database.max_connections
     );
 
-    // 등록된 storage 접근 재검증 — 실패하면 부팅 중단 (ADR 001). 잘못된
-    // 마스터 키 설정도 여기서 잡힌다: 모든 행의 복호가 곧 검증이다 (spec 01).
-    for row in filegate_db::registry::list_storages(&pool).await? {
-        let spec = admin::spec_from_row(&crypto, &row)
-            .map_err(|error| anyhow::anyhow!("storage '{}': {error}", row.id))?;
-        filegate_infra::s3_connect(&spec)
-            .await
-            .map_err(|error| anyhow::anyhow!("storage '{}' re-verification: {error}", row.id))?;
-        info!(event = "storage.connected", storage = %row.id);
-    }
+    // 등록된 storage 접근 재검증 — 실패하면 부팅 중단 (ADR 001).
+    admin::verify_registered(&pool, &crypto).await?;
 
     let listener = tokio::net::TcpListener::bind(config.server.bind_addr).await?;
     info!(event = "server.listening", addr = %config.server.bind_addr);
