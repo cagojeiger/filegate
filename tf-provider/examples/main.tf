@@ -26,10 +26,12 @@ provider "filegate" {
 # ── storage: 물리 저장 공간 (독립 노드) ──────────────────────────
 
 resource "filegate_storage" "minio_local" {
-  id               = "minio-local"
-  endpoint         = "http://127.0.0.1:9000"
-  region           = "us-east-1"
-  bucket           = "filegate-std"
+  id              = "minio-local"
+  endpoint        = "http://127.0.0.1:9000"
+  public_endpoint = "http://127.0.0.1:9000"
+  region          = "us-east-1"
+  bucket          = "filegate-std"
+
   force_path_style = true
 
   # 로컬 개발 전용 값 (docker-compose.yml과 동일). 실전은 TF 변수·시크릿으로.

@@ -2,7 +2,6 @@ package provider
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/url"
 
@@ -27,6 +26,7 @@ func NewStorageResource() resource.Resource {
 type storageResourceModel struct {
 	ID             types.String `tfsdk:"id"`
 	Endpoint       types.String `tfsdk:"endpoint"`
+	PublicEndpoint types.String `tfsdk:"public_endpoint"`
 	Region         types.String `tfsdk:"region"`
 	Bucket         types.String `tfsdk:"bucket"`
 	ForcePathStyle types.Bool   `tfsdk:"force_path_style"`
@@ -39,6 +39,7 @@ type storageResourceModel struct {
 type storageAPIModel struct {
 	ID             string `json:"id,omitempty"`
 	Endpoint       string `json:"endpoint"`
+	PublicEndpoint string `json:"public_endpoint"`
 	Region         string `json:"region"`
 	Bucket         string `json:"bucket"`
 	ForcePathStyle bool   `json:"force_path_style"`
@@ -73,7 +74,16 @@ func (r *storageResource) Schema(
 			},
 			"endpoint": schema.StringAttribute{
 				Required:    true,
-				Description: "S3 호환 endpoint URL.",
+				Description: "filegate가 버킷 검증과 서명 계산에 쓰는 내부 S3 호환 endpoint URL.",
+			},
+			"public_endpoint": schema.StringAttribute{
+				Optional: true,
+				Computed: true,
+				Description: "전송 주체가 presigned URL로 접근할 공개 endpoint URL. " +
+					"생략하면 endpoint와 같은 값으로 등록한다.",
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"region": schema.StringAttribute{
 				Required: true,
@@ -97,7 +107,7 @@ func (r *storageResource) Schema(
 			},
 			"capacity_bytes": schema.Int64Attribute{
 				Required:    true,
-				Description: "이 provider에 저장할 총량 상한 (bytes).",
+				Description: "이 storage에 저장할 총량 상한 (bytes).",
 			},
 		},
 	}
@@ -108,18 +118,7 @@ func (r *storageResource) Configure(
 	request resource.ConfigureRequest,
 	response *resource.ConfigureResponse,
 ) {
-	if request.ProviderData == nil {
-		return
-	}
-	client, ok := request.ProviderData.(*apiClient)
-	if !ok {
-		response.Diagnostics.AddError(
-			"unexpected provider data",
-			fmt.Sprintf("expected *apiClient, got %T", request.ProviderData),
-		)
-		return
-	}
-	r.client = client
+	r.client = configureAPIClient(request, response)
 }
 
 func (r *storageResource) Create(
@@ -133,12 +132,13 @@ func (r *storageResource) Create(
 		return
 	}
 
-	body := apiModelFrom(plan)
+	state := stateWithResolvedPublicEndpoint(plan)
+	body := apiModelFrom(state)
 	if _, err := r.client.do(ctx, http.MethodPost, "/admin/storages", body, nil); err != nil {
-		response.Diagnostics.AddError("provider registration failed", err.Error())
+		response.Diagnostics.AddError("storage registration failed", err.Error())
 		return
 	}
-	response.Diagnostics.Append(response.State.Set(ctx, plan)...)
+	response.Diagnostics.Append(response.State.Set(ctx, state)...)
 }
 
 func (r *storageResource) Read(
@@ -168,6 +168,7 @@ func (r *storageResource) Read(
 
 	// secret_key는 API가 돌려주지 않는다 (암호화 보관) — state 값을 유지한다.
 	state.Endpoint = types.StringValue(remote.Endpoint)
+	state.PublicEndpoint = types.StringValue(remote.PublicEndpoint)
 	state.Region = types.StringValue(remote.Region)
 	state.Bucket = types.StringValue(remote.Bucket)
 	state.ForcePathStyle = types.BoolValue(remote.ForcePathStyle)
@@ -187,14 +188,15 @@ func (r *storageResource) Update(
 		return
 	}
 
-	body := apiModelFrom(plan)
+	state := stateWithResolvedPublicEndpoint(plan)
+	body := apiModelFrom(state)
 	body.ID = "" // id는 경로로 간다
 	path := "/admin/storages/" + url.PathEscape(plan.ID.ValueString())
 	if _, err := r.client.do(ctx, http.MethodPut, path, body, nil); err != nil {
-		response.Diagnostics.AddError("provider update failed", err.Error())
+		response.Diagnostics.AddError("storage update failed", err.Error())
 		return
 	}
-	response.Diagnostics.Append(response.State.Set(ctx, plan)...)
+	response.Diagnostics.Append(response.State.Set(ctx, state)...)
 }
 
 func (r *storageResource) Delete(
@@ -210,8 +212,8 @@ func (r *storageResource) Delete(
 
 	path := "/admin/storages/" + url.PathEscape(state.ID.ValueString())
 	if _, err := r.client.do(ctx, http.MethodDelete, path, nil, nil); err != nil {
-		// 사용 중(참조되는) provider의 삭제는 filegate가 409로 거부한다.
-		response.Diagnostics.AddError("provider delete failed", err.Error())
+		// 사용 중(참조되는) storage의 삭제는 filegate가 409로 거부한다.
+		response.Diagnostics.AddError("storage delete failed", err.Error())
 	}
 }
 
@@ -219,6 +221,7 @@ func apiModelFrom(model storageResourceModel) storageAPIModel {
 	return storageAPIModel{
 		ID:             model.ID.ValueString(),
 		Endpoint:       model.Endpoint.ValueString(),
+		PublicEndpoint: model.PublicEndpoint.ValueString(),
 		Region:         model.Region.ValueString(),
 		Bucket:         model.Bucket.ValueString(),
 		ForcePathStyle: model.ForcePathStyle.ValueBool(),
@@ -226,4 +229,11 @@ func apiModelFrom(model storageResourceModel) storageAPIModel {
 		SecretKey:      model.SecretKey.ValueString(),
 		CapacityBytes:  model.CapacityBytes.ValueInt64(),
 	}
+}
+
+func stateWithResolvedPublicEndpoint(model storageResourceModel) storageResourceModel {
+	if model.PublicEndpoint.IsNull() || model.PublicEndpoint.IsUnknown() || model.PublicEndpoint.ValueString() == "" {
+		model.PublicEndpoint = types.StringValue(model.Endpoint.ValueString())
+	}
+	return model
 }

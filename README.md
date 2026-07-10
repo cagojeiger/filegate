@@ -35,6 +35,7 @@ curl http://127.0.0.1:8080/metrics   # Prometheus 스크레이프
 
 ```sh
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
+(cd tf-provider && test -z "$(gofmt -l .)" && go vet ./... && go test ./... && go build ./...)
 docker build -f deploy/docker/Dockerfile -t filegate:dev .
 ```
 

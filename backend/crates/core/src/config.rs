@@ -45,12 +45,15 @@ impl SecurityConfig {
 
     /// 제시된 토큰이 목록 중 하나와 일치하는가 (상수시간 비교).
     pub fn operator_token_matches(&self, presented: &str) -> bool {
+        use sha2::{Digest, Sha256};
         use subtle::ConstantTimeEq;
-        self.operator_tokens.iter().any(|token| {
-            let token = token.expose_secret().as_bytes();
-            let presented = presented.as_bytes();
-            token.len() == presented.len() && token.ct_eq(presented).into()
-        })
+        let presented_hash = Sha256::digest(presented.as_bytes());
+        let mut matched = 0_u8;
+        for token in &self.operator_tokens {
+            let token_hash = Sha256::digest(token.expose_secret().as_bytes());
+            matched |= token_hash.ct_eq(&presented_hash).unwrap_u8();
+        }
+        matched == 1
     }
 }
 

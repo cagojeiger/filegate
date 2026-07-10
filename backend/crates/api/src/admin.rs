@@ -8,6 +8,8 @@
 //! 즉석 확인하고, 성공해야 시크릿을 암호화해 저장한다. 실패한 등록은
 //! 거부된다 — DB에 닿지 않는다. clients·bindings는 FK가 검증한다.
 
+mod error;
+
 use axum::extract::{Path, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
@@ -15,11 +17,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use filegate_core::{Crypto, EncryptedSecret, SecretString};
-use filegate_db::registry::{self, BindingRow, StorageRow, WriteOp, WriteViolation};
+use filegate_db::registry::{self, BindingRow, StorageRow, WriteOp};
 use filegate_infra::{s3_connect, S3StorageSpec};
 use serde::{Deserialize, Serialize};
 
 use crate::routes::AppState;
+
+use self::error::{db_error_response, error_response, internal_error, not_found};
 
 pub fn admin_routes() -> Router<AppState> {
     Router::new()
@@ -72,6 +76,8 @@ pub async fn require_operator(
 #[derive(Deserialize)]
 struct StorageSpecBody {
     endpoint: String,
+    /// 서명 URL/전송 주체가 접근할 공개 주소. 생략하면 endpoint와 같다.
+    public_endpoint: Option<String>,
     region: String,
     bucket: String,
     #[serde(default)]
@@ -93,6 +99,7 @@ struct StorageCreateBody {
 struct StorageOut {
     id: String,
     endpoint: String,
+    public_endpoint: String,
     region: String,
     bucket: String,
     force_path_style: bool,
@@ -105,6 +112,7 @@ impl From<StorageRow> for StorageOut {
         Self {
             id: row.id,
             endpoint: row.endpoint,
+            public_endpoint: row.public_endpoint,
             region: row.region,
             bucket: row.bucket,
             force_path_style: row.force_path_style,
@@ -127,8 +135,12 @@ async fn verified_row(
             "capacity_bytes must be >= 0",
         ));
     }
+    let public_endpoint = body
+        .public_endpoint
+        .unwrap_or_else(|| body.endpoint.clone());
     let spec = S3StorageSpec {
         endpoint: body.endpoint,
+        public_endpoint,
         region: body.region,
         bucket: body.bucket,
         force_path_style: body.force_path_style,
@@ -147,6 +159,7 @@ async fn verified_row(
     Ok(StorageRow {
         id: id.to_owned(),
         endpoint: spec.endpoint,
+        public_endpoint: spec.public_endpoint,
         region: spec.region,
         bucket: spec.bucket,
         force_path_style: spec.force_path_style,
@@ -239,6 +252,7 @@ pub fn spec_from_row(crypto: &Crypto, row: &StorageRow) -> filegate_core::Result
     )?;
     Ok(S3StorageSpec {
         endpoint: row.endpoint.clone(),
+        public_endpoint: row.public_endpoint.clone(),
         region: row.region.clone(),
         bucket: row.bucket.clone(),
         force_path_style: row.force_path_style,
@@ -334,6 +348,11 @@ async fn client_key_get(
 }
 
 async fn client_key_list(State(state): State<AppState>, Path(client_id): Path<String>) -> Response {
+    match registry::client_exists(&state.pool, &client_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found("client not found"),
+        Err(error) => return db_error_response(&error, WriteOp::Insert),
+    }
     match registry::list_client_keys(&state.pool, &client_id).await {
         Ok(hashes) => Json(hashes).into_response(),
         Err(error) => db_error_response(&error, WriteOp::Insert),
@@ -440,48 +459,4 @@ fn binding_json(row: &BindingRow) -> serde_json::Value {
         "intent": row.intent,
         "storage_id": row.storage_id,
     })
-}
-
-// ---- 공통 에러 응답 ----
-
-fn error_response(status: StatusCode, message: &str) -> Response {
-    (status, Json(serde_json::json!({ "error": message }))).into_response()
-}
-
-fn not_found(message: &str) -> Response {
-    error_response(StatusCode::NOT_FOUND, message)
-}
-
-fn internal_error(error: filegate_core::Error) -> Response {
-    tracing::error!(event = "admin.internal", %error);
-    error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-}
-
-fn db_error_response(error: &filegate_db::DbError, op: WriteOp) -> Response {
-    match registry::write_violation(error, op) {
-        Some(WriteViolation::Duplicate) => error_response(StatusCode::CONFLICT, "already exists"),
-        Some(WriteViolation::MissingRef(constraint)) => {
-            // 없는 부모를 가리키는 쓰기 — 어느 노드가 없는지 제약 이름이 말해준다.
-            let target = if constraint.contains("storage") {
-                "storage not found"
-            } else if constraint.contains("client") {
-                "client not found"
-            } else {
-                "referenced registration not found"
-            };
-            not_found(target)
-        }
-        Some(WriteViolation::InUse) => error_response(
-            StatusCode::CONFLICT,
-            "still referenced — delete bindings/files first",
-        ),
-        Some(WriteViolation::Invalid) => error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid field (id slug, capacity_bytes >= 0, key hash format)",
-        ),
-        None => {
-            tracing::error!(event = "admin.db_error", %error);
-            error_response(StatusCode::INTERNAL_SERVER_ERROR, "database error")
-        }
-    }
 }

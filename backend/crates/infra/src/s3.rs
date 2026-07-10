@@ -9,7 +9,10 @@ use secrecy::{ExposeSecret, SecretString};
 /// S3 호환 storage 접근 명세: 등록부 행 + 복호된 자격증명.
 #[derive(Debug, Clone)]
 pub struct S3StorageSpec {
+    /// filegate 프로세스가 검증·서명 계산에 쓰는 내부 접근 주소.
     pub endpoint: String,
+    /// 전송 주체가 presigned URL로 접근할 공개 주소. 같을 수 있지만 같은 개념은 아니다.
+    pub public_endpoint: String,
     pub region: String,
     pub bucket: String,
     pub force_path_style: bool,

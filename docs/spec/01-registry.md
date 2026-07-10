@@ -10,6 +10,7 @@
 
 - 정본은 DB다. 노드 둘은 독립이고(storages, clients), 엣지 하나가 잇는다: `binding(client, intent) → storage`.
 - id는 운영자가 정하는 안정 슬러그다 (`oci-std`, `notegate`). 생성 후 불변 — Terraform·API 모두 이 id로 참조한다.
+- storage는 내부 접근 주소(`endpoint`)와 전송 주체가 쓰는 공개 주소(`public_endpoint`)를 구분한다. 같으면 같은 값을 둔다.
 - 검증은 쓰기 시점이다: 참조 무결성은 FK가, storage 등록은 제출된 자격증명으로 저장 공간 접근을 즉석 확인해 지킨다. 실패한 등록은 거부된다.
 - 삭제는 연결부터다: binding이 남아 있는 storage·client는 삭제가 거부된다. Terraform destroy는 의존 역순이라 이 순서를 자동으로 지킨다.
 - 부팅은 등록된 storage들의 접근을 재검증한다. 실패하면 부팅 중단 (ADR 001).

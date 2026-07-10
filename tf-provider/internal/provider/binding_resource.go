@@ -2,7 +2,6 @@ package provider
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/url"
 
@@ -70,18 +69,7 @@ func (r *bindingResource) Configure(
 	request resource.ConfigureRequest,
 	response *resource.ConfigureResponse,
 ) {
-	if request.ProviderData == nil {
-		return
-	}
-	client, ok := request.ProviderData.(*apiClient)
-	if !ok {
-		response.Diagnostics.AddError(
-			"unexpected provider data",
-			fmt.Sprintf("expected *apiClient, got %T", request.ProviderData),
-		)
-		return
-	}
-	r.client = client
+	r.client = configureAPIClient(request, response)
 }
 
 func (r *bindingResource) bindingPath(model bindingResourceModel) string {

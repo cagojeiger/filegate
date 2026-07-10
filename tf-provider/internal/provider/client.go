@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -19,7 +20,7 @@ type apiClient struct {
 
 func newAPIClient(baseURL, token string) *apiClient {
 	return &apiClient{
-		baseURL: baseURL,
+		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
 		// 등록은 즉석 저장소 검증(head_bucket)을 동반하므로 여유를 둔다.
 		http: &http.Client{Timeout: 60 * time.Second},

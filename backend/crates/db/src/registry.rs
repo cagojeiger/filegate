@@ -11,6 +11,7 @@ use sqlx::PgPool;
 pub struct StorageRow {
     pub id: String,
     pub endpoint: String,
+    pub public_endpoint: String,
     pub region: String,
     pub bucket: String,
     pub force_path_style: bool,
@@ -32,17 +33,19 @@ impl std::fmt::Debug for StorageRow {
     }
 }
 
-const STORAGE_COLUMNS: &str = "id, endpoint, region, bucket, force_path_style, access_key, \
+const STORAGE_COLUMNS: &str =
+    "id, endpoint, public_endpoint, region, bucket, force_path_style, access_key, \
      secret_key_ciphertext, secret_key_nonce, enc_key_id, capacity_bytes";
 
 pub async fn insert_storage(pool: &PgPool, row: &StorageRow) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO storages (id, endpoint, region, bucket, force_path_style, access_key, \
+        "INSERT INTO storages (id, endpoint, public_endpoint, region, bucket, force_path_style, access_key, \
          secret_key_ciphertext, secret_key_nonce, enc_key_id, capacity_bytes) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(&row.id)
     .bind(&row.endpoint)
+    .bind(&row.public_endpoint)
     .bind(&row.region)
     .bind(&row.bucket)
     .bind(row.force_path_style)
@@ -60,12 +63,13 @@ pub async fn insert_storage(pool: &PgPool, row: &StorageRow) -> Result<(), sqlx:
 /// 재암호화가 바로 이 경로다. 행이 없으면 false.
 pub async fn update_storage(pool: &PgPool, row: &StorageRow) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
-        "UPDATE storages SET endpoint = $2, region = $3, bucket = $4, force_path_style = $5, \
-         access_key = $6, secret_key_ciphertext = $7, secret_key_nonce = $8, enc_key_id = $9, \
-         capacity_bytes = $10, updated_at = now() WHERE id = $1",
+        "UPDATE storages SET endpoint = $2, public_endpoint = $3, region = $4, bucket = $5, \
+         force_path_style = $6, access_key = $7, secret_key_ciphertext = $8, secret_key_nonce = $9, \
+         enc_key_id = $10, capacity_bytes = $11, updated_at = now() WHERE id = $1",
     )
     .bind(&row.id)
     .bind(&row.endpoint)
+    .bind(&row.public_endpoint)
     .bind(&row.region)
     .bind(&row.bucket)
     .bind(row.force_path_style)

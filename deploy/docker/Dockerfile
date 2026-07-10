@@ -57,7 +57,7 @@ WORKDIR /app
 COPY --from=builder /usr/local/bin/filegate /usr/local/bin/filegate
 
 # 설정은 전부 env다 (ADR 004): 서버 설정과 자격증명은 배포 env/ESO가 주고,
-# 등록부(providers·clients)는 DB에 산다 — 이미지에 설정 파일이 없다.
+# 등록부(storages·clients·bindings)는 DB에 산다 — 이미지에 설정 파일이 없다.
 ENV FILEGATE_BIND=0.0.0.0:8080
 EXPOSE 8080
 
