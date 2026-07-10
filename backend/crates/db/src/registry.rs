@@ -1,12 +1,14 @@
-//! 등록부 행 접근 (마이그레이션 0002). 지금은 providers만 —
-//! profiles·clients는 그것을 쓰는 첫 오퍼레이션과 함께 들어온다.
+//! 등록부 행 접근 (마이그레이션 0002): storages / clients / client_keys / bindings.
+//!
+//! 참조 무결성은 DB FK가 집행한다 — 여기서는 위반을 분류만 하고
+//! HTTP 응답은 호출자(api)가 정한다.
 
 use sqlx::PgPool;
 
-/// providers 행. 시크릿은 암호문 컬럼 셋(ciphertext/nonce/enc_key_id)으로만
+/// storages 행. 시크릿은 암호문 컬럼 셋(ciphertext/nonce/enc_key_id)으로만
 /// 존재한다 — 복호는 core::Crypto가 행의 enc_key_id 라벨로 한다 (spec 01).
 #[derive(Clone, sqlx::FromRow)]
-pub struct ProviderRow {
+pub struct StorageRow {
     pub id: String,
     pub endpoint: String,
     pub region: String,
@@ -19,9 +21,9 @@ pub struct ProviderRow {
     pub capacity_bytes: i64,
 }
 
-impl std::fmt::Debug for ProviderRow {
+impl std::fmt::Debug for StorageRow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProviderRow")
+        f.debug_struct("StorageRow")
             .field("id", &self.id)
             .field("endpoint", &self.endpoint)
             .field("bucket", &self.bucket)
@@ -30,12 +32,12 @@ impl std::fmt::Debug for ProviderRow {
     }
 }
 
-const PROVIDER_COLUMNS: &str = "id, endpoint, region, bucket, force_path_style, access_key, \
+const STORAGE_COLUMNS: &str = "id, endpoint, region, bucket, force_path_style, access_key, \
      secret_key_ciphertext, secret_key_nonce, enc_key_id, capacity_bytes";
 
-pub async fn insert_provider(pool: &PgPool, row: &ProviderRow) -> Result<(), sqlx::Error> {
+pub async fn insert_storage(pool: &PgPool, row: &StorageRow) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO providers (id, endpoint, region, bucket, force_path_style, access_key, \
+        "INSERT INTO storages (id, endpoint, region, bucket, force_path_style, access_key, \
          secret_key_ciphertext, secret_key_nonce, enc_key_id, capacity_bytes) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
@@ -56,9 +58,9 @@ pub async fn insert_provider(pool: &PgPool, row: &ProviderRow) -> Result<(), sql
 
 /// 전체 치환 갱신 (id 제외). 갱신은 쓰기라 새 암호문이 온다 — 회전 런북 2단계의
 /// 재암호화가 바로 이 경로다. 행이 없으면 false.
-pub async fn update_provider(pool: &PgPool, row: &ProviderRow) -> Result<bool, sqlx::Error> {
+pub async fn update_storage(pool: &PgPool, row: &StorageRow) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
-        "UPDATE providers SET endpoint = $2, region = $3, bucket = $4, force_path_style = $5, \
+        "UPDATE storages SET endpoint = $2, region = $3, bucket = $4, force_path_style = $5, \
          access_key = $6, secret_key_ciphertext = $7, secret_key_nonce = $8, enc_key_id = $9, \
          capacity_bytes = $10, updated_at = now() WHERE id = $1",
     )
@@ -77,9 +79,9 @@ pub async fn update_provider(pool: &PgPool, row: &ProviderRow) -> Result<bool, s
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn get_provider(pool: &PgPool, id: &str) -> Result<Option<ProviderRow>, sqlx::Error> {
+pub async fn get_storage(pool: &PgPool, id: &str) -> Result<Option<StorageRow>, sqlx::Error> {
     sqlx::query_as(&format!(
-        "SELECT {PROVIDER_COLUMNS} FROM providers WHERE id = $1"
+        "SELECT {STORAGE_COLUMNS} FROM storages WHERE id = $1"
     ))
     .bind(id)
     .fetch_optional(pool)
@@ -87,39 +89,191 @@ pub async fn get_provider(pool: &PgPool, id: &str) -> Result<Option<ProviderRow>
 }
 
 /// 부팅 재검증과 목록 조회가 함께 쓴다. 등록부는 소수 행이라 무계 조회다.
-pub async fn list_providers(pool: &PgPool) -> Result<Vec<ProviderRow>, sqlx::Error> {
+pub async fn list_storages(pool: &PgPool) -> Result<Vec<StorageRow>, sqlx::Error> {
     sqlx::query_as(&format!(
-        "SELECT {PROVIDER_COLUMNS} FROM providers ORDER BY id"
+        "SELECT {STORAGE_COLUMNS} FROM storages ORDER BY id"
     ))
     .fetch_all(pool)
     .await
 }
 
-/// 멱등 삭제 — 없는 행도 성공이다 (spec 01: TF-친화). 참조 중이면 FK가 거부한다.
-pub async fn delete_provider(pool: &PgPool, id: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM providers WHERE id = $1")
+/// 멱등 삭제 — 없는 행도 성공이다 (spec 01: TF-친화). binding이 남아 있으면
+/// FK가 거부한다 — 연결을 먼저 지워야 노드를 지운다.
+pub async fn delete_storage(pool: &PgPool, id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM storages WHERE id = $1")
         .bind(id)
         .execute(pool)
         .await
         .map(|_| ())
 }
 
+// ---- clients ----
+
+pub async fn insert_client(pool: &PgPool, id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO clients (id) VALUES ($1)")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
+pub async fn client_exists(pool: &PgPool, id: &str) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM clients WHERE id = $1)")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+}
+
+pub async fn list_clients(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT id FROM clients ORDER BY id")
+        .fetch_all(pool)
+        .await
+}
+
+/// 멱등 삭제. binding·file이 남아 있으면 FK가 거부한다. 키는 소유물이라 함께 진다.
+pub async fn delete_client(pool: &PgPool, id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM clients WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
+// ---- client_keys ----
+
+pub async fn insert_client_key(
+    pool: &PgPool,
+    client_id: &str,
+    key_hash: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO client_keys (key_hash, client_id) VALUES ($1, $2)")
+        .bind(key_hash)
+        .bind(client_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
+/// 해시가 이 클라이언트의 것으로 존재하는가 (TF Read용 — 해시는 PK라 전역
+/// 유일하지만, 조회는 소유 관계까지 확인한다).
+pub async fn client_key_exists(
+    pool: &PgPool,
+    client_id: &str,
+    key_hash: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM client_keys WHERE key_hash = $1 AND client_id = $2)",
+    )
+    .bind(key_hash)
+    .bind(client_id)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn list_client_keys(pool: &PgPool, client_id: &str) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT key_hash FROM client_keys WHERE client_id = $1 ORDER BY key_hash")
+        .bind(client_id)
+        .fetch_all(pool)
+        .await
+}
+
+pub async fn delete_client_key(
+    pool: &PgPool,
+    client_id: &str,
+    key_hash: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM client_keys WHERE key_hash = $1 AND client_id = $2")
+        .bind(key_hash)
+        .bind(client_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
+// ---- bindings ----
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct BindingRow {
+    pub client_id: String,
+    pub intent: String,
+    pub storage_id: String,
+}
+
+/// upsert — 같은 (client, intent)의 storage 포인터 교체가 배치 변경이다 (spec 01).
+pub async fn upsert_binding(pool: &PgPool, row: &BindingRow) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO bindings (client_id, intent, storage_id) VALUES ($1, $2, $3) \
+         ON CONFLICT (client_id, intent) DO UPDATE SET storage_id = EXCLUDED.storage_id",
+    )
+    .bind(&row.client_id)
+    .bind(&row.intent)
+    .bind(&row.storage_id)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+pub async fn get_binding(
+    pool: &PgPool,
+    client_id: &str,
+    intent: &str,
+) -> Result<Option<BindingRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT client_id, intent, storage_id FROM bindings \
+         WHERE client_id = $1 AND intent = $2",
+    )
+    .bind(client_id)
+    .bind(intent)
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn delete_binding(
+    pool: &PgPool,
+    client_id: &str,
+    intent: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM bindings WHERE client_id = $1 AND intent = $2")
+        .bind(client_id)
+        .bind(intent)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
+// ---- 쓰기 거부 분류 ----
+
 /// 쓰기 거부의 원인 분류 — HTTP 응답 코드는 호출자(api)가 정한다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// FK 위반은 제약 이름으로 "참조 대상 없음"과 "참조가 남아 삭제 불가"를 가른다.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteViolation {
     /// 23505: id 충돌 (이미 존재)
     Duplicate,
-    /// 23503: 참조 중인 행 (사용 중 삭제 거부)
+    /// 23503 (INSERT/UPDATE 쪽): 가리키는 노드가 없다 — 제약 이름 포함
+    MissingRef(String),
+    /// 23503 (DELETE 쪽): 참조가 남아 있어 삭제 거부
     InUse,
     /// 23514: CHECK 위반 (슬러그 형식, 음수 capacity 등)
     Invalid,
 }
 
 pub fn write_violation(error: &sqlx::Error) -> Option<WriteViolation> {
-    let code = error.as_database_error()?.code()?;
-    match code.as_ref() {
+    let db_error = error.as_database_error()?;
+    match db_error.code()?.as_ref() {
         "23505" => Some(WriteViolation::Duplicate),
-        "23503" => Some(WriteViolation::InUse),
+        "23503" => {
+            // INSERT가 없는 부모를 가리키면 위반 테이블은 자식(fk 제약 소유자)이고,
+            // DELETE가 참조 중인 부모를 지우면 메시지가 자식 테이블을 가리킨다.
+            // PG 에러 메시지로 방향을 가른다: "insert or update" vs "delete".
+            let message = db_error.message();
+            if message.starts_with("insert or update") {
+                Some(WriteViolation::MissingRef(
+                    db_error.constraint().unwrap_or("foreign key").to_owned(),
+                ))
+            } else {
+                Some(WriteViolation::InUse)
+            }
+        }
         "23514" => Some(WriteViolation::Invalid),
         _ => None,
     }

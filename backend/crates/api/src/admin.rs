@@ -4,9 +4,9 @@
 //! 상수시간 비교). CRUD는 TF-친화로 만든다: 안정 id, 단건 조회, 명확한
 //! 404, 멱등 삭제 — Terraform provider의 Read/plan이 요구하는 성질이다.
 //!
-//! provider 등록은 그 자체가 검증이다: 제출된 자격증명으로 head_bucket을
+//! storage 등록은 그 자체가 검증이다: 제출된 자격증명으로 head_bucket을
 //! 즉석 확인하고, 성공해야 시크릿을 암호화해 저장한다. 실패한 등록은
-//! 거부된다 — DB에 닿지 않는다.
+//! 거부된다 — DB에 닿지 않는다. clients·bindings는 FK가 검증한다.
 
 use axum::extract::{Path, Request, State};
 use axum::http::{header, StatusCode};
@@ -15,20 +15,32 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use filegate_core::{Crypto, EncryptedSecret, SecretString};
-use filegate_db::registry::{self, ProviderRow, WriteViolation};
-use filegate_infra::{s3_connect, S3ProviderSpec};
+use filegate_db::registry::{self, BindingRow, StorageRow, WriteViolation};
+use filegate_infra::{s3_connect, S3StorageSpec};
 use serde::{Deserialize, Serialize};
 
 use crate::routes::AppState;
 
 pub fn admin_routes() -> Router<AppState> {
     Router::new()
-        .route("/providers", get(list_providers).post(create_provider))
+        .route("/storages", get(storage_list).post(storage_create))
         .route(
-            "/providers/{id}",
-            get(get_provider)
-                .put(update_provider)
-                .delete(delete_provider),
+            "/storages/{id}",
+            get(storage_get).put(storage_update).delete(storage_delete),
+        )
+        .route("/clients", get(client_list).post(client_create))
+        .route("/clients/{id}", get(client_get).delete(client_delete))
+        .route(
+            "/clients/{id}/keys",
+            get(client_key_list).post(client_key_create),
+        )
+        .route(
+            "/clients/{id}/keys/{key_hash}",
+            get(client_key_get).delete(client_key_delete),
+        )
+        .route(
+            "/clients/{id}/bindings/{intent}",
+            get(binding_get).put(binding_put).delete(binding_delete),
         )
 }
 
@@ -49,10 +61,12 @@ pub async fn require_operator(
     }
 }
 
+// ---- storages ----
+
 /// 등록·갱신 본문. secret_key는 여기서만 원문으로 존재한다 — 검증에 쓰이고
 /// 암호문이 되어 저장되며, 응답에는 절대 실리지 않는다.
 #[derive(Deserialize)]
-struct ProviderSpecBody {
+struct StorageSpecBody {
     endpoint: String,
     region: String,
     bucket: String,
@@ -64,15 +78,15 @@ struct ProviderSpecBody {
 }
 
 #[derive(Deserialize)]
-struct CreateProviderBody {
+struct StorageCreateBody {
     id: String,
     #[serde(flatten)]
-    spec: ProviderSpecBody,
+    spec: StorageSpecBody,
 }
 
 /// 응답 모양 — 시크릿과 암호화 내부(enc_key_id)는 내보내지 않는다.
 #[derive(Serialize)]
-struct ProviderOut {
+struct StorageOut {
     id: String,
     endpoint: String,
     region: String,
@@ -82,8 +96,8 @@ struct ProviderOut {
     capacity_bytes: i64,
 }
 
-impl From<ProviderRow> for ProviderOut {
-    fn from(row: ProviderRow) -> Self {
+impl From<StorageRow> for StorageOut {
+    fn from(row: StorageRow) -> Self {
         Self {
             id: row.id,
             endpoint: row.endpoint,
@@ -100,9 +114,9 @@ impl From<ProviderRow> for ProviderOut {
 async fn verified_row(
     crypto: &Crypto,
     id: &str,
-    body: ProviderSpecBody,
-) -> Result<ProviderRow, Response> {
-    let spec = S3ProviderSpec {
+    body: StorageSpecBody,
+) -> Result<StorageRow, Response> {
+    let spec = S3StorageSpec {
         endpoint: body.endpoint,
         region: body.region,
         bucket: body.bucket,
@@ -113,13 +127,13 @@ async fn verified_row(
     if let Err(error) = s3_connect(&spec).await {
         return Err(error_response(
             StatusCode::BAD_REQUEST,
-            &format!("provider verification failed: {error}"),
+            &format!("storage verification failed: {error}"),
         ));
     }
     let encrypted = crypto
         .encrypt(id, &spec.secret_key)
         .map_err(internal_error)?;
-    Ok(ProviderRow {
+    Ok(StorageRow {
         id: id.to_owned(),
         endpoint: spec.endpoint,
         region: spec.region,
@@ -133,63 +147,63 @@ async fn verified_row(
     })
 }
 
-async fn create_provider(
+async fn storage_create(
     State(state): State<AppState>,
-    Json(body): Json<CreateProviderBody>,
+    Json(body): Json<StorageCreateBody>,
 ) -> Response {
     let row = match verified_row(&state.crypto, &body.id, body.spec).await {
         Ok(row) => row,
         Err(response) => return response,
     };
-    match registry::insert_provider(&state.pool, &row).await {
+    match registry::insert_storage(&state.pool, &row).await {
         Ok(()) => {
-            tracing::info!(event = "provider.registered", provider = %row.id);
-            (StatusCode::CREATED, Json(ProviderOut::from(row))).into_response()
+            tracing::info!(event = "storage.registered", storage = %row.id);
+            (StatusCode::CREATED, Json(StorageOut::from(row))).into_response()
         }
         Err(error) => db_error_response(&error),
     }
 }
 
-async fn update_provider(
+async fn storage_update(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(body): Json<ProviderSpecBody>,
+    Json(body): Json<StorageSpecBody>,
 ) -> Response {
     let row = match verified_row(&state.crypto, &id, body).await {
         Ok(row) => row,
         Err(response) => return response,
     };
-    match registry::update_provider(&state.pool, &row).await {
+    match registry::update_storage(&state.pool, &row).await {
         Ok(true) => {
-            tracing::info!(event = "provider.updated", provider = %row.id);
-            (StatusCode::OK, Json(ProviderOut::from(row))).into_response()
+            tracing::info!(event = "storage.updated", storage = %row.id);
+            (StatusCode::OK, Json(StorageOut::from(row))).into_response()
         }
-        Ok(false) => not_found(),
+        Ok(false) => not_found("storage not found"),
         Err(error) => db_error_response(&error),
     }
 }
 
-async fn get_provider(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    match registry::get_provider(&state.pool, &id).await {
-        Ok(Some(row)) => Json(ProviderOut::from(row)).into_response(),
-        Ok(None) => not_found(),
+async fn storage_get(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    match registry::get_storage(&state.pool, &id).await {
+        Ok(Some(row)) => Json(StorageOut::from(row)).into_response(),
+        Ok(None) => not_found("storage not found"),
         Err(error) => db_error_response(&error),
     }
 }
 
-async fn list_providers(State(state): State<AppState>) -> Response {
-    match registry::list_providers(&state.pool).await {
+async fn storage_list(State(state): State<AppState>) -> Response {
+    match registry::list_storages(&state.pool).await {
         Ok(rows) => {
-            Json(rows.into_iter().map(ProviderOut::from).collect::<Vec<_>>()).into_response()
+            Json(rows.into_iter().map(StorageOut::from).collect::<Vec<_>>()).into_response()
         }
         Err(error) => db_error_response(&error),
     }
 }
 
-async fn delete_provider(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    match registry::delete_provider(&state.pool, &id).await {
+async fn storage_delete(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    match registry::delete_storage(&state.pool, &id).await {
         Ok(()) => {
-            tracing::info!(event = "provider.deleted", provider = %id);
+            tracing::info!(event = "storage.deleted", storage = %id);
             StatusCode::NO_CONTENT.into_response()
         }
         Err(error) => db_error_response(&error),
@@ -197,7 +211,7 @@ async fn delete_provider(State(state): State<AppState>, Path(id): Path<String>) 
 }
 
 /// 행을 복호해 접근 명세로 되돌린다. 부팅 재검증과 (이후) 서명 경로가 쓴다.
-pub fn spec_from_row(crypto: &Crypto, row: &ProviderRow) -> filegate_core::Result<S3ProviderSpec> {
+pub fn spec_from_row(crypto: &Crypto, row: &StorageRow) -> filegate_core::Result<S3StorageSpec> {
     let secret_key = crypto.decrypt(
         &row.enc_key_id,
         &row.id,
@@ -206,7 +220,7 @@ pub fn spec_from_row(crypto: &Crypto, row: &ProviderRow) -> filegate_core::Resul
             nonce: row.secret_key_nonce.clone(),
         },
     )?;
-    Ok(S3ProviderSpec {
+    Ok(S3StorageSpec {
         endpoint: row.endpoint.clone(),
         region: row.region.clone(),
         bucket: row.bucket.clone(),
@@ -216,12 +230,183 @@ pub fn spec_from_row(crypto: &Crypto, row: &ProviderRow) -> filegate_core::Resul
     })
 }
 
+// ---- clients ----
+
+#[derive(Deserialize)]
+struct ClientCreateBody {
+    id: String,
+}
+
+async fn client_create(
+    State(state): State<AppState>,
+    Json(body): Json<ClientCreateBody>,
+) -> Response {
+    match registry::insert_client(&state.pool, &body.id).await {
+        Ok(()) => {
+            tracing::info!(event = "client.registered", client = %body.id);
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({ "id": body.id })),
+            )
+                .into_response()
+        }
+        Err(error) => db_error_response(&error),
+    }
+}
+
+async fn client_get(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    match registry::client_exists(&state.pool, &id).await {
+        Ok(true) => Json(serde_json::json!({ "id": id })).into_response(),
+        Ok(false) => not_found("client not found"),
+        Err(error) => db_error_response(&error),
+    }
+}
+
+async fn client_list(State(state): State<AppState>) -> Response {
+    match registry::list_clients(&state.pool).await {
+        Ok(ids) => Json(ids).into_response(),
+        Err(error) => db_error_response(&error),
+    }
+}
+
+async fn client_delete(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    match registry::delete_client(&state.pool, &id).await {
+        Ok(()) => {
+            tracing::info!(event = "client.deleted", client = %id);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(error) => db_error_response(&error),
+    }
+}
+
+// ---- client keys ----
+
+#[derive(Deserialize)]
+struct ClientKeyCreateBody {
+    key_hash: String,
+}
+
+async fn client_key_create(
+    State(state): State<AppState>,
+    Path(client_id): Path<String>,
+    Json(body): Json<ClientKeyCreateBody>,
+) -> Response {
+    match registry::insert_client_key(&state.pool, &client_id, &body.key_hash).await {
+        Ok(()) => {
+            tracing::info!(event = "client_key.registered", client = %client_id);
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({ "client_id": client_id, "key_hash": body.key_hash })),
+            )
+                .into_response()
+        }
+        Err(error) => db_error_response(&error),
+    }
+}
+
+async fn client_key_get(
+    State(state): State<AppState>,
+    Path((client_id, key_hash)): Path<(String, String)>,
+) -> Response {
+    match registry::client_key_exists(&state.pool, &client_id, &key_hash).await {
+        Ok(true) => Json(serde_json::json!({ "client_id": client_id, "key_hash": key_hash }))
+            .into_response(),
+        Ok(false) => not_found("client key not found"),
+        Err(error) => db_error_response(&error),
+    }
+}
+
+async fn client_key_list(State(state): State<AppState>, Path(client_id): Path<String>) -> Response {
+    match registry::list_client_keys(&state.pool, &client_id).await {
+        Ok(hashes) => Json(hashes).into_response(),
+        Err(error) => db_error_response(&error),
+    }
+}
+
+async fn client_key_delete(
+    State(state): State<AppState>,
+    Path((client_id, key_hash)): Path<(String, String)>,
+) -> Response {
+    match registry::delete_client_key(&state.pool, &client_id, &key_hash).await {
+        Ok(()) => {
+            tracing::info!(event = "client_key.deleted", client = %client_id);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(error) => db_error_response(&error),
+    }
+}
+
+// ---- bindings ----
+
+#[derive(Deserialize)]
+struct BindingPutBody {
+    storage_id: String,
+}
+
+async fn binding_put(
+    State(state): State<AppState>,
+    Path((client_id, intent)): Path<(String, String)>,
+    Json(body): Json<BindingPutBody>,
+) -> Response {
+    let row = BindingRow {
+        client_id,
+        intent,
+        storage_id: body.storage_id,
+    };
+    match registry::upsert_binding(&state.pool, &row).await {
+        Ok(()) => {
+            tracing::info!(
+                event = "binding.bound",
+                client = %row.client_id,
+                intent = %row.intent,
+                storage = %row.storage_id,
+            );
+            Json(binding_json(&row)).into_response()
+        }
+        Err(error) => db_error_response(&error),
+    }
+}
+
+async fn binding_get(
+    State(state): State<AppState>,
+    Path((client_id, intent)): Path<(String, String)>,
+) -> Response {
+    match registry::get_binding(&state.pool, &client_id, &intent).await {
+        Ok(Some(row)) => Json(binding_json(&row)).into_response(),
+        Ok(None) => not_found("binding not found"),
+        Err(error) => db_error_response(&error),
+    }
+}
+
+async fn binding_delete(
+    State(state): State<AppState>,
+    Path((client_id, intent)): Path<(String, String)>,
+) -> Response {
+    match registry::delete_binding(&state.pool, &client_id, &intent).await {
+        Ok(()) => {
+            tracing::info!(event = "binding.deleted", client = %client_id, intent = %intent);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(error) => db_error_response(&error),
+    }
+}
+
+fn binding_json(row: &BindingRow) -> serde_json::Value {
+    serde_json::json!({
+        "client_id": row.client_id,
+        "intent": row.intent,
+        "storage_id": row.storage_id,
+    })
+}
+
+// ---- 공통 에러 응답 ----
+
 fn error_response(status: StatusCode, message: &str) -> Response {
     (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
-fn not_found() -> Response {
-    error_response(StatusCode::NOT_FOUND, "provider not found")
+fn not_found(message: &str) -> Response {
+    error_response(StatusCode::NOT_FOUND, message)
 }
 
 fn internal_error(error: filegate_core::Error) -> Response {
@@ -231,13 +416,25 @@ fn internal_error(error: filegate_core::Error) -> Response {
 
 fn db_error_response(error: &filegate_db::DbError) -> Response {
     match registry::write_violation(error) {
-        Some(WriteViolation::Duplicate) => {
-            error_response(StatusCode::CONFLICT, "provider id already exists")
+        Some(WriteViolation::Duplicate) => error_response(StatusCode::CONFLICT, "already exists"),
+        Some(WriteViolation::MissingRef(constraint)) => {
+            // 없는 부모를 가리키는 쓰기 — 어느 노드가 없는지 제약 이름이 말해준다.
+            let target = if constraint.contains("storage") {
+                "storage not found"
+            } else if constraint.contains("client") {
+                "client not found"
+            } else {
+                "referenced registration not found"
+            };
+            not_found(target)
         }
-        Some(WriteViolation::InUse) => error_response(StatusCode::CONFLICT, "provider is in use"),
+        Some(WriteViolation::InUse) => error_response(
+            StatusCode::CONFLICT,
+            "still referenced — delete bindings/files first",
+        ),
         Some(WriteViolation::Invalid) => error_response(
             StatusCode::BAD_REQUEST,
-            "invalid field (id slug, capacity_bytes >= 0)",
+            "invalid field (id slug, capacity_bytes >= 0, key hash format)",
         ),
         None => {
             tracing::error!(event = "admin.db_error", %error);

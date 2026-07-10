@@ -1,8 +1,8 @@
 //! 설정은 env로만 온다 (ADR 004): 서버(프로세스) 설정과 비밀.
 //! 로컬은 `.env`(dotenvy), 배포는 Terraform이 만든 k8s Secret이 공급한다.
 //!
-//! 등록부(providers·profiles·clients)는 여기 없다 — 정본은 DB다 (spec 01).
-//! provider 시크릿도 env가 아니라 DB의 암호문 컬럼에 산다 (core::crypto).
+//! 등록부(storages·clients·bindings)는 여기 없다 — 정본은 DB다 (spec 01).
+//! storage 시크릿도 env가 아니라 DB의 암호문 컬럼에 산다 (core::crypto).
 
 use std::net::SocketAddr;
 
@@ -21,7 +21,7 @@ pub struct Config {
 /// 없으면 부팅 실패. 배포에서는 Terraform이 만든 k8s Secret이 공급한다.
 #[derive(Debug, Clone)]
 pub struct SecurityConfig {
-    /// provider 시크릿 암호화의 마스터 키 (최소 32바이트 검증은 Crypto::new가).
+    /// storage 시크릿 암호화의 마스터 키 (최소 32바이트 검증은 Crypto::new가).
     pub enc_root_secret: SecretString,
     /// DB 행에 기록할 마스터 키 세대 (회전 대비). 기본 "v1".
     pub enc_key_id: String,
@@ -33,7 +33,7 @@ pub struct SecurityConfig {
 }
 
 impl SecurityConfig {
-    /// provider 시크릿 암호기를 조립한다 (활성 + 선택적 PREV). 부팅에서 호출되어
+    /// storage 시크릿 암호기를 조립한다 (활성 + 선택적 PREV). 부팅에서 호출되어
     /// 루트 길이·중복 key_id 같은 오설정을 여기서 잡는다.
     pub fn crypto(&self) -> Result<crate::Crypto> {
         let mut crypto = crate::Crypto::new(&self.enc_key_id, &self.enc_root_secret)?;

@@ -1,10 +1,10 @@
-//! provider 시크릿의 암호화 보관 (spec 01 "키와 비밀").
+//! storage 시크릿의 암호화 보관 (spec 01 "키와 비밀").
 //!
-//! filegate가 서명에 원문을 써야 하는 유일한 저장 비밀이 provider 시크릿이라,
+//! filegate가 서명에 원문을 써야 하는 유일한 저장 비밀이 storage 시크릿이라,
 //! 이 모듈은 그 한 용도만 다룬다 — opsgate의 credential 보관 방식을 참조했다.
 //! 마스터 키(`FILEGATE_ENC_ROOT_SECRET`)에서 HKDF로 용도 키를 파생하고(루트를
-//! 직접 쓰지 않는다), AES-256-GCM에 provider id를 AAD로 바인딩한다 — 한
-//! provider의 암호문을 다른 행에 옮겨 붙이면 복호가 실패한다.
+//! 직접 쓰지 않는다), AES-256-GCM에 storage id를 AAD로 바인딩한다 — 한
+//! storage의 암호문을 다른 행에 옮겨 붙이면 복호가 실패한다.
 //!
 //! 마스터 키 회전은 이중 루트로 한다: 활성 키(암호화·복호)와 선택적 PREV
 //! 키(복호 전용 — 코드가 encrypt에 안 쓰는 정책일 뿐, 키 자체는 대칭키다).
@@ -22,7 +22,7 @@ use crate::error::{Error, Result};
 const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 const MIN_ROOT_LEN: usize = 32;
-const PROVIDER_SECRET_LABEL: &[u8] = b"filegate/enc/provider-secret/v1";
+const STORAGE_SECRET_LABEL: &[u8] = b"filegate/enc/storage-secret/v1";
 
 /// 암호화된 필드 — DB의 ciphertext·nonce 컬럼 한 쌍.
 #[derive(Clone, PartialEq, Eq)]
@@ -42,7 +42,7 @@ struct KeyEntry {
     key_id: String,
 }
 
-/// 마스터 키(들)에서 파생한 provider 시크릿 암호기.
+/// 마스터 키(들)에서 파생한 storage 시크릿 암호기.
 pub struct Crypto {
     active: KeyEntry,
     prev: Option<KeyEntry>,
@@ -72,7 +72,7 @@ fn derive(key_id: &str, root: &SecretString) -> Result<KeyEntry> {
     }
     let hk = Hkdf::<Sha256>::new(None, root_bytes);
     let mut key = [0_u8; KEY_LEN];
-    hk.expand(PROVIDER_SECRET_LABEL, &mut key)
+    hk.expand(STORAGE_SECRET_LABEL, &mut key)
         .map_err(|_e| Error::internal("hkdf expand failed"))?;
     Ok(KeyEntry {
         key,
@@ -123,7 +123,7 @@ impl Crypto {
         )))
     }
 
-    /// provider 시크릿을 활성 키로 암호화한다. aad에는 provider id를 넣는다.
+    /// storage 시크릿을 활성 키로 암호화한다. aad에는 storage id를 넣는다.
     pub fn encrypt(&self, aad: &str, plaintext: &SecretString) -> Result<EncryptedSecret> {
         let cipher = Aes256Gcm::new_from_slice(&self.active.key)
             .map_err(|_e| Error::internal("invalid cipher key"))?;
@@ -252,7 +252,7 @@ mod tests {
         let enc = c
             .encrypt("oci-std", &SecretString::from("vendor-secret".to_owned()))
             .unwrap();
-        assert!(c.decrypt("v1", "other-provider", &enc).is_err());
+        assert!(c.decrypt("v1", "other-storage", &enc).is_err());
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 조사일: 2026-07-03
 
-다음 범위의 프로덕션 후보 provider. v0는 MinIO + 로컬 fs이고, OCI는 이후에 붙인다 (spec 00). S3 Compatibility API로만 사용한다(네이티브 PAR, 네이티브 lifecycle, Archive 자동화는 쓰지 않음 — ADR 001).
+다음 범위의 프로덕션 후보 storage. v0는 MinIO + 로컬 fs이고, OCI는 이후에 붙인다 (spec 00). S3 Compatibility API로만 사용한다(네이티브 PAR, 네이티브 lifecycle, Archive 자동화는 쓰지 않음 — ADR 001).
 
 ## 비용
 
@@ -31,7 +31,7 @@
 ## filegate 설정 감각
 
 ```yaml
-providers:
+storages:
   oci-std:
     endpoint: "https://{namespace}.compat.objectstorage.ap-osaka-1.oraclecloud.com"
     public_endpoint: 동일 (공개 인터넷)

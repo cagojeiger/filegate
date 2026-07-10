@@ -1,18 +1,18 @@
--- 등록부 스키마 — 소유자가 다른 세 계층 (ADR 004, spec 01).
+-- 등록부 스키마 — 독립 노드 둘과 엣지 하나 (ADR 004, spec 01).
 --
--- providers(물리 접근 계약) / profiles(운영자 배치 카탈로그) /
--- clients(서비스 어휘: 키 + intents). 연결은 한 방향:
--- clients.intents → profiles → providers.
+-- storages(물리 접근 계약)와 clients(서비스 신원)는 서로를 모른다.
+-- bindings(client의 intent 이름 → storage)만이 둘을 참조한다.
 --
--- 참조 무결성은 쓰기 시점에 DB가 집행한다 (ADR 004): 사용 중인
--- 등록의 삭제는 FK가 거부하고, 클라이언트 자신의 소유물(키·intent)만
--- 클라이언트와 함께 사라진다. id는 운영자가 정하는 안정 슬러그다.
+-- 참조 무결성은 쓰기 시점에 DB가 집행한다 (ADR 004): binding이 남아 있는
+-- storage·client의 삭제는 FK가 거부한다 — 연결을 먼저 지워야 노드를 지운다.
+-- 클라이언트의 소유물(키)만 클라이언트와 함께 사라진다. id는 운영자가
+-- 정하는 안정 슬러그다.
 
 -- 물리 저장 공간 접근 계약. 행 생성은 운영자 API만 한다 — 시크릿이
 -- 암호문(AES-256-GCM, AAD=id, 마스터 키는 env)이라 SQL로 못 만든다.
 -- enc_key_id는 이 행을 잠근 마스터 키 세대 라벨 — 복호는 라벨로
 -- 키를 고른다 (spec 01 회전 런북).
-CREATE TABLE providers (
+CREATE TABLE storages (
     id                    text PRIMARY KEY
                           CHECK (id ~ '^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$'),
     endpoint              text NOT NULL,
@@ -29,16 +29,7 @@ CREATE TABLE providers (
     updated_at            timestamptz NOT NULL DEFAULT now()
 );
 
--- 운영자 배치 카탈로그. v0는 provider 하나를 가리키는 명시 선언뿐 (spec 01).
--- 자동 배치가 오면 후보 풀·전략 컬럼이 여기 늘어난다.
-CREATE TABLE profiles (
-    id          text PRIMARY KEY
-                CHECK (id ~ '^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$'),
-    provider_id text NOT NULL REFERENCES providers (id), -- 참조되는 provider는 삭제 거부
-    created_at  timestamptz NOT NULL DEFAULT now()
-);
-
--- 서비스 신원. 어휘(intents)와 키의 네임스페이스다.
+-- 서비스 신원. 키의 소유자이자 intent 이름의 네임스페이스다.
 CREATE TABLE clients (
     id         text PRIMARY KEY
                CHECK (id ~ '^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$'),
@@ -56,22 +47,24 @@ CREATE TABLE client_keys (
 -- 인증 후 클라이언트의 키 목록 조회용 (회전 시 관리).
 CREATE INDEX client_keys_client_idx ON client_keys (client_id);
 
--- intent는 클라이언트 네임스페이스 안에 살고 profile을 가리킨다 (ADR 004).
--- provider를 직접 가리키지 않는다 — 배치를 바꿔도 서비스 계약은 유지된다.
-CREATE TABLE intents (
-    client_id  text NOT NULL REFERENCES clients (id) ON DELETE CASCADE,
-    name       text NOT NULL
-               CHECK (name ~ '^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$'),
-    profile_id text NOT NULL REFERENCES profiles (id), -- 참조되는 profile은 삭제 거부
+-- 엣지: 클라이언트의 intent 이름을 storage에 잇는다 (ADR 004).
+-- 서비스 계약은 intent 이름이고, storage 포인터는 운영자가 바꾼다 —
+-- 배치를 바꿔도 서비스 계약은 유지된다. 양끝 노드는 이 엣지가 남아
+-- 있는 동안 삭제가 거부된다 (FK 기본 = RESTRICT 동작).
+CREATE TABLE bindings (
+    client_id  text NOT NULL REFERENCES clients (id),
+    intent     text NOT NULL
+               CHECK (intent ~ '^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$'),
+    storage_id text NOT NULL REFERENCES storages (id),
     created_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (client_id, name)
+    PRIMARY KEY (client_id, intent)
 );
 
 -- 도메인 테이블(0001)의 느슨한 text id를 등록부에 묶는다.
--- 파일을 가진 client, 위치·회계가 남은 provider는 삭제가 거부된다 (ADR 004).
+-- 파일을 가진 client, 위치·회계가 남은 storage는 삭제가 거부된다 (ADR 004).
 ALTER TABLE files
     ADD CONSTRAINT files_client_fk FOREIGN KEY (client_id) REFERENCES clients (id);
 ALTER TABLE locations
-    ADD CONSTRAINT locations_provider_fk FOREIGN KEY (provider_id) REFERENCES providers (id);
-ALTER TABLE provider_usage
-    ADD CONSTRAINT provider_usage_provider_fk FOREIGN KEY (provider_id) REFERENCES providers (id);
+    ADD CONSTRAINT locations_storage_fk FOREIGN KEY (storage_id) REFERENCES storages (id);
+ALTER TABLE storage_usage
+    ADD CONSTRAINT storage_usage_storage_fk FOREIGN KEY (storage_id) REFERENCES storages (id);

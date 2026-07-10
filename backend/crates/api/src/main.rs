@@ -1,4 +1,4 @@
-//! filegate 진입점: env 설정 → PostgreSQL(+마이그레이션) → provider 재검증
+//! filegate 진입점: env 설정 → PostgreSQL(+마이그레이션) → storage 재검증
 //! → HTTP + reconciler → graceful shutdown.
 
 mod admin;
@@ -39,15 +39,15 @@ async fn main() -> anyhow::Result<()> {
         max_connections = config.database.max_connections
     );
 
-    // 등록된 provider 접근 재검증 — 실패하면 부팅 중단 (ADR 001). 잘못된
+    // 등록된 storage 접근 재검증 — 실패하면 부팅 중단 (ADR 001). 잘못된
     // 마스터 키 설정도 여기서 잡힌다: 모든 행의 복호가 곧 검증이다 (spec 01).
-    for row in filegate_db::registry::list_providers(&pool).await? {
+    for row in filegate_db::registry::list_storages(&pool).await? {
         let spec = admin::spec_from_row(&crypto, &row)
-            .map_err(|error| anyhow::anyhow!("provider '{}': {error}", row.id))?;
+            .map_err(|error| anyhow::anyhow!("storage '{}': {error}", row.id))?;
         filegate_infra::s3_connect(&spec)
             .await
-            .map_err(|error| anyhow::anyhow!("provider '{}' re-verification: {error}", row.id))?;
-        info!(event = "storage.connected", provider = %row.id);
+            .map_err(|error| anyhow::anyhow!("storage '{}' re-verification: {error}", row.id))?;
+        info!(event = "storage.connected", storage = %row.id);
     }
 
     let listener = tokio::net::TcpListener::bind(config.server.bind_addr).await?;

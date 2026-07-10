@@ -13,17 +13,17 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
-// filegate_provider — 저장소 provider 등록 (spec 01 등록부).
+// filegate_storage — S3 호환 저장 공간 등록 (spec 01 등록부).
 // apply = 등록(즉석 접근 검증 포함), destroy = 등록 해제.
-type providerResource struct {
+type storageResource struct {
 	client *apiClient
 }
 
-func NewProviderResource() resource.Resource {
-	return &providerResource{}
+func NewStorageResource() resource.Resource {
+	return &storageResource{}
 }
 
-type providerResourceModel struct {
+type storageResourceModel struct {
 	ID             types.String `tfsdk:"id"`
 	Endpoint       types.String `tfsdk:"endpoint"`
 	Region         types.String `tfsdk:"region"`
@@ -35,7 +35,7 @@ type providerResourceModel struct {
 }
 
 // 운영자 API의 요청·응답 모양 (admin.rs와 일치).
-type providerAPIModel struct {
+type storageAPIModel struct {
 	ID             string `json:"id,omitempty"`
 	Endpoint       string `json:"endpoint"`
 	Region         string `json:"region"`
@@ -46,21 +46,21 @@ type providerAPIModel struct {
 	CapacityBytes  int64  `json:"capacity_bytes"`
 }
 
-func (r *providerResource) Metadata(
+func (r *storageResource) Metadata(
 	_ context.Context,
 	request resource.MetadataRequest,
 	response *resource.MetadataResponse,
 ) {
-	response.TypeName = request.ProviderTypeName + "_provider"
+	response.TypeName = request.ProviderTypeName + "_storage"
 }
 
-func (r *providerResource) Schema(
+func (r *storageResource) Schema(
 	_ context.Context,
 	_ resource.SchemaRequest,
 	response *resource.SchemaResponse,
 ) {
 	response.Schema = schema.Schema{
-		Description: "S3 호환 저장소 provider 등록. 등록은 그 자체가 검증이다 — " +
+		Description: "S3 호환 저장 공간(storage) 등록. 등록은 그 자체가 검증이다 — " +
 			"filegate가 제출된 자격증명으로 버킷 접근을 즉석 확인한다.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
@@ -102,7 +102,7 @@ func (r *providerResource) Schema(
 	}
 }
 
-func (r *providerResource) Configure(
+func (r *storageResource) Configure(
 	_ context.Context,
 	request resource.ConfigureRequest,
 	response *resource.ConfigureResponse,
@@ -121,39 +121,39 @@ func (r *providerResource) Configure(
 	r.client = client
 }
 
-func (r *providerResource) Create(
+func (r *storageResource) Create(
 	ctx context.Context,
 	request resource.CreateRequest,
 	response *resource.CreateResponse,
 ) {
-	var plan providerResourceModel
+	var plan storageResourceModel
 	response.Diagnostics.Append(request.Plan.Get(ctx, &plan)...)
 	if response.Diagnostics.HasError() {
 		return
 	}
 
 	body := apiModelFrom(plan)
-	if _, err := r.client.do(ctx, http.MethodPost, "/admin/providers", body, nil); err != nil {
+	if _, err := r.client.do(ctx, http.MethodPost, "/admin/storages", body, nil); err != nil {
 		response.Diagnostics.AddError("provider registration failed", err.Error())
 		return
 	}
 	response.Diagnostics.Append(response.State.Set(ctx, plan)...)
 }
 
-func (r *providerResource) Read(
+func (r *storageResource) Read(
 	ctx context.Context,
 	request resource.ReadRequest,
 	response *resource.ReadResponse,
 ) {
-	var state providerResourceModel
+	var state storageResourceModel
 	response.Diagnostics.Append(request.State.Get(ctx, &state)...)
 	if response.Diagnostics.HasError() {
 		return
 	}
 
-	var remote providerAPIModel
+	var remote storageAPIModel
 	status, err := r.client.do(
-		ctx, http.MethodGet, "/admin/providers/"+state.ID.ValueString(), nil, &remote,
+		ctx, http.MethodGet, "/admin/storages/"+state.ID.ValueString(), nil, &remote,
 	)
 	if status == http.StatusNotFound {
 		// 등록부에서 사라졌다 — state에서도 지워 재생성 계획이 서게 한다.
@@ -175,12 +175,12 @@ func (r *providerResource) Read(
 	response.Diagnostics.Append(response.State.Set(ctx, state)...)
 }
 
-func (r *providerResource) Update(
+func (r *storageResource) Update(
 	ctx context.Context,
 	request resource.UpdateRequest,
 	response *resource.UpdateResponse,
 ) {
-	var plan providerResourceModel
+	var plan storageResourceModel
 	response.Diagnostics.Append(request.Plan.Get(ctx, &plan)...)
 	if response.Diagnostics.HasError() {
 		return
@@ -188,7 +188,7 @@ func (r *providerResource) Update(
 
 	body := apiModelFrom(plan)
 	body.ID = "" // id는 경로로 간다
-	path := "/admin/providers/" + plan.ID.ValueString()
+	path := "/admin/storages/" + plan.ID.ValueString()
 	if _, err := r.client.do(ctx, http.MethodPut, path, body, nil); err != nil {
 		response.Diagnostics.AddError("provider update failed", err.Error())
 		return
@@ -196,26 +196,26 @@ func (r *providerResource) Update(
 	response.Diagnostics.Append(response.State.Set(ctx, plan)...)
 }
 
-func (r *providerResource) Delete(
+func (r *storageResource) Delete(
 	ctx context.Context,
 	request resource.DeleteRequest,
 	response *resource.DeleteResponse,
 ) {
-	var state providerResourceModel
+	var state storageResourceModel
 	response.Diagnostics.Append(request.State.Get(ctx, &state)...)
 	if response.Diagnostics.HasError() {
 		return
 	}
 
-	path := "/admin/providers/" + state.ID.ValueString()
+	path := "/admin/storages/" + state.ID.ValueString()
 	if _, err := r.client.do(ctx, http.MethodDelete, path, nil, nil); err != nil {
 		// 사용 중(참조되는) provider의 삭제는 filegate가 409로 거부한다.
 		response.Diagnostics.AddError("provider delete failed", err.Error())
 	}
 }
 
-func apiModelFrom(model providerResourceModel) providerAPIModel {
-	return providerAPIModel{
+func apiModelFrom(model storageResourceModel) storageAPIModel {
+	return storageAPIModel{
 		ID:             model.ID.ValueString(),
 		Endpoint:       model.Endpoint.ValueString(),
 		Region:         model.Region.ValueString(),
