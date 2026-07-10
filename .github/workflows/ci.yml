@@ -43,7 +43,7 @@ jobs:
           --health-retries 10
     env:
       FILEGATE_DATABASE_URL: postgres://filegate:filegate@localhost:5432/filegate
-      # sqlx query! 매크로가 컴파일 타임에 읽는 표준 변수 (offline 메타데이터 도입 전까지)
+      # sqlx 표준 변수 — 마이그레이션 실행 테스트(db/tests/migrations.rs)가 읽는다
       DATABASE_URL: postgres://filegate:filegate@localhost:5432/filegate
 
     steps:

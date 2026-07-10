@@ -5,11 +5,13 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -80,7 +82,12 @@ func (r *storageResource) Schema(
 				Optional: true,
 				Computed: true,
 				Description: "전송 주체가 presigned URL로 접근할 공개 endpoint URL. " +
-					"생략하면 endpoint와 같은 값으로 등록한다.",
+					"생략하면 endpoint와 같은 값으로 등록한다. 빈 문자열은 허용하지 " +
+					"않는다. 한번 명시한 값은 선언에서 지워도 유지된다(Computed) — " +
+					"endpoint로 되돌리려면 값을 명시하라.",
+				Validators: []validator.String{
+					stringvalidator.LengthAtLeast(1),
+				},
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.UseStateForUnknown(),
 				},
@@ -232,7 +239,9 @@ func apiModelFrom(model storageResourceModel) storageAPIModel {
 }
 
 func stateWithResolvedPublicEndpoint(model storageResourceModel) storageResourceModel {
-	if model.PublicEndpoint.IsNull() || model.PublicEndpoint.IsUnknown() || model.PublicEndpoint.ValueString() == "" {
+	// 생략(null/unknown)만 서버 기본값(endpoint)으로 해석한다. 명시된 값은
+	// 그대로 둔다 — 빈 문자열은 스키마 validator가 plan에서 거른다.
+	if model.PublicEndpoint.IsNull() || model.PublicEndpoint.IsUnknown() {
 		model.PublicEndpoint = types.StringValue(model.Endpoint.ValueString())
 	}
 	return model

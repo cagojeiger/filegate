@@ -8,7 +8,9 @@
 BASE=http://127.0.0.1:8080
 AUTH="Authorization: Bearer fgop_local-dev"
 JSON="Content-Type: application/json"
-PSQL="docker exec filegate-postgres-1 psql -U filegate -d filegate -qc"
+# compose 프로젝트/서비스 이름이 다르면 FILEGATE_PG_CONTAINER로 지정한다.
+PG_CONTAINER="${FILEGATE_PG_CONTAINER:-filegate-postgres-1}"
+PSQL="docker exec $PG_CONTAINER psql -U filegate -d filegate -qc"
 PASS=0; FAIL=0
 
 ok()   { PASS=$((PASS+1)); }

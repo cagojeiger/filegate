@@ -80,8 +80,10 @@ async fn verified_row(
         return Err(bad_request("capacity_bytes must be >= 0"));
     }
     let capacity_bytes = body.capacity_bytes;
+    // 빈 문자열도 생략으로 본다 — 의미 없는 공개 주소가 저장되지 않게.
     let public_endpoint = body
         .public_endpoint
+        .filter(|value| !value.is_empty())
         .unwrap_or_else(|| body.endpoint.clone());
     let spec = S3StorageSpec {
         endpoint: body.endpoint,
