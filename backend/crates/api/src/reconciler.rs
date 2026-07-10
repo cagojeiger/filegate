@@ -5,8 +5,11 @@
 //!   1. 만료 회수 — 쓰기 lease가 만료된 pending의 예약 해제 + 실물 정리
 //!   2. purge — deleted 파일의 물리 삭제 + purge 대기 점유 해제
 //!
-//! 물리 삭제가 먼저, DB 정산이 나중이다 — 물리 삭제가 실패하면 다음
-//! tick이 다시 줍는다 (멱등). 정산의 경합은 조건부 전이가 끊는다.
+//! 순서가 잡마다 다르다: 회수는 전이(pending→reclaimed)가 먼저다 —
+//! 물리 삭제를 먼저 하면 늦은 commit이 전이 경합을 이겨 "실물 없는
+//! active 파일"이 생길 수 있다. purge는 물리 삭제가 먼저다 — deleted는
+//! 다른 상태로 되돌아갈 수 없어 안전하고, 삭제 확인 후에만 점유를
+//! 해제해야 한다. 어느 쪽이든 실패하면 다음 tick이 다시 줍는다 (멱등).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,26 +64,30 @@ pub fn spawn(
 
 async fn run_jobs(pool: &PgPool, crypto: &Crypto) {
     // 잡 1: 만료 회수 (spec 00 — pending의 capacity 해제 지점).
+    // 전이가 먼저다: reclaimed로 잠근 뒤에만 실물을 지운다. 늦은 commit이
+    // 전이를 이겼으면(false) 실물을 건드리지 않는다. 전이 후 물리 삭제가
+    // 실패하면 고아 객체가 남지만 — 회계는 이미 정확하고, 실물 없는
+    // active보다 훨씬 싼 실패다.
     match files::expired_pending(pool, BATCH_LIMIT).await {
         Ok(candidates) => {
             for candidate in candidates {
-                match sweep_object(pool, crypto, &candidate).await {
-                    Ok(()) => match files::finalize_reclaim(pool, &candidate).await {
-                        Ok(true) => tracing::info!(
-                            event = "file.reclaimed",
-                            file = %candidate.file_id,
-                        ),
-                        // 늦은 commit이 이겼다 — 정산할 것 없음.
-                        Ok(false) => {}
-                        Err(error) => {
-                            tracing::error!(event = "reconciler.reclaim_failed", %error)
+                match files::finalize_reclaim(pool, &candidate).await {
+                    Ok(true) => {
+                        if let Err(error) = sweep_object(pool, crypto, &candidate).await {
+                            tracing::warn!(
+                                event = "reconciler.orphan_object",
+                                file = %candidate.file_id,
+                                storage = %candidate.storage_id,
+                                %error,
+                            );
                         }
-                    },
-                    Err(error) => tracing::warn!(
-                        event = "reconciler.sweep_failed",
-                        file = %candidate.file_id,
-                        %error,
-                    ),
+                        tracing::info!(event = "file.reclaimed", file = %candidate.file_id);
+                    }
+                    // 늦은 commit이 이겼다 — 파일은 active, 실물도 그대로 둔다.
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::error!(event = "reconciler.reclaim_failed", %error)
+                    }
                 }
             }
         }
@@ -111,6 +118,16 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto) {
             }
         }
         Err(error) => tracing::error!(event = "reconciler.scan_failed", job = "purge", %error),
+    }
+
+    // 잡 3: 만료된 read lease의 원장 정리 — 회계 무관, issued가 무한히
+    // 쌓여 partial index가 비대해지는 것만 막는다.
+    match files::expire_read_leases(pool, BATCH_LIMIT).await {
+        Ok(0) => {}
+        Ok(count) => tracing::debug!(event = "reconciler.read_leases_expired", count),
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", job = "read_leases", %error)
+        }
     }
 }
 

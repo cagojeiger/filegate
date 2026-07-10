@@ -59,10 +59,12 @@ pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome
 
     // capacity는 경성 상한이다: 예약 + 확정 + purge 대기 + 선언 크기가 상한을
     // 넘으면 발급 거부 (spec 00). 조건부 UPDATE 한 문장이라 경합에도 원자적이다.
+    // 비교는 뺄셈 형태다 — 좌변 합산이 크기와 섞이지 않아 overflow가 없다
+    // (크기는 핸들러가 5GiB로 상한, capacity·버킷은 등록 검증이 상한).
     let reserved = sqlx::query(
         "UPDATE storage_usage SET reserved_bytes = reserved_bytes + $2, updated_at = now() \
          WHERE storage_id = $1 \
-         AND reserved_bytes + active_bytes + purge_pending_bytes + $2 <= $3",
+         AND reserved_bytes + active_bytes + purge_pending_bytes <= $3 - $2",
     )
     .bind(&storage_id)
     .bind(spec.declared_size)
@@ -426,4 +428,18 @@ fn candidate_from(row: (Uuid, i64, String, String)) -> SweepCandidate {
         storage_id: row.2,
         object_key: row.3,
     }
+}
+
+/// 만료된 read lease를 원장에서 expired로 정리한다 (유계 배치).
+/// 읽기는 회계가 없으므로 상태 전이가 전부다.
+pub async fn expire_read_leases(pool: &PgPool, limit: i64) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE leases SET state = 'expired' WHERE id IN ( \
+         SELECT id FROM leases WHERE kind = 'read' AND state = 'issued' \
+         AND expires_at < now() LIMIT $1)",
+    )
+    .bind(limit)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }

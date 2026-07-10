@@ -27,11 +27,8 @@ pub(crate) fn not_found(message: &str) -> ApiError {
     ApiError::Status(StatusCode::NOT_FOUND, message.to_owned())
 }
 
-pub(crate) fn unauthorized() -> ApiError {
-    ApiError::Status(
-        StatusCode::UNAUTHORIZED,
-        "operator token required".to_owned(),
-    )
+pub(crate) fn unauthorized(message: &str) -> ApiError {
+    ApiError::Status(StatusCode::UNAUTHORIZED, message.to_owned())
 }
 
 impl ApiError {

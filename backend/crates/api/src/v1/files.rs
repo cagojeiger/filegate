@@ -26,6 +26,9 @@ use crate::storage_access::spec_from_row;
 const WRITE_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
 /// 읽기 lease TTL. 발급된 직결 URL은 만료로만 소멸한다 (ADR 002).
 const READ_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
+/// v0 단일 PUT 상한 (spec 00: 5GiB 초과는 multipart와 함께 다음 범위).
+/// 회계 합산의 overflow 방어이기도 하다.
+const MAX_DECLARED_SIZE: i64 = 5 * 1024 * 1024 * 1024;
 
 #[derive(Deserialize)]
 pub(super) struct CreateBody {
@@ -58,6 +61,11 @@ pub(super) async fn create(
 ) -> Result<Response, ApiError> {
     if body.declared_size < 0 {
         return Err(bad_request("declared_size must be >= 0"));
+    }
+    if body.declared_size > MAX_DECLARED_SIZE {
+        return Err(bad_request(
+            "declared_size exceeds the single-upload limit (5 GiB)",
+        ));
     }
     if let Some(md5) = &body.declared_md5 {
         if md5.len() != 32 || !md5.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -221,7 +229,6 @@ pub(super) async fn read(
     }
 
     // 현재 location 재해석 — 이동해도 같은 file_id로 접근한다 (spec 00).
-    files::issue_read_lease(&state.pool, file_id, READ_LEASE_TTL.as_secs() as i64).await?;
     let storage_spec = spec_from_row(&state.crypto, &file.storage)?;
     let storage = s3_client(&storage_spec, Address::Public);
     let get_url = s3_presign_get(
@@ -232,6 +239,8 @@ pub(super) async fn read(
     )
     .await
     .map_err(ApiError::Storage)?;
+    // lease는 서명이 성공한 뒤에 기록한다 — 실패한 발급은 원장에 남지 않는다.
+    files::issue_read_lease(&state.pool, file_id, READ_LEASE_TTL.as_secs() as i64).await?;
 
     tracing::info!(event = "file.read", file = %file_id, client = %client.0);
     Ok(Json(ReadOut { file_id, get_url }).into_response())
@@ -254,6 +263,11 @@ pub(super) async fn stat(
     let stat = files::stat(&state.pool, &client.0, file_id)
         .await?
         .ok_or_else(|| not_found("file not found"))?;
+    // reclaimed는 내부 상태다 — 클라이언트 계약은 pending|active|deleted
+    // 셋뿐이고(spec 00), 회수된 파일은 파일이 된 적이 없다.
+    if stat.state == "reclaimed" {
+        return Err(not_found("file not found"));
+    }
     Ok(Json(StatOut {
         file_id,
         state: stat.state,

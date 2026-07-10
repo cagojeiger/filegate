@@ -116,6 +116,13 @@ impl Config {
                 .map_err(|e| Error::config(format!("FILEGATE_DB_MAX_CONNECTIONS: {e}")))?
                 .unwrap_or(5),
         };
+        // reconciler가 advisory lock 트랜잭션으로 커넥션 하나를 쥔 채
+        // 잡 트랜잭션을 pool에서 또 연다 — 1개면 데드락이다.
+        if database.max_connections < 2 {
+            return Err(Error::config(
+                "FILEGATE_DB_MAX_CONNECTIONS must be at least 2",
+            ));
+        }
         let required =
             |key: &str| env(key).ok_or_else(|| Error::config(format!("{key} is not set")));
         let operator_tokens: Vec<SecretString> = required("FILEGATE_OPERATOR_TOKENS")?

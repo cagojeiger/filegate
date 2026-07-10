@@ -40,7 +40,7 @@ pub async fn require_client(
         .and_then(|value| value.split_once(' '))
         .and_then(|(scheme, token)| scheme.eq_ignore_ascii_case("bearer").then_some(token));
     let Some(token) = presented else {
-        return crate::error::unauthorized().into_response();
+        return crate::error::unauthorized("client key required").into_response();
     };
     let key_hash = filegate_core::client_key_hash(token);
     match registry::client_id_for_key_hash(&state.pool, &key_hash).await {
@@ -48,7 +48,7 @@ pub async fn require_client(
             request.extensions_mut().insert(ClientId(client_id));
             next.run(request).await
         }
-        Ok(None) => crate::error::unauthorized().into_response(),
+        Ok(None) => crate::error::unauthorized("client key required").into_response(),
         Err(error) => crate::error::ApiError::from(error).into_response(),
     }
 }

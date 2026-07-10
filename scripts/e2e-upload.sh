@@ -35,7 +35,8 @@ expect "틀린 키 401"   401 "$(curl -s -o /dev/null -w '%{http_code}' -X POST 
 echo "=== create ==="
 expect "없는 intent 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"ghost","declared_size":1}')"
 expect "음수 크기 400"   400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":-1}')"
-expect "capacity 초과 507" 507 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":9999999999}')"
+expect "5GiB 상한 초과 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":9999999999}')"
+expect "capacity 초과 507" 507 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":2147483648}')"
 
 CREATE=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files \
   -d "{\"intent\":\"attachment\",\"declared_size\":$SIZE,\"content_type\":\"text/plain\",\"declared_md5\":\"$MD5\"}")
@@ -110,6 +111,7 @@ echo "=== reconciler: 만료 회수 + purge (tick 대기) ==="
 $PSQL "UPDATE leases SET expires_at = now() - interval '1 second' WHERE file_id='$F2' AND kind='write';" >/dev/null
 sleep 7   # FILEGATE_RECONCILER_INTERVAL_SECS=2 기준 tick 3회 이상
 expect "pending → reclaimed" "reclaimed" "$($PSQL "SELECT state FROM files WHERE id='$F2';" | tr -d ' ')"
+expect "회수된 파일 stat 404 (내부 상태 비노출)" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" $BASE/v1/files/$F2)"
 expect "회수 후 reserved 0" "0" "$($PSQL "SELECT reserved_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
 expect "purge 후 대기 0" "0" "$($PSQL "SELECT purge_pending_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
 expect "purge 후에도 stat은 답한다(deleted)" "deleted" "$($PSQL "SELECT state FROM files WHERE id='$FILE_ID';" | tr -d ' ')"
