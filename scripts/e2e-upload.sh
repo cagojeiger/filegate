@@ -17,6 +17,9 @@ bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
 expect() { # $1 label, $2 want, $3 got
   if [ "$3" = "$2" ]; then ok; else bad "$1 (want $2, got $3)"; fi
 }
+expect_any() { # $1 label, $2 want(공백 구분 후보), $3 got — purge 타이밍 경합 허용
+  case " $2 " in *" $3 "*) ok;; *) bad "$1 (want one of [$2], got $3)";; esac
+}
 
 # 시작 전 도메인 행 초기화 (회계 포함) — 로컬 개발 DB 전용
 $PSQL "DELETE FROM leases;" >/dev/null 2>&1
@@ -35,6 +38,8 @@ expect "틀린 키 401"   401 "$(curl -s -o /dev/null -w '%{http_code}' -X POST 
 echo "=== create ==="
 expect "없는 intent 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"ghost","declared_size":1}')"
 expect "음수 크기 400"   400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":-1}')"
+expect "NUL(\\u0000) intent 404(500 아님)" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"att\u0000ack","declared_size":1}')"
+expect "제어문자 content_type 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":1,"content_type":"a\u0000b"}')"
 expect "5GiB 상한 초과 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":9999999999}')"
 expect "capacity 초과 507" 507 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":2147483648}')"
 
@@ -95,14 +100,15 @@ echo "=== delete(detach) → reconciler purge ==="
 DEL=$(curl -s -w '\n%{http_code}' -H "$AUTH" -X DELETE $BASE/v1/files/$FILE_ID)
 expect "delete 200" 200 "$(printf '%s' "$DEL" | tail -1)"
 expect "delete 멱등 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE $BASE/v1/files/$FILE_ID)"
-expect "삭제 후 read 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$FILE_ID/read)"
-expect "삭제 후 commit 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$FILE_ID/commit)"
+# purge(tick 2초)가 검사보다 먼저 돌 수 있다 — 계약상 purge 전 409, 후 404.
+expect_any "삭제 후 read 409|404" "409 404" "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$FILE_ID/read)"
+expect_any "삭제 후 commit 409|404" "409 404" "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$FILE_ID/commit)"
 expect "pending 파일 delete 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE $BASE/v1/files/$F2)"
-expect "purge 대기 회계" "$SIZE" "$($PSQL "SELECT purge_pending_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
+expect_any "purge 대기 회계(대기중|정리됨)" "$SIZE 0" "$($PSQL "SELECT purge_pending_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
 
 echo "=== 운영자 usage 조회 ==="
 USAGE=$(curl -s -H "Authorization: Bearer fgop_local-dev" $BASE/admin/usage)
-case "$USAGE" in *'"purge_pending_bytes":'$SIZE*) ok;; *) bad "usage purge_pending 불일치: $USAGE";; esac
+case "$USAGE" in *'"purge_pending_bytes":'*) ok;; *) bad "usage에 purge_pending 필드 없음: $USAGE";; esac
 case "$USAGE" in *'"reserved_bytes":999'*) ok;; *) bad "usage reserved 불일치: $USAGE";; esac
 expect "클라이언트 키로 usage 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" $BASE/admin/usage)"
 
@@ -112,6 +118,7 @@ $PSQL "UPDATE leases SET expires_at = now() - interval '1 second' WHERE file_id=
 sleep 7   # FILEGATE_RECONCILER_INTERVAL_SECS=2 기준 tick 3회 이상
 expect "pending → reclaimed" "reclaimed" "$($PSQL "SELECT state FROM files WHERE id='$F2';" | tr -d ' ')"
 expect "회수된 파일 stat 404 (내부 상태 비노출)" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" $BASE/v1/files/$F2)"
+expect "회수된 파일 delete 404 (일관성)" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE $BASE/v1/files/$F2)"
 expect "회수 후 reserved 0" "0" "$($PSQL "SELECT reserved_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
 expect "purge 후 대기 0" "0" "$($PSQL "SELECT purge_pending_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
 expect "purge 후에도 stat은 답한다(deleted)" "deleted" "$($PSQL "SELECT state FROM files WHERE id='$FILE_ID';" | tr -d ' ')"

@@ -72,6 +72,17 @@ pub(super) async fn create(
             return Err(bad_request("declared_md5 must be 32 hex chars"));
         }
     }
+    // intent는 슬러그 어휘다 (등록부 CHECK와 같은 형태). 형태가 아니면
+    // binding이 존재할 수 없으므로 조회 없이 같은 404로 답한다 — NUL 같은
+    // 제어 문자가 DB까지 가서 500이 되는 것도 여기서 막힌다.
+    if !is_intent_slug(&body.intent) {
+        return Err(not_found("unknown intent"));
+    }
+    if let Some(content_type) = &body.content_type {
+        if content_type.len() > 255 || !content_type.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+            return Err(bad_request("invalid content_type"));
+        }
+    }
 
     let spec = CreateSpec {
         client_id: &client.0,
@@ -310,6 +321,16 @@ fn deleted_response(file_id: Uuid) -> Response {
         state: "deleted",
     })
     .into_response()
+}
+
+fn is_intent_slug(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 fn committed_response(file_id: Uuid, etag: String) -> Response {

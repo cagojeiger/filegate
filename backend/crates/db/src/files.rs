@@ -292,7 +292,8 @@ pub async fn mark_deleted(
                 .fetch_optional(&mut *tx)
                 .await?;
         return Ok(match state.as_deref() {
-            None => DeleteOutcome::NotFound,
+            // reclaimed는 내부 상태 — 클라이언트에겐 파일이 된 적이 없다 (404).
+            None | Some("reclaimed") => DeleteOutcome::NotFound,
             Some("deleted") => DeleteOutcome::AlreadyDeleted,
             Some(_) => DeleteOutcome::NotCommitted,
         });
