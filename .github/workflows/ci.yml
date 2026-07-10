@@ -43,7 +43,7 @@ jobs:
           --health-retries 10
     env:
       FILEGATE_DATABASE_URL: postgres://filegate:filegate@localhost:5432/filegate
-      # sqlx query! 매크로가 컴파일 타임에 읽는 표준 변수 (offline 메타데이터 도입 전까지)
+      # sqlx 표준 변수 — 마이그레이션 실행 테스트(db/tests/migrations.rs)가 읽는다
       DATABASE_URL: postgres://filegate:filegate@localhost:5432/filegate
 
     steps:
@@ -61,3 +61,33 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+  terraform-provider:
+    name: Terraform provider
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: tf-provider/go.mod
+          cache-dependency-path: tf-provider/go.sum
+
+      - name: Format
+        working-directory: tf-provider
+        run: test -z "$(gofmt -l .)"
+
+      - name: Vet
+        working-directory: tf-provider
+        run: go vet ./...
+
+      - name: Test
+        working-directory: tf-provider
+        run: go test ./...
+
+      - name: Build
+        working-directory: tf-provider
+        run: go build ./...

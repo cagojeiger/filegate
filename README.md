@@ -8,17 +8,18 @@
 
 ## 개발 환경
 
-설정은 `filegate.yaml`에 있다 (로컬 개발 기본값 커밋됨). 프로덕션은 자기 설정을 별도로 두고 `FILEGATE_CONFIG`로 가리킨다. 설정이 없으면 부팅이 명확한 에러로 실패한다.
+설정은 전부 **환경 변수**다 (로컬 `.env`, 배포는 Terraform이 만든 k8s Secret): 서버 설정 + 마스터 키 + 운영자 토큰. 등록부(storages·clients·bindings)는 DB에 살고 운영자 API로 관리하며, storage 시크릿은 암호화되어 등록부에 보관된다 ([spec 01](docs/spec/01-registry.md)).
 
 ```sh
 docker compose up -d          # MinIO(9000/9001) + PostgreSQL(55432) + 버킷 프로비저닝
-cargo run --bin filegate      # filegate.yaml 로드, http://127.0.0.1:8080
+cp .env.example .env          # 로컬 자격증명
+cargo run --bin filegate      # http://127.0.0.1:8080
 ```
 
-컨테이너로 띄울 때는 설정을 마운트한다:
+컨테이너로 띄울 때는 env만 준다:
 
 ```sh
-docker run -v ./filegate.yaml:/etc/filegate/filegate.yaml filegate:dev
+docker run --env-file .env filegate:dev
 ```
 
 확인:
@@ -34,7 +35,8 @@ curl http://127.0.0.1:8080/metrics   # Prometheus 스크레이프
 
 ```sh
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
-docker build -f backend/Dockerfile -t filegate:dev .
+(cd tf-provider && test -z "$(gofmt -l .)" && go vet ./... && go test ./... && go build ./...)
+docker build -f deploy/docker/Dockerfile -t filegate:dev .
 ```
 
 릴리스는 `VERSION` 파일을 올려 main에 머지하면 GitHub Actions가 ghcr 이미지와 태그를 발행한다.

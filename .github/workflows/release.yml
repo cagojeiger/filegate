@@ -84,7 +84,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: backend/Dockerfile
+          file: deploy/docker/Dockerfile
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=filegate-release-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=filegate-release-${{ matrix.arch }}

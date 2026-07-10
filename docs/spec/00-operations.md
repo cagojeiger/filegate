@@ -2,7 +2,7 @@
 
 - Status: Draft
 - Date: 2026-07-07
-- 근거: ADR [000](../adr/000-identity.md), [001](../adr/001-multi-provider.md), [002](../adr/002-lease-model.md), [003](../adr/003-url-ownership.md), [004](../adr/004-config-layers.md)
+- 근거: ADR [000](../adr/000-identity.md), [001](../adr/001-multi-storage.md), [002](../adr/002-lease-model.md), [003](../adr/003-url-ownership.md), [004](../adr/004-config-layers.md)
 - 실측: 2026-07-08, MinIO 싱글노드. "(실측)"은 이 확인에서 나온 사실이다.
 
 단일 파일 업로드·다운로드, 그에 필요한 조회·삭제, 운영자 용량 조회를 정한다.
@@ -11,10 +11,11 @@
 
 이번 범위: `create`→`commit`(업로드), `read`(다운로드), `stat`, `delete`, `usage`(운영자).
 
-접근 모드는 둘 다 지원한다. **직결**이 기본이자 계약 기준이고, **중계**는 provider capability가 직결을 막을 때 자동으로 쓰인다. 모드는 provider·오퍼레이션 단위 capability 선언이 정하고, 서비스 계약은 두 모드에서 같다 (ADR 001). v0 provider는 MinIO(S3 호환, 직결)와 로컬 파일시스템(NFS 마운트, fs adapter, 중계 전용) 둘이다. OCI 등은 다음 범위다.
+접근 모드의 계약은 둘(직결·중계)이지만, **v0는 직결만 구현한다.** 중계는 presigned를 지원하지 않는 저장소(로컬 fs/NFS, CORS 없는 벤더)를 위한 호환 기능이며, 그런 storage가 등장할 때 추가한다 — 서비스 계약은 두 모드에서 같다 (ADR 001·002). v0 storage는 MinIO(S3 호환, 직결)다.
 
 다음 범위로 미룬다:
 
+- 중계 모드와 fs storage(NFS) — presigned 미지원 저장소 호환. OCI 등 외부 벤더 추가도 이때.
 - 폴더·배치 업로드 — 폴더는 서비스가 단일 업로드를 반복해 표현한다 (공리 1).
 - 갱신·재개(resumable) 업로드.
 - 5GiB 초과 파일 — multipart는 ETag가 MD5가 아니라 체크섬 대조가 단일 PUT에서만 성립한다 (실측).
@@ -25,10 +26,10 @@
 ## 공통 원칙
 
 - 권한 검사는 서비스가 호출 전에 한다. 유저 개념은 서비스에 있다 (공리 1).
-- 바이트는 전송 주체와 저장소가 직접 주고받고, filegate는 발급·기록·검증을 한다 (공리 2). 직결이 불가능한 provider는 filegate가 중계하며, 계약은 같다.
+- 바이트는 전송 주체와 저장소가 직접 주고받고, filegate는 발급·기록·검증을 한다 (공리 2). 직결이 불가능한 storage는 filegate가 중계하며, 계약은 같다.
 - 서비스는 filegate 산출물 중 file_id만 영속화한다 (ADR 003).
 - 모든 표면은 인증 뒤에 있다: 클라이언트 API는 클라이언트 인증, usage는 운영자 인증, 중계 바이트 엔드포인트는 lease별 secret (ADR 003).
-- 용량은 운영자의 세계다. 클라이언트는 어떤 오퍼레이션에서도 용량 정보를 받지 않고, 자기 사용량은 스스로 관리한다 (공리 1). 이번 범위 회계는 capacity(provider별 물리 총량) 한 축이다.
+- 용량은 운영자의 세계다. 클라이언트는 어떤 오퍼레이션에서도 용량 정보를 받지 않고, 자기 사용량은 스스로 관리한다 (공리 1). 이번 범위 회계는 capacity(storage별 물리 총량) 한 축이다.
 
 ## 오퍼레이션
 
@@ -37,9 +38,9 @@
 - 입력: intent, 선언 크기. 선택: content_type, 선언 MD5. 0바이트도 유효한 선언이다.
   - content_type은 서명에 포함해야 강제된다 (실측).
   - 선언 MD5는 commit이 ETag와 대조한다. 단일 PUT의 ETag = MD5다 (실측).
-- 처리: 배치 결정, capacity 예약, file_id 발급.
+- 처리: 선언 해석 ((client, intent) → binding → storage — [spec 01](01-registry.md), v0는 명시 선언 단일 대상), capacity 예약, file_id 발급.
 - 출력: file_id, 만료가 있는 PUT URL. URL 구조는 계약이 아니다 (직결이면 저장소 presigned, 중계면 filegate 엔드포인트).
-- capacity는 경성 상한이다: `예약량 + 확정량 + purge 대기 점유 + 선언 크기`가 상한을 넘으면 발급을 거부한다. 모든 후보 provider가 걸리면 create는 실패하고, 거부 이유의 용량 상세는 클라이언트에 노출하지 않는다.
+- capacity는 경성 상한이다: `예약량 + 확정량 + purge 대기 점유 + 선언 크기`가 상한을 넘으면 발급을 거부한다. 대상 storage가 상한에 걸리면 create는 실패하고, 거부 이유의 용량 상세는 클라이언트에 노출하지 않는다.
 - 상태: `pending`. commit 전까지 파일이 아니다.
 
 ### commit — 업로드 확정
@@ -70,7 +71,7 @@
 ### usage — 운영자 용량 조회
 
 - 운영자 표면이다. 클라이언트 자격증명으로는 호출할 수 없다.
-- 출력: provider별 capacity 한도, 예약량(pending 합), 확정량(active 합), purge 대기 점유(deleted·미purge), 남은 여유(= 한도 − 앞의 셋).
+- 출력: storage별 capacity 한도, 예약량(pending 합), 확정량(active 합), purge 대기 점유(deleted·미purge), 남은 여유(= 한도 − 앞의 셋).
 - 이 총량이 배치 거부와 tiering 판단의 입력이다.
 
 ## 흐름: 업로드
@@ -88,7 +89,7 @@ sequenceDiagram
     U->>S: 업로드 요청
     S->>S: 유저 권한 확인 (서비스 몫)
     S->>F: create(intent, 크기)
-    F->>F: 배치 결정 + capacity 예약
+    F->>F: 선언 해석 + capacity 예약
     F-->>S: file_id + PUT URL
     S-->>U: PUT URL 위임
     U->>O: 바이트 직접 PUT

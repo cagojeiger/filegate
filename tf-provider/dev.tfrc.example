@@ -1,0 +1,10 @@
+# 로컬 빌드를 바로 쓰는 Terraform CLI 설정 (dev_overrides).
+# 절대 경로가 필요하므로 복사해 경로를 채운다:
+#   cp dev.tfrc.example dev.tfrc   # dev.tfrc는 커밋하지 않는다
+#   export TF_CLI_CONFIG_FILE=$PWD/dev.tfrc
+provider_installation {
+  dev_overrides {
+    "cagojeiger/filegate" = "/ABSOLUTE/PATH/TO/filegate/tf-provider/bin"
+  }
+  direct {}
+}

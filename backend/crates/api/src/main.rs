@@ -1,11 +1,11 @@
-//! filegate 진입점: config → PostgreSQL(+마이그레이션) → 오브젝트 스토리지
-//! 연결 검증 → HTTP + reconciler → graceful shutdown.
+//! filegate 진입점: env 설정 → PostgreSQL(+마이그레이션) → storage 재검증
+//! → HTTP + reconciler → graceful shutdown.
 
+mod admin;
 mod metrics;
 mod reconciler;
 mod routes;
 
-use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 
@@ -17,6 +17,9 @@ use tracing::info;
 async fn main() -> anyhow::Result<()> {
     let config = filegate_core::Config::load()?;
     init_tracing(config.server.log_format);
+
+    // 암호기 조립이 부팅 첫머리다 — 루트 길이·중복 key_id 오설정을 여기서 잡는다.
+    let crypto = Arc::new(config.security.crypto()?);
 
     // 시그널 핸들러는 부팅 초기에 설치한다. 설치가 실패하면 graceful
     // shutdown이 불가능한 프로세스가 되므로 부팅 자체를 중단한다.
@@ -36,13 +39,8 @@ async fn main() -> anyhow::Result<()> {
         max_connections = config.database.max_connections
     );
 
-    // 정의된 provider를 모두 연결·검증한다. 하나라도 실패하면 부팅 중단 (ADR 001).
-    let mut storages = BTreeMap::new();
-    for (id, provider) in &config.providers {
-        let storage = filegate_infra::s3_connect(provider).await?;
-        info!(event = "storage.connected", provider = %id, endpoint = %provider.endpoint, bucket = %storage.bucket);
-        storages.insert(id.clone(), Arc::new(storage));
-    }
+    // 등록된 storage 접근 재검증 — 실패하면 부팅 중단 (ADR 001).
+    admin::verify_registered(&pool, &crypto).await?;
 
     let listener = tokio::net::TcpListener::bind(config.server.bind_addr).await?;
     info!(event = "server.listening", addr = %config.server.bind_addr);
@@ -52,8 +50,9 @@ async fn main() -> anyhow::Result<()> {
 
     let state = routes::AppState {
         pool: pool.clone(),
-        storages: Arc::new(storages),
         metrics,
+        security: config.security.clone(),
+        crypto,
     };
     let http_shutdown = shutdown.clone().cancelled_owned();
     let server = async move {
