@@ -4,7 +4,7 @@
 #   export TF_CLI_CONFIG_FILE=$PWD/dev.tfrc
 provider_installation {
   dev_overrides {
-    "cagojeiger/filegate" = "/ABSOLUTE/PATH/TO/filegate/terraform-provider/bin"
+    "cagojeiger/filegate" = "/ABSOLUTE/PATH/TO/filegate/tf-provider/bin"
   }
   direct {}
 }

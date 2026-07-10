@@ -1,7 +1,7 @@
 # 로컬 hello-world: docker-compose의 MinIO를 filegate에 등록한다.
 #
 # 실행 (dev_overrides — 레지스트리 없이 로컬 빌드 사용):
-#   cd terraform-provider && go build -o bin/terraform-provider-filegate .
+#   cd tf-provider && go build -o bin/terraform-provider-filegate .
 #   export TF_CLI_CONFIG_FILE=$PWD/dev.tfrc   # dev.tfrc.example 참고
 #   export FILEGATE_OPERATOR_TOKEN=fgop_local-dev
 #   terraform -chdir=examples apply

@@ -25,8 +25,8 @@ target
 #.idea/
 
 # Terraform (로컬 dev_overrides 실행 산출물)
-terraform-provider/bin/
-terraform-provider/dev.tfrc
+tf-provider/bin/
+tf-provider/dev.tfrc
 *.tfstate
 *.tfstate.backup
 .terraform/
