@@ -112,8 +112,8 @@ pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome
     })))
 }
 
-/// commit의 사후 검증에 필요한 선언·위치·접근 정보 (조회 전용).
-pub struct FileForCommit {
+/// commit의 사후 검증과 read의 위치 해석에 필요한 정보 (조회 전용).
+pub struct FileAccess {
     pub state: String,
     pub declared_size: i64,
     pub declared_md5: Option<String>,
@@ -126,11 +126,11 @@ pub struct FileForCommit {
 type CommitRow = (String, i64, Option<String>, Option<String>, String);
 
 /// 소유 검사 포함 조회 — 남의 file_id는 존재 자체를 모른다 (404).
-pub async fn for_commit(
+pub async fn for_access(
     pool: &PgPool,
     client_id: &str,
     file_id: Uuid,
-) -> Result<Option<FileForCommit>, sqlx::Error> {
+) -> Result<Option<FileAccess>, sqlx::Error> {
     let row: Option<CommitRow> = sqlx::query_as(
         "SELECT f.state, f.declared_size, f.declared_md5, f.etag, l.object_key \
          FROM files f JOIN locations l ON l.file_id = f.id \
@@ -150,13 +150,58 @@ pub async fn for_commit(
     .bind(file_id)
     .fetch_one(pool)
     .await?;
-    Ok(Some(FileForCommit {
+    Ok(Some(FileAccess {
         state,
         declared_size,
         declared_md5,
         etag,
         object_key,
         storage,
+    }))
+}
+
+/// 읽기 lease 기록 — 모든 바이트 접근은 lease다 (ADR 002, 원장이 감사 기록).
+/// 읽기는 용량을 소비하지 않는다 (spec 00).
+pub async fn issue_read_lease(
+    pool: &PgPool,
+    file_id: Uuid,
+    ttl_secs: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO leases (file_id, kind, expires_at) \
+         VALUES ($1, 'read', now() + $2 * interval '1 second')",
+    )
+    .bind(file_id)
+    .bind(ttl_secs)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+/// stat (spec 00): 상태·크기·intent만 — location·URL은 내보내지 않는다.
+/// purge 후에도 행은 deleted로 남아 계속 답한다.
+pub struct FileStat {
+    pub state: String,
+    pub declared_size: i64,
+    pub intent: String,
+}
+
+pub async fn stat(
+    pool: &PgPool,
+    client_id: &str,
+    file_id: Uuid,
+) -> Result<Option<FileStat>, sqlx::Error> {
+    let row: Option<(String, i64, String)> = sqlx::query_as(
+        "SELECT state, declared_size, intent FROM files WHERE id = $1 AND client_id = $2",
+    )
+    .bind(file_id)
+    .bind(client_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(state, declared_size, intent)| FileStat {
+        state,
+        declared_size,
+        intent,
     }))
 }
 

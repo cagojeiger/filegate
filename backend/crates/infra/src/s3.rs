@@ -114,6 +114,51 @@ pub async fn presign_put(
     Ok(presigned.uri().to_owned())
 }
 
+/// 읽기 lease의 실체 — 만료가 있는 presigned GET URL (spec 00 read).
+/// filename을 주면 RFC 5987로 Content-Disposition에 실어 서명한다 (ADR 003,
+/// 실측: 서명에 포함해야 강제된다).
+pub async fn presign_get(
+    storage: &S3Storage,
+    object_key: &str,
+    filename: Option<&str>,
+    expires_in: Duration,
+) -> anyhow::Result<String> {
+    let mut request = storage
+        .client
+        .get_object()
+        .bucket(&storage.bucket)
+        .key(object_key);
+    if let Some(filename) = filename {
+        request = request.response_content_disposition(format!(
+            "attachment; filename*=UTF-8''{}",
+            rfc5987_encode(filename)
+        ));
+    }
+    let presigned = request
+        .presigned(PresigningConfig::expires_in(expires_in)?)
+        .await?;
+    Ok(presigned.uri().to_owned())
+}
+
+/// RFC 5987 value-chars 이외를 UTF-8 바이트 단위로 퍼센트 인코딩한다.
+fn rfc5987_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        let attr_char = byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+            );
+        if attr_char {
+            out.push(byte as char);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
+}
+
 /// 실물 메타 조회 (commit의 사후 검증). 없으면 None.
 /// 반환: (크기, ETag — 따옴표 제거. 단일 PUT이면 MD5와 같다, 실측).
 pub async fn head_object(

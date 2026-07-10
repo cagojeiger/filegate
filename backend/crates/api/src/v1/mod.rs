@@ -10,7 +10,7 @@ use axum::extract::{Request, State};
 use axum::http::header;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::Router;
 use filegate_db::registry;
 
@@ -23,7 +23,9 @@ pub struct ClientId(pub String);
 pub fn v1_routes() -> Router<AppState> {
     Router::new()
         .route("/files", post(files::create))
+        .route("/files/{id}", get(files::stat))
         .route("/files/{id}/commit", post(files::commit))
+        .route("/files/{id}/read", post(files::read))
 }
 
 pub async fn require_client(

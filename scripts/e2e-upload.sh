@@ -65,12 +65,30 @@ printf '%s' "$PAYLOAD" | curl -s -o /dev/null -X PUT --data-binary @- "$U2"
 expect "크기 불일치 commit 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$F2/commit)"
 expect "여전히 pending" "pending" "$($PSQL "SELECT state FROM files WHERE id='$F2';" | tr -d ' ')"
 
+echo "=== read: 올린 바이트를 도로 받는다 ==="
+READ=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files/$FILE_ID/read -d '{"filename":"한글 파일.txt"}')
+GET_URL=$(printf '%s' "$READ" | sed -n 's/.*"get_url":"\([^"]*\)".*/\1/p')
+if [ -n "$GET_URL" ]; then ok; else bad "read 응답에 get_url 없음: $READ"; fi
+BODY=$(curl -s "$GET_URL")
+expect "다운로드 내용 일치" "$PAYLOAD" "$BODY"
+DISPO=$(curl -s -o /dev/null -D - "$GET_URL" | grep -i '^content-disposition' | tr -d '\r')
+case "$DISPO" in *"filename*=UTF-8''"*) ok;; *) bad "Content-Disposition RFC5987 없음: $DISPO";; esac
+expect "pending 파일 read 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$F2/read)"
+expect "없는 파일 read 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/00000000-0000-0000-0000-000000000000/read)"
+
+echo "=== stat ==="
+STAT=$(curl -s -H "$AUTH" $BASE/v1/files/$FILE_ID)
+case "$STAT" in *'"state":"active"'*) ok;; *) bad "stat active 아님: $STAT";; esac
+case "$STAT" in *"\"declared_size\":$SIZE"*) ok;; *) bad "stat 크기 불일치: $STAT";; esac
+case "$STAT" in *'"intent":"attachment"'*) ok;; *) bad "stat intent 불일치: $STAT";; esac
+expect "read lease 원장 기록" "1" "$($PSQL "SELECT count(*) FROM leases WHERE file_id='$FILE_ID' AND kind='read';" | tr -d ' ')"
+
 echo "=== 회계 검증 ==="
 # 파일1 확정(active=SIZE), 파일2 예약(reserved=999)
 expect "active_bytes" "$SIZE" "$($PSQL "SELECT active_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
 expect "reserved_bytes" "999" "$($PSQL "SELECT reserved_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
 expect "파일1 active" "active" "$($PSQL "SELECT state FROM files WHERE id='$FILE_ID';" | tr -d ' ')"
-expect "lease 정산" "committed" "$($PSQL "SELECT state FROM leases WHERE file_id='$FILE_ID';" | tr -d ' ')"
+expect "쓰기 lease 정산" "committed" "$($PSQL "SELECT state FROM leases WHERE file_id='$FILE_ID' AND kind='write';" | tr -d ' ')"
 
 # 정리 — 로컬 개발 DB 전용 (TF destroy가 막히지 않게)
 $PSQL "DELETE FROM leases;" >/dev/null 2>&1

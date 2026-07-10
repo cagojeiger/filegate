@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use filegate_db::files::{self, CreateOutcome, CreateSpec};
-use filegate_infra::{s3_client, s3_head_object, s3_presign_put, Address};
+use filegate_infra::{s3_client, s3_head_object, s3_presign_get, s3_presign_put, Address};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -24,6 +24,8 @@ use crate::storage_access::spec_from_row;
 /// 쓰기 lease TTL — 짧게 둔다 (spec 00: 쓰기 URL은 확정 후에도 만료 전까지
 /// 유효하므로, 변조 창을 줄이는 건 TTL이다).
 const WRITE_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
+/// 읽기 lease TTL. 발급된 직결 URL은 만료로만 소멸한다 (ADR 002).
+const READ_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Deserialize)]
 pub(super) struct CreateBody {
@@ -117,7 +119,7 @@ pub(super) async fn commit(
     Extension(client): Extension<ClientId>,
     Path(file_id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let file = files::for_commit(&state.pool, &client.0, file_id)
+    let file = files::for_access(&state.pool, &client.0, file_id)
         .await?
         .ok_or_else(|| not_found("file not found"))?;
 
@@ -166,7 +168,7 @@ pub(super) async fn commit(
     }
 
     // 전이 경합의 패자 — 현재 상태로 멱등 응답한다.
-    let now = files::for_commit(&state.pool, &client.0, file_id)
+    let now = files::for_access(&state.pool, &client.0, file_id)
         .await?
         .ok_or_else(|| not_found("file not found"))?;
     match now.state.as_str() {
@@ -176,6 +178,89 @@ pub(super) async fn commit(
             "file is not committable".to_owned(),
         )),
     }
+}
+
+#[derive(Deserialize, Default)]
+pub(super) struct ReadBody {
+    /// 다운로드 표현 — 파일명 (RFC 5987로 인코딩되어 서명에 실린다, ADR 003).
+    filename: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ReadOut {
+    file_id: Uuid,
+    /// 만료가 있는 GET URL. 서비스가 302 redirect한다 (spec 00).
+    get_url: String,
+}
+
+pub(super) async fn read(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientId>,
+    Path(file_id): Path<Uuid>,
+    body: Option<Json<ReadBody>>,
+) -> Result<Response, ApiError> {
+    let body = body.map(|Json(inner)| inner).unwrap_or_default();
+    let file = files::for_access(&state.pool, &client.0, file_id)
+        .await?
+        .ok_or_else(|| not_found("file not found"))?;
+    match file.state.as_str() {
+        "active" => {}
+        "deleted" => {
+            return Err(ApiError::Status(
+                StatusCode::CONFLICT,
+                "file is deleted".to_owned(),
+            ))
+        }
+        // pending — commit 전까지 파일이 아니다 (spec 00).
+        _ => {
+            return Err(ApiError::Status(
+                StatusCode::CONFLICT,
+                "file is not committed".to_owned(),
+            ))
+        }
+    }
+
+    // 현재 location 재해석 — 이동해도 같은 file_id로 접근한다 (spec 00).
+    files::issue_read_lease(&state.pool, file_id, READ_LEASE_TTL.as_secs() as i64).await?;
+    let storage_spec = spec_from_row(&state.crypto, &file.storage)?;
+    let storage = s3_client(&storage_spec, Address::Public);
+    let get_url = s3_presign_get(
+        &storage,
+        &file.object_key,
+        body.filename.as_deref(),
+        READ_LEASE_TTL,
+    )
+    .await
+    .map_err(ApiError::Storage)?;
+
+    tracing::info!(event = "file.read", file = %file_id, client = %client.0);
+    Ok(Json(ReadOut { file_id, get_url }).into_response())
+}
+
+#[derive(Serialize)]
+struct StatOut {
+    file_id: Uuid,
+    state: String,
+    declared_size: i64,
+    intent: String,
+}
+
+/// stat — 상태·크기·intent만 (spec 00: location·URL은 제외).
+pub(super) async fn stat(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientId>,
+    Path(file_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let stat = files::stat(&state.pool, &client.0, file_id)
+        .await?
+        .ok_or_else(|| not_found("file not found"))?;
+    Ok(Json(StatOut {
+        file_id,
+        state: stat.state,
+        declared_size: stat.declared_size,
+        intent: stat.intent,
+    })
+    .into_response())
 }
 
 fn committed_response(file_id: Uuid, etag: String) -> Response {
