@@ -230,9 +230,18 @@ async fn upload_part(
     }
     drop(writer.into_inner());
 
-    let claim = files::claim_part(&state.pool, lease_id, part_no).await?;
-    let recorded = match backend {
+    match backend {
         StorageBackend::Fs { root } => {
+            // 같은 part 동시 승격을 직렬화한다 — 인터리브 손상 방지 (spec 02).
+            // 락은 로컬 디스크 쓰기에만 걸린다 (네트워크 없음). claim이 drop되면
+            // 롤백이라 실패한 승격은 재시도가 덮어쓴다.
+            let claim = match files::claim_part(&state.pool, lease_id, part_no).await {
+                Ok(claim) => claim,
+                Err(error) => {
+                    fs_backend::abort_write(&temp_path).await;
+                    return Err(error.into());
+                }
+            };
             let target = fs_backend::multipart_temp(root, &lease_id.to_string());
             let promoted = fs_backend::write_part_at(
                 &target,
@@ -244,13 +253,17 @@ async fn upload_part(
             if let Err(error) = promoted {
                 return Err(internal(error));
             }
-            md5_hex.clone()
+            claim.done(written, &md5_hex).await?;
         }
         StorageBackend::S3 { spec, .. } => {
             let Some(upload_id) = &lease.upload_id else {
                 fs_backend::abort_write(&temp_path).await;
                 return Err(internal("multipart lease has no upload id"));
             };
+            // 네트워크(UploadPart)는 DB 트랜잭션 밖에서 한다 — 커넥션을 전송
+            // 내내 붙잡지 않는다 (files.rs 모듈 불변식). 벤더가 part 번호로
+            // last-write-wins 하므로 승격 직렬화 락도 불필요하고, 기록은
+            // 전송이 끝난 뒤 짧은 upsert 하나다.
             let storage = s3_client(spec, Address::Internal);
             let uploaded = filegate_infra::s3_upload_part_from_path(
                 &storage, object_key, upload_id, part_no, &temp_path,
@@ -264,10 +277,9 @@ async fn upload_part(
                     "vendor part etag does not match measured md5"
                 )));
             }
-            vendor_etag
+            files::record_part_done(&state.pool, lease_id, part_no, written, &vendor_etag).await?;
         }
-    };
-    claim.done(written, &recorded).await?;
+    }
 
     tracing::info!(event = "bytes.part_uploaded", lease = %lease_id, file = %lease.file_id, part = part_no, size = written);
     let mut response = StatusCode::OK.into_response();

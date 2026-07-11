@@ -73,10 +73,16 @@ run_mode() {
   if [ "$URLKIND" = "relay" ]; then
     expect "[$INTENT] part 크기 불일치 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$WORK/p3" "$U2")"
   fi
-  # 재발급 = 재개 (spec 02): part2를 다시 요청해 새 URL로 올린다
+  # 재발급 = 재개 (spec 02): part2를 다시 요청해 올린다. 중계는 시크릿이
+  # 회전하지 않아야 하므로, 재발급 뒤에도 앞서 받은 part1 URL(U1)이 살아
+  # 있어야 한다 — 재개가 진행 중 다른 part를 죽이지 않는다는 계약.
   P2=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files/$FID/parts -d '{"parts":[2]}')
   U2B=$(part_url "$P2" 2)
   expect "[$INTENT] 재발급 part2 PUT 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$WORK/p2" "$U2B")"
+  if [ "$URLKIND" = "relay" ]; then
+    # 앞 배치의 part1 URL을 재사용해 다시 PUT — 시크릿 비회전이면 200.
+    expect "[$INTENT] 재발급 후 앞 배치 URL 생존(비회전)" 200 "$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$WORK/p1" "$U1")"
+  fi
 
   CM=$(curl -s -w '\n%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$FID/commit)
   expect "[$INTENT] commit 200" 200 "$(printf '%s' "$CM" | tail -1)"

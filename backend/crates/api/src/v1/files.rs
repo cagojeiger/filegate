@@ -139,17 +139,41 @@ pub(super) async fn create(
 
     if multipart {
         // multipart는 PUT URL 대신 서술자를 준다 — part 접근은 parts 발급으로
-        // (spec 02). s3 계열은 지금 벤더 세션을 열어 핸들을 lease에 기록한다.
-        if let StorageBackend::S3 { spec, .. } = &backend {
-            let storage = s3_client(spec, Address::Internal);
-            let upload_id = filegate_infra::s3_create_multipart(
-                &storage,
-                &created.object_key,
-                body.content_type.as_deref(),
-            )
-            .await
-            .map_err(ApiError::Storage)?;
-            files::attach_upload_id(&state.pool, created.lease_id, &upload_id).await?;
+        // (spec 02). s3 계열은 지금 벤더 세션을 열어 핸들을 lease에 기록하고,
+        // 중계(fs 또는 force_relay)는 write secret을 지금 한 번 생성해 둔다 —
+        // 이후 parts() 발급이 매번 같은 secret으로 URL을 조립해 회전이 없다.
+        match &backend {
+            StorageBackend::S3 { spec, force_relay } => {
+                let storage = s3_client(spec, Address::Internal);
+                let upload_id = filegate_infra::s3_create_multipart(
+                    &storage,
+                    &created.object_key,
+                    body.content_type.as_deref(),
+                )
+                .await
+                .map_err(ApiError::Storage)?;
+                files::attach_upload_id(&state.pool, created.lease_id, &upload_id).await?;
+                if *force_relay {
+                    let relay = RelaySecret::generate();
+                    files::attach_multipart_secret(
+                        &state.pool,
+                        created.lease_id,
+                        &relay.secret,
+                        &relay.hash,
+                    )
+                    .await?;
+                }
+            }
+            StorageBackend::Fs { .. } => {
+                let relay = RelaySecret::generate();
+                files::attach_multipart_secret(
+                    &state.pool,
+                    created.lease_id,
+                    &relay.secret,
+                    &relay.hash,
+                )
+                .await?;
+            }
         }
         tracing::info!(
             event = "file.created",
@@ -224,7 +248,7 @@ async fn commit_multipart(
     backend: &StorageBackend,
 ) -> Result<Response, ApiError> {
     let count = files::part_count(file.declared_size, part_size);
-    let Some((lease_id, upload_id)) = files::write_lease(&state.pool, file_id).await? else {
+    let Some((lease_id, upload_id, _)) = files::write_lease(&state.pool, file_id).await? else {
         return Err(internal("multipart file has no write lease"));
     };
 
@@ -367,13 +391,15 @@ pub(super) async fn parts(
         return Err(bad_request("file is not a multipart upload"));
     };
     let count = files::part_count(file.declared_size, part_size);
-    if body.parts.is_empty() || body.parts.len() > 100 {
-        return Err(bad_request("request 1 to 100 parts at a time"));
+    if body.parts.is_empty() || body.parts.len() > 1000 {
+        return Err(bad_request("request 1 to 1000 parts at a time"));
     }
     if body.parts.iter().any(|&n| n < 1 || n > count) {
         return Err(bad_request("part number out of range"));
     }
-    let Some((lease_id, upload_id)) = files::write_lease(&state.pool, file_id).await? else {
+    let Some((lease_id, upload_id, write_secret)) =
+        files::write_lease(&state.pool, file_id).await?
+    else {
         return Err(internal("multipart file has no write lease"));
     };
     // 갱신 (ADR 002): 살아 있는 lease에만 성립 — 회수 뒤라면 재시도 불가.
@@ -405,13 +431,15 @@ pub(super) async fn parts(
             }
         }
         _ => {
+            // 중계: create 때 동결한 secret으로 URL을 조립한다 — 발급마다
+            // 회전하지 않으므로 다배치·재개에서 앞 배치 URL이 살아 있다 (spec 02).
             let base = relay_base(&state)?;
-            let relay = RelaySecret::generate();
-            files::attach_write_secret(&state.pool, lease_id, &relay.hash).await?;
+            let secret =
+                write_secret.ok_or_else(|| internal("relay multipart lease has no secret"))?;
             for &n in &body.parts {
                 out.push(PartOut {
                     part: n,
-                    url: format!("{base}/b/{lease_id}?s={}&part={n}", relay.secret),
+                    url: format!("{base}/b/{lease_id}?s={secret}&part={n}"),
                 });
             }
         }

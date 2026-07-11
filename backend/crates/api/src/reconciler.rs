@@ -29,6 +29,10 @@ const BATCH_LIMIT: i64 = 20;
 /// 진행 중 업로드의 유휴는 30초에 끊기므로(bytes) 여유가 크다.
 const TEMP_MAX_AGE: Duration = Duration::from_secs(48 * 3600);
 
+/// 종료 lease의 보존 기간 — 이보다 오래된 issued 아닌 lease는 GC한다.
+/// CASCADE로 lease_parts가 함께 사라진다. 어떤 진행 중 업로드보다 넉넉하다.
+const LEASE_RETENTION: Duration = Duration::from_secs(24 * 3600);
+
 pub fn spawn(
     pool: PgPool,
     crypto: Arc<Crypto>,
@@ -135,6 +139,17 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto) {
         Ok(count) => tracing::debug!(event = "reconciler.read_leases_expired", count),
         Err(error) => {
             tracing::error!(event = "reconciler.scan_failed", job = "read_leases", %error)
+        }
+    }
+
+    // 잡 5: 종료 lease GC — issued가 아닌 오래된 lease를 삭제해 lease·
+    // lease_parts(CASCADE)의 무한 누적을 막는다 (spec 02). files 행은 남긴다
+    // (stat 계약). 회계와 무관하다 — 이미 정산된 lease의 원장 정리일 뿐이다.
+    match files::prune_terminal_leases(pool, LEASE_RETENTION.as_secs() as i64, BATCH_LIMIT).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(event = "reconciler.leases_pruned", count),
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", job = "prune_leases", %error)
         }
     }
 

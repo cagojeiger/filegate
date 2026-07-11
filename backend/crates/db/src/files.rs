@@ -450,7 +450,7 @@ pub async fn finalize_commit(
     .await?;
 
     sqlx::query(
-        "UPDATE leases SET state = 'committed' \
+        "UPDATE leases SET state = 'committed', write_secret = NULL \
          WHERE file_id = $1 AND kind = 'write' AND state = 'issued'",
     )
     .bind(file_id)
@@ -582,7 +582,7 @@ pub async fn finalize_reclaim(
         return Ok(false);
     }
     sqlx::query(
-        "UPDATE leases SET state = 'expired' \
+        "UPDATE leases SET state = 'expired', write_secret = NULL \
          WHERE file_id = $1 AND kind = 'write' AND state = 'issued'",
     )
     .bind(candidate.file_id)
@@ -730,16 +730,82 @@ pub async fn attach_upload_id(
         .map(|_| ())
 }
 
+/// 직결 s3의 부분 완료 기록 — 락 없이 짧은 upsert (spec 02). s3는 벤더가
+/// part 번호로 last-write-wins 하므로 승격 직렬화가 불필요하다. 네트워크
+/// 업로드가 끝난 뒤에만 부르므로 DB 트랜잭션이 전송을 기다리지 않는다.
+pub async fn record_part_done(
+    pool: &PgPool,
+    lease_id: Uuid,
+    part_no: i32,
+    size: i64,
+    md5: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO lease_parts (lease_id, part_no, state, uploaded_size, uploaded_md5) \
+         VALUES ($1, $2, 'done', $3, $4) \
+         ON CONFLICT (lease_id, part_no) \
+         DO UPDATE SET state = 'done', uploaded_size = $3, uploaded_md5 = $4",
+    )
+    .bind(lease_id)
+    .bind(part_no)
+    .bind(size)
+    .bind(md5)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+/// multipart relay의 write secret을 붙인다 (create 때 한 번). 원문과 해시를
+/// 함께 저장한다 — parts() 발급이 매번 같은 secret으로 URL을 조립해야
+/// 회전 없이 재개·다배치가 성립한다 (spec 02).
+pub async fn attach_multipart_secret(
+    pool: &PgPool,
+    lease_id: Uuid,
+    secret_raw: &str,
+    secret_hash: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE leases SET secret_hash = $2, write_secret = $3 WHERE id = $1")
+        .bind(lease_id)
+        .bind(secret_hash)
+        .bind(secret_raw)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
 /// 파일의 write lease (파일당 하나 — create가 유일한 발급 지점).
-/// 반환: (lease_id, upload_id). parts 발급과 multipart commit이 쓴다.
+/// 반환: (lease_id, upload_id, write_secret). parts 발급과 multipart commit이 쓴다.
 pub async fn write_lease(
     pool: &PgPool,
     file_id: Uuid,
-) -> Result<Option<(Uuid, Option<String>)>, sqlx::Error> {
-    sqlx::query_as("SELECT id, upload_id FROM leases WHERE file_id = $1 AND kind = 'write'")
-        .bind(file_id)
-        .fetch_optional(pool)
-        .await
+) -> Result<Option<(Uuid, Option<String>, Option<String>)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, upload_id, write_secret FROM leases WHERE file_id = $1 AND kind = 'write'",
+    )
+    .bind(file_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// 종료 lease 정리 (GC) — issued가 아닌 lease를 오래된 것부터 배치 삭제한다.
+/// CASCADE로 lease_parts가 함께 사라진다. files 행은 남긴다 (stat 계약,
+/// spec 00). 이게 없으면 lease·lease_parts가 무한히 쌓인다.
+pub async fn prune_terminal_leases(
+    pool: &PgPool,
+    retention_secs: i64,
+    limit: i64,
+) -> Result<u64, sqlx::Error> {
+    let deleted = sqlx::query(
+        "DELETE FROM leases WHERE id IN ( \
+         SELECT id FROM leases \
+         WHERE state <> 'issued' AND created_at < now() - $1 * interval '1 second' \
+         LIMIT $2)",
+    )
+    .bind(retention_secs)
+    .bind(limit)
+    .execute(pool)
+    .await?;
+    Ok(deleted.rows_affected())
 }
 
 /// part 발급이 곧 갱신이다 (ADR 002, spec 02) — 만료를 앞으로만 민다.
