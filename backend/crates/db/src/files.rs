@@ -284,7 +284,8 @@ pub async fn record_upload(
         .map(|_| ())
 }
 
-/// 이 파일의 최신 중계 업로드 실측 (없으면 아직 업로드 전).
+/// 이 파일의 중계 업로드 실측 (없으면 아직 업로드 전).
+/// write lease는 파일당 하나다(create가 유일한 발급 지점) — 정렬이 필요 없다.
 pub async fn recorded_upload(
     pool: &PgPool,
     file_id: Uuid,
@@ -292,7 +293,7 @@ pub async fn recorded_upload(
     sqlx::query_as(
         "SELECT uploaded_size, uploaded_md5 FROM leases \
          WHERE file_id = $1 AND kind = 'write' AND uploaded_size IS NOT NULL \
-         ORDER BY created_at DESC LIMIT 1",
+         LIMIT 1",
     )
     .bind(file_id)
     .fetch_optional(pool)

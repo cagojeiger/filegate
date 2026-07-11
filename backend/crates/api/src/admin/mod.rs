@@ -15,7 +15,6 @@ mod usage;
 pub use storages::verify_registered;
 
 use axum::extract::{Request, State};
-use axum::http::header;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -58,13 +57,7 @@ pub async fn require_operator(
     request: Request,
     next: Next,
 ) -> Response {
-    let presented = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split_once(' '))
-        .and_then(|(scheme, token)| scheme.eq_ignore_ascii_case("bearer").then_some(token));
-    match presented {
+    match crate::routes::bearer_token(request.headers()) {
         Some(token) if state.security.operator_token_matches(token) => next.run(request).await,
         _ => crate::error::unauthorized("operator token required").into_response(),
     }

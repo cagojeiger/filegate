@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::ClientId;
-use crate::error::{bad_request, not_found, ApiError};
+use crate::error::{bad_request, conflict, internal, not_found, ApiError};
 use crate::routes::AppState;
 use crate::storage_access::{backend_from_row, StorageBackend};
 
@@ -160,12 +160,7 @@ pub(super) async fn commit(
     match file.state.as_str() {
         // 멱등: 이미 확정된 파일의 commit은 같은 답을 돌려준다.
         "active" => return Ok(committed_response(file_id, file.etag.unwrap_or_default())),
-        "deleted" => {
-            return Err(ApiError::Status(
-                StatusCode::CONFLICT,
-                "file is deleted".to_owned(),
-            ))
-        }
+        "deleted" => return Err(conflict("file is deleted")),
         _ => {}
     }
 
@@ -180,9 +175,7 @@ pub(super) async fn commit(
         }
     } else {
         let StorageBackend::S3 { spec, .. } = &backend else {
-            return Err(ApiError::Internal(filegate_core::Error::internal(
-                "direct access requires an s3 storage",
-            )));
+            return Err(internal("direct access requires an s3 storage"));
         };
         let storage = s3_client(spec, Address::Internal);
         match s3_head_object(&storage, &file.object_key)
@@ -193,6 +186,8 @@ pub(super) async fn commit(
             None => return Err(bad_request("no uploaded object to commit")),
         }
     };
+    // 직결·중계 공용 사후 게이트. 중계는 바이트 엔드포인트가 이미 크기를
+    // 강제해 이 검사에 걸릴 수 없지만, 직결은 head_object 실측이라 걸린다.
     if actual_size != file.declared_size {
         return Err(bad_request("uploaded size does not match declaration"));
     }
@@ -221,10 +216,7 @@ pub(super) async fn commit(
         .ok_or_else(|| not_found("file not found"))?;
     match now.state.as_str() {
         "active" => Ok(committed_response(file_id, now.etag.unwrap_or_default())),
-        _ => Err(ApiError::Status(
-            StatusCode::CONFLICT,
-            "file is not committable".to_owned(),
-        )),
+        _ => Err(conflict("file is not committable")),
     }
 }
 
@@ -253,19 +245,9 @@ pub(super) async fn read(
         .ok_or_else(|| not_found("file not found"))?;
     match file.state.as_str() {
         "active" => {}
-        "deleted" => {
-            return Err(ApiError::Status(
-                StatusCode::CONFLICT,
-                "file is deleted".to_owned(),
-            ))
-        }
+        "deleted" => return Err(conflict("file is deleted")),
         // pending — commit 전까지 파일이 아니다 (spec 00).
-        _ => {
-            return Err(ApiError::Status(
-                StatusCode::CONFLICT,
-                "file is not committed".to_owned(),
-            ))
-        }
+        _ => return Err(conflict("file is not committed")),
     }
 
     // 현재 location 재해석 — 이동해도 같은 file_id로 접근한다 (spec 00).
@@ -358,10 +340,7 @@ pub(super) async fn delete(
         }
         // 멱등 — 재삭제는 같은 답.
         DeleteOutcome::AlreadyDeleted => Ok(deleted_response(file_id)),
-        DeleteOutcome::NotCommitted => Err(ApiError::Status(
-            StatusCode::CONFLICT,
-            "file is not committed".to_owned(),
-        )),
+        DeleteOutcome::NotCommitted => Err(conflict("file is not committed")),
         DeleteOutcome::NotFound => Err(not_found("file not found")),
     }
 }
@@ -403,9 +382,7 @@ fn relay_url(base: &str, lease_id: Uuid, secret: &str) -> String {
 /// 중계 URL의 베이스 — 등록이 이미 검사했으므로 없으면 설정 오류다.
 fn relay_base(state: &AppState) -> Result<&str, ApiError> {
     state.public_url.as_deref().ok_or_else(|| {
-        ApiError::Internal(filegate_core::Error::internal(
-            "FILEGATE_PUBLIC_URL is not configured but a relay storage is registered",
-        ))
+        internal("FILEGATE_PUBLIC_URL is not configured but a relay storage is registered")
     })
 }
 

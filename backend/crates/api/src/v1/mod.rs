@@ -7,7 +7,6 @@
 mod files;
 
 use axum::extract::{Request, State};
-use axum::http::header;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -33,13 +32,7 @@ pub async fn require_client(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let presented = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split_once(' '))
-        .and_then(|(scheme, token)| scheme.eq_ignore_ascii_case("bearer").then_some(token));
-    let Some(token) = presented else {
+    let Some(token) = crate::routes::bearer_token(request.headers()) else {
         return crate::error::unauthorized("client key required").into_response();
     };
     let key_hash = filegate_core::client_key_hash(token);

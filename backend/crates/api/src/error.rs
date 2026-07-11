@@ -31,6 +31,20 @@ pub(crate) fn unauthorized(message: &str) -> ApiError {
     ApiError::Status(StatusCode::UNAUTHORIZED, message.to_owned())
 }
 
+pub(crate) fn conflict(message: &str) -> ApiError {
+    ApiError::Status(StatusCode::CONFLICT, message.to_owned())
+}
+
+/// 위 네 가지에 없는 상태 코드용 — 바이트 평면의 411/408/413 등.
+pub(crate) fn status(code: StatusCode, message: &str) -> ApiError {
+    ApiError::Status(code, message.to_owned())
+}
+
+/// 내부 실패 — 상세는 로그로, 응답은 일반 문구 (IntoResponse에서).
+pub(crate) fn internal(detail: impl std::fmt::Display) -> ApiError {
+    ApiError::Internal(filegate_core::Error::internal(detail))
+}
+
 impl ApiError {
     /// DELETE 경로의 DB 에러 — FK 위반을 "참조가 남아 삭제 불가"(409)로 읽는다.
     /// 나머지 경로는 `From`(Insert 방향: 참조 대상 없음 = 404)이 담당한다.

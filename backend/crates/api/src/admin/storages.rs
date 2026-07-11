@@ -104,12 +104,35 @@ async fn verified_row(
     }
 }
 
+/// s3 등록은 세 단계다: 필드 검증(순수) → 접근 확인(네트워크) →
+/// 암호화·행 조립. 단계마다 함수 하나 — 실패는 전부 앞 단계에서 싸게 끝난다.
 async fn verified_s3_row(
     crypto: &Crypto,
     relay_base_ready: bool,
     id: &str,
     body: StorageSpecBody,
 ) -> Result<StorageRow, ApiError> {
+    let submission = validated_s3_submission(relay_base_ready, body)?;
+    if let Err(error) = s3_connect(&submission.spec).await {
+        return Err(bad_request(&format!(
+            "storage verification failed: {error}"
+        )));
+    }
+    encrypted_s3_row(crypto, id, submission)
+}
+
+/// 검증을 통과한 s3 제출물 — 아직 접근 확인 전.
+struct S3Submission {
+    spec: S3StorageSpec,
+    force_relay: bool,
+    capacity_bytes: i64,
+}
+
+/// 종류별 필드 규칙만 본다 — 네트워크·디스크에 닿지 않는다.
+fn validated_s3_submission(
+    relay_base_ready: bool,
+    body: StorageSpecBody,
+) -> Result<S3Submission, ApiError> {
     if body.root_path.as_deref().is_some_and(|v| !v.is_empty()) {
         return Err(bad_request("s3 storage does not take root_path"));
     }
@@ -125,27 +148,40 @@ async fn verified_s3_row(
         .unwrap_or_else(|| endpoint.clone());
     require_http_url(&endpoint, "endpoint")?;
     require_http_url(&public_endpoint, "public_endpoint")?;
-    let spec = S3StorageSpec {
-        endpoint,
-        public_endpoint,
-        region: require(body.region, "region")?,
-        bucket: require(body.bucket, "bucket")?,
-        force_path_style: body.force_path_style,
-        access_key: require(body.access_key, "access_key")?,
-        secret_key: body
-            .secret_key
-            .ok_or_else(|| bad_request("s3 storage requires secret_key"))?,
-    };
-    if let Err(error) = s3_connect(&spec).await {
-        return Err(bad_request(&format!(
-            "storage verification failed: {error}"
-        )));
-    }
+    Ok(S3Submission {
+        spec: S3StorageSpec {
+            endpoint,
+            public_endpoint,
+            region: require(body.region, "region")?,
+            bucket: require(body.bucket, "bucket")?,
+            force_path_style: body.force_path_style,
+            access_key: require(body.access_key, "access_key")?,
+            secret_key: body
+                .secret_key
+                .ok_or_else(|| bad_request("s3 storage requires secret_key"))?,
+        },
+        force_relay: body.force_relay,
+        capacity_bytes: body.capacity_bytes,
+    })
+}
+
+/// 접근 확인까지 끝난 제출물을 암호화해 행으로 만든다 — 시크릿이
+/// 원문으로 존재하는 마지막 지점.
+fn encrypted_s3_row(
+    crypto: &Crypto,
+    id: &str,
+    submission: S3Submission,
+) -> Result<StorageRow, ApiError> {
+    let S3Submission {
+        spec,
+        force_relay,
+        capacity_bytes,
+    } = submission;
     let encrypted = crypto.encrypt(id, &spec.secret_key)?;
     Ok(StorageRow {
         id: id.to_owned(),
         kind: "s3".to_owned(),
-        force_relay: body.force_relay,
+        force_relay,
         root_path: None,
         endpoint: Some(spec.endpoint),
         public_endpoint: Some(spec.public_endpoint),
@@ -156,7 +192,7 @@ async fn verified_s3_row(
         secret_key_ciphertext: Some(encrypted.ciphertext),
         secret_key_nonce: Some(encrypted.nonce),
         enc_key_id: Some(crypto.active_key_id().to_owned()),
-        capacity_bytes: body.capacity_bytes,
+        capacity_bytes,
     })
 }
 

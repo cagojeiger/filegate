@@ -2,10 +2,8 @@
 resolver = "2"
 members = [
     "backend/crates/core",
-    "backend/crates/model",
     "backend/crates/db",
     "backend/crates/infra",
-    "backend/crates/service",
     "backend/crates/api",
 ]
 
@@ -15,10 +13,8 @@ edition = "2021"
 
 [workspace.dependencies]
 filegate-core = { path = "backend/crates/core" }
-filegate-model = { path = "backend/crates/model" }
 filegate-db = { path = "backend/crates/db" }
 filegate-infra = { path = "backend/crates/infra" }
-filegate-service = { path = "backend/crates/service" }
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt", "io"] }
