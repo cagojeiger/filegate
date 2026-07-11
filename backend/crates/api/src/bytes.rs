@@ -30,7 +30,7 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-use crate::error::{not_found, ApiError};
+use crate::error::{internal, not_found, status, ApiError};
 use crate::routes::AppState;
 use crate::storage_access::{backend_from_row, StorageBackend};
 
@@ -295,12 +295,4 @@ async fn with_cors(mut response: Response) -> Response {
         HeaderValue::from_static("etag"),
     );
     response
-}
-
-fn status(code: StatusCode, message: &str) -> ApiError {
-    ApiError::Status(code, message.to_owned())
-}
-
-fn internal(detail: impl std::fmt::Display) -> ApiError {
-    ApiError::Internal(filegate_core::Error::internal(detail))
 }
