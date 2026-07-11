@@ -42,6 +42,16 @@ pub struct AppState {
     pub public_url: Option<String>,
 }
 
+/// `Authorization: Bearer <token>`에서 토큰을 꺼낸다 — 두 인증 미들웨어
+/// (운영자·클라이언트)가 같은 형식을 읽는다.
+pub(crate) fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_once(' '))
+        .and_then(|(scheme, token)| scheme.eq_ignore_ascii_case("bearer").then_some(token))
+}
+
 pub fn app(state: AppState) -> Router {
     // 표면이 둘이다: 컨트롤(JSON, 본문 상한·타임아웃)과 바이트(/b, 스트리밍 —
     // 요청 전체 타임아웃 없음: 크기는 스트림 차단이, 진행 중 연결의 수명은
