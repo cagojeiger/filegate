@@ -95,7 +95,8 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto) {
                         }
                         tracing::info!(event = "file.reclaimed", file = %candidate.file_id);
                     }
-                    // 늦은 commit이 이겼다 — 파일은 active, 실물도 그대로 둔다.
+                    // 회수 취소: 늦은 commit이 이겼거나(파일 active) 스냅샷 이후
+                    // lease가 갱신됐다 — 어느 쪽이든 실물을 건드리지 않는다.
                     Ok(false) => {}
                     Err(error) => {
                         tracing::error!(event = "reconciler.reclaim_failed", %error)
@@ -154,15 +155,26 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto) {
     }
 
     // 잡 4: 공유 fs root의 장부 밖 임시 정리 (spec 00 물리 배치). 이름
-    // 접두사와 mtime만 본다 — DB 조회 없음. 공유 마운트라 락 승자 하나만
+    // 접두사와 mtime을 보되, 진행 중 multipart 조립 파일은 활성 lease 목록으로
+    // 제외한다 (그것만 DB를 본다 — 아래 조회). 공유 마운트라 락 승자 하나만
     // 훑으면 된다. pod 로컬 OS temp는 tick 루프에서 각 pod가 스스로 치운다.
+    let protected: std::collections::HashSet<String> =
+        match files::active_multipart_lease_ids(pool).await {
+            Ok(ids) => ids.into_iter().map(|id| id.to_string()).collect(),
+            // 활성 목록을 못 얻으면 진행 중 조립 파일을 지울 위험이 있으므로
+            // 이번 tick의 fs sweep 자체를 건너뛴다 — 다음 tick이 다시 줍는다.
+            Err(error) => {
+                tracing::error!(event = "reconciler.scan_failed", job = "temps", %error);
+                return;
+            }
+        };
     match registry::list_storages(pool).await {
         Ok(rows) => {
             let roots = rows
                 .into_iter()
                 .filter_map(|row| row.root_path.map(std::path::PathBuf::from));
             for dir in roots {
-                match fs_backend::sweep_stale_temps(&dir, TEMP_MAX_AGE).await {
+                match fs_backend::sweep_stale_temps(&dir, TEMP_MAX_AGE, &protected).await {
                     Ok(0) => {}
                     Ok(count) => tracing::info!(
                         event = "reconciler.temps_swept",
@@ -185,7 +197,10 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto) {
 /// 매 tick, 모든 pod에서 돈다 (s3 중계 스풀은 pod 로컬 디스크에 살므로).
 async fn sweep_local_temps() {
     let dir = std::env::temp_dir();
-    match fs_backend::sweep_stale_temps(&dir, TEMP_MAX_AGE).await {
+    // OS temp에는 s3 중계 스풀(단일 part)만 있고 조립 파일은 없다 — 보호 목록
+    // 불필요(빈 셋). 조립 파일은 fs storage root에만 산다.
+    let protected = std::collections::HashSet::new();
+    match fs_backend::sweep_stale_temps(&dir, TEMP_MAX_AGE, &protected).await {
         Ok(0) => {}
         Ok(count) => tracing::info!(event = "reconciler.local_temps_swept", count),
         Err(error) => tracing::warn!(

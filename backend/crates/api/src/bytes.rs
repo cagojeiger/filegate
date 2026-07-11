@@ -122,10 +122,7 @@ async fn upload(
 
     // 쓰기 목적지: fs는 대상 root의 임시 파일(같은 마운트 rename),
     // s3 중계는 로컬 스풀을 거친다.
-    let temp_root = match &backend {
-        StorageBackend::Fs { root } => root.clone(),
-        StorageBackend::S3 { .. } => std::env::temp_dir(),
-    };
+    let temp_root = spool_root(&backend);
     // 같은 lease의 재PUT이 겹쳐도 서로 다른 임시 파일에 쓴다 — 이름을
     // lease_id로만 지으면 truncate로 두 스트림이 섞여 손상본이 커밋될 수 있다.
     let temp_name = format!("{lease_id}-{}", Uuid::new_v4());
@@ -173,11 +170,7 @@ async fn upload(
     files::record_upload(&state.pool, lease_id, written, &md5_hex).await?;
     tracing::info!(event = "bytes.uploaded", lease = %lease_id, file = %lease.file_id, size = written);
 
-    let mut response = StatusCode::OK.into_response();
-    if let Ok(value) = HeaderValue::from_str(&format!("\"{md5_hex}\"")) {
-        response.headers_mut().insert(header::ETAG, value);
-    }
-    Ok(response)
+    Ok(ok_with_etag(&md5_hex))
 }
 
 /// multipart part 수신 (spec 02): 고유 스풀에 계측해 받고, part claim(행 락)
@@ -214,10 +207,7 @@ async fn upload_part(
         ));
     }
 
-    let temp_root = match backend {
-        StorageBackend::Fs { root } => root.clone(),
-        StorageBackend::S3 { .. } => std::env::temp_dir(),
-    };
+    let temp_root = spool_root(backend);
     let temp_name = format!("{lease_id}-p{part_no}-{}", Uuid::new_v4());
     let (temp_path, file) = fs_backend::begin_write(&temp_root, &temp_name)
         .await
@@ -243,6 +233,27 @@ async fn upload_part(
                 }
             };
             let target = fs_backend::multipart_temp(root, &lease_id.to_string());
+            // 방어선: 이미 done인 part가 있는데 조립 파일이 사라졌다면 그 part의
+            // 바이트가 유실된 것이다. write_part_at은 없는 파일을 조용히
+            // 재생성(자기 offset만 쓰고 나머지는 0 hole)하므로, 여기서 끊지
+            // 않으면 손상본이 크기 검증만 통과해 커밋된다. sweep의 활성 lease
+            // 보호가 1차 방어이고 이것이 최후 방어선이다.
+            let assembly_missing = !tokio::fs::try_exists(&target).await.unwrap_or(false);
+            if assembly_missing {
+                match files::has_done_parts(&state.pool, lease_id).await {
+                    Ok(true) => {
+                        fs_backend::abort_write(&temp_path).await;
+                        return Err(internal(
+                            "multipart assembly file is missing; restart the upload",
+                        ));
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        fs_backend::abort_write(&temp_path).await;
+                        return Err(error.into());
+                    }
+                }
+            }
             let promoted = fs_backend::write_part_at(
                 &target,
                 files::part_offset(part_size, part_no),
@@ -282,11 +293,7 @@ async fn upload_part(
     }
 
     tracing::info!(event = "bytes.part_uploaded", lease = %lease_id, file = %lease.file_id, part = part_no, size = written);
-    let mut response = StatusCode::OK.into_response();
-    if let Ok(value) = HeaderValue::from_str(&format!("\"{md5_hex}\"")) {
-        response.headers_mut().insert(header::ETAG, value);
-    }
-    Ok(response)
+    Ok(ok_with_etag(&md5_hex))
 }
 
 /// 스트림 통과 계측 (ADR 002): body를 임시 파일에 쓰며 크기·MD5를 실측하고,
@@ -391,6 +398,24 @@ async fn download(
         }
     }
     Ok(response)
+}
+
+/// 쓰기 스풀 목적지: fs는 대상 root의 임시 파일(같은 마운트 rename),
+/// s3 중계는 OS 로컬 스풀을 거친다.
+fn spool_root(backend: &StorageBackend) -> std::path::PathBuf {
+    match backend {
+        StorageBackend::Fs { root } => root.clone(),
+        StorageBackend::S3 { .. } => std::env::temp_dir(),
+    }
+}
+
+/// 실측 md5를 따옴표 ETag 헤더로 실은 200 응답 — 단일 PUT·part 공용.
+fn ok_with_etag(md5_hex: &str) -> Response {
+    let mut response = StatusCode::OK.into_response();
+    if let Ok(value) = HeaderValue::from_str(&format!("\"{md5_hex}\"")) {
+        response.headers_mut().insert(header::ETAG, value);
+    }
+    response
 }
 
 /// lease id + secret → 접근 정보. 실패는 원인 구분 없이 403 —
