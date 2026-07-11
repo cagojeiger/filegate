@@ -193,6 +193,8 @@ pub(super) async fn commit(
             None => return Err(bad_request("no uploaded object to commit")),
         }
     };
+    // 직결·중계 공용 사후 게이트. 중계는 바이트 엔드포인트가 이미 크기를
+    // 강제해 이 검사에 걸릴 수 없지만, 직결은 head_object 실측이라 걸린다.
     if actual_size != file.declared_size {
         return Err(bad_request("uploaded size does not match declaration"));
     }
