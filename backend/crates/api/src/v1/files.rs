@@ -126,14 +126,9 @@ pub(super) async fn create(
         }
         _ => {
             let base = relay_base(&state)?;
-            let secret = filegate_core::generate_url_secret();
-            files::attach_write_secret(
-                &state.pool,
-                created.lease_id,
-                &filegate_core::client_key_hash(&secret),
-            )
-            .await?;
-            format!("{base}/b/{}?s={secret}", created.lease_id)
+            let relay = RelaySecret::generate();
+            files::attach_write_secret(&state.pool, created.lease_id, &relay.hash).await?;
+            relay_url(base, created.lease_id, &relay.secret)
         }
     };
 
@@ -302,16 +297,16 @@ pub(super) async fn read(
         }
         _ => {
             let base = relay_base(&state)?;
-            let secret = filegate_core::generate_url_secret();
+            let relay = RelaySecret::generate();
             let lease_id = files::issue_read_lease(
                 &state.pool,
                 file_id,
                 READ_LEASE_TTL.as_secs() as i64,
-                Some(&filegate_core::client_key_hash(&secret)),
+                Some(&relay.hash),
                 body.filename.as_deref(),
             )
             .await?;
-            format!("{base}/b/{lease_id}?s={secret}")
+            relay_url(base, lease_id, &relay.secret)
         }
     };
 
@@ -383,6 +378,26 @@ fn deleted_response(file_id: Uuid) -> Response {
         state: "deleted",
     })
     .into_response()
+}
+
+/// 중계 접근 secret 한 벌 — 원문은 URL로만 나가고 서버엔 해시만 남는다
+/// (ADR 003). write는 기존 lease에 부착하고 read는 발급하며 결합하므로,
+/// lease 결합은 호출자 몫이다.
+struct RelaySecret {
+    secret: String,
+    hash: String,
+}
+
+impl RelaySecret {
+    fn generate() -> Self {
+        let secret = filegate_core::generate_url_secret();
+        let hash = filegate_core::client_key_hash(&secret);
+        Self { secret, hash }
+    }
+}
+
+fn relay_url(base: &str, lease_id: Uuid, secret: &str) -> String {
+    format!("{base}/b/{lease_id}?s={secret}")
 }
 
 /// 중계 URL의 베이스 — 등록이 이미 검사했으므로 없으면 설정 오류다.
