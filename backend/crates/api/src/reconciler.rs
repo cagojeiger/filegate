@@ -48,6 +48,10 @@ pub fn spawn(
                     return;
                 }
                 _ = ticker.tick() => {
+                    // pod 로컬 OS temp의 크래시 스풀은 락 없이 매 pod가 직접
+                    // 치운다 — 자기 디스크는 자기 몫이고, 락 승자만 치우면
+                    // 락을 못 이긴 pod의 잔여물이 밀린다.
+                    sweep_local_temps().await;
                     let result = filegate_db::with_reconciler_lock(&pool, || async {
                         run_jobs(&pool, &crypto).await;
                     })
@@ -134,31 +138,46 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto) {
         }
     }
 
-    // 잡 4: 장부 밖 임시 정리 (spec 00 물리 배치). 이름 접두사와 mtime만
-    // 본다 — DB 조회 없음. 크래시가 남긴 스풀·임시 파일이 대상이다.
-    // 대상 디렉토리: OS temp(s3 중계 스풀)와 각 fs storage의 root.
-    let mut temp_dirs = vec![std::env::temp_dir()];
+    // 잡 4: 공유 fs root의 장부 밖 임시 정리 (spec 00 물리 배치). 이름
+    // 접두사와 mtime만 본다 — DB 조회 없음. 공유 마운트라 락 승자 하나만
+    // 훑으면 된다. pod 로컬 OS temp는 tick 루프에서 각 pod가 스스로 치운다.
     match registry::list_storages(pool).await {
-        Ok(rows) => temp_dirs.extend(
-            rows.into_iter()
-                .filter_map(|row| row.root_path.map(std::path::PathBuf::from)),
-        ),
+        Ok(rows) => {
+            let roots = rows
+                .into_iter()
+                .filter_map(|row| row.root_path.map(std::path::PathBuf::from));
+            for dir in roots {
+                match fs_backend::sweep_stale_temps(&dir, TEMP_MAX_AGE).await {
+                    Ok(0) => {}
+                    Ok(count) => tracing::info!(
+                        event = "reconciler.temps_swept",
+                        dir = %dir.display(),
+                        count,
+                    ),
+                    Err(error) => tracing::warn!(
+                        event = "reconciler.temp_sweep_failed",
+                        dir = %dir.display(),
+                        %error,
+                    ),
+                }
+            }
+        }
         Err(error) => tracing::error!(event = "reconciler.scan_failed", job = "temps", %error),
     }
-    for dir in temp_dirs {
-        match fs_backend::sweep_stale_temps(&dir, TEMP_MAX_AGE).await {
-            Ok(0) => {}
-            Ok(count) => tracing::info!(
-                event = "reconciler.temps_swept",
-                dir = %dir.display(),
-                count,
-            ),
-            Err(error) => tracing::warn!(
-                event = "reconciler.temp_sweep_failed",
-                dir = %dir.display(),
-                %error,
-            ),
-        }
+}
+
+/// pod 로컬 스풀 정리 — OS temp의 `.fg-tmp-*` 중 늙은 것. DB·락과 무관하게
+/// 매 tick, 모든 pod에서 돈다 (s3 중계 스풀은 pod 로컬 디스크에 살므로).
+async fn sweep_local_temps() {
+    let dir = std::env::temp_dir();
+    match fs_backend::sweep_stale_temps(&dir, TEMP_MAX_AGE).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(event = "reconciler.local_temps_swept", count),
+        Err(error) => tracing::warn!(
+            event = "reconciler.temp_sweep_failed",
+            dir = %dir.display(),
+            %error,
+        ),
     }
 }
 
