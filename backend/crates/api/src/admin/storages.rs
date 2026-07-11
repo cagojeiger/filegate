@@ -1,9 +1,10 @@
 //! storage 등록 — 시크릿이 지나가는 유일한 표면.
 //!
-//! 등록은 그 자체가 검증이다: 제출된 자격증명으로 head_bucket을 즉석
-//! 확인하고, 성공해야 시크릿을 암호화해 저장한다. 실패한 등록은
-//! 거부된다 — DB에 닿지 않는다. 부팅 재검증도 여기 산다 — 같은
-//! 복호·접근 확인 경로를 공유하기 때문이다.
+//! 종류가 둘이다 (ADR 001): s3(직결 기본, force_relay로 중계 강제)와
+//! fs(root_path가 계약의 전부, 항상 중계). 등록은 그 자체가 검증이다:
+//! s3는 head_bucket, fs는 경로 존재+쓰기 프로브. 실패한 등록은 거부된다 —
+//! DB에 닿지 않는다. 중계 storage는 공개 베이스 URL(FILEGATE_PUBLIC_URL)이
+//! 서 있어야 등록된다 — 발급할 수 없는 URL의 storage는 등록부에 못 들어온다.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -17,21 +18,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{bad_request, not_found, ApiError};
 use crate::routes::AppState;
+use crate::storage_access::{backend_from_row, StorageBackend};
 
-/// 등록·갱신 본문. secret_key는 여기서만 원문으로 존재한다 — 검증에 쓰이고
-/// 암호문이 되어 저장되며, 응답에는 절대 실리지 않는다.
+/// 등록·갱신 본문. kind가 필드 요구를 가른다 — 종류별 필수는 여기서 400,
+/// 최종 집행은 DB CHECK(0005). secret_key는 여기서만 원문으로 존재한다.
 #[derive(Deserialize)]
 pub(super) struct StorageSpecBody {
-    endpoint: String,
+    #[serde(default = "default_kind")]
+    kind: String,
+    #[serde(default)]
+    force_relay: bool,
+    root_path: Option<String>,
+    endpoint: Option<String>,
     /// 서명 URL/전송 주체가 접근할 공개 주소. 생략하면 endpoint와 같다.
     public_endpoint: Option<String>,
-    region: String,
-    bucket: String,
+    region: Option<String>,
+    bucket: Option<String>,
     #[serde(default)]
     force_path_style: bool,
-    access_key: String,
-    secret_key: SecretString,
+    access_key: Option<String>,
+    secret_key: Option<SecretString>,
     capacity_bytes: i64,
+}
+
+fn default_kind() -> String {
+    "s3".to_owned()
 }
 
 #[derive(Deserialize)]
@@ -45,12 +56,15 @@ pub(super) struct StorageCreateBody {
 #[derive(Serialize)]
 struct StorageOut {
     id: String,
-    endpoint: String,
-    public_endpoint: String,
-    region: String,
-    bucket: String,
+    kind: String,
+    force_relay: bool,
+    root_path: Option<String>,
+    endpoint: Option<String>,
+    public_endpoint: Option<String>,
+    region: Option<String>,
+    bucket: Option<String>,
     force_path_style: bool,
-    access_key: String,
+    access_key: Option<String>,
     capacity_bytes: i64,
 }
 
@@ -58,6 +72,9 @@ impl From<StorageRow> for StorageOut {
     fn from(row: StorageRow) -> Self {
         Self {
             id: row.id,
+            kind: row.kind,
+            force_relay: row.force_relay,
+            root_path: row.root_path,
             endpoint: row.endpoint,
             public_endpoint: row.public_endpoint,
             region: row.region,
@@ -69,33 +86,55 @@ impl From<StorageRow> for StorageOut {
     }
 }
 
-/// 접근 검증(head_bucket) 후 암호화해 행으로 만든다. 등록과 갱신의 공통 경로.
-/// 싼 검증이 먼저다 — 네트워크 검증 전에 거른다.
+/// 접근 검증 후 행으로 만든다. 등록과 갱신의 공통 경로.
+/// 싼 검증이 먼저다 — 네트워크·디스크 검증 전에 거른다.
 async fn verified_row(
     crypto: &Crypto,
+    relay_base_ready: bool,
     id: &str,
     body: StorageSpecBody,
 ) -> Result<StorageRow, ApiError> {
     if body.capacity_bytes < 0 {
         return Err(bad_request("capacity_bytes must be >= 0"));
     }
-    let capacity_bytes = body.capacity_bytes;
-    // 빈 문자열도 생략으로 본다 — 의미 없는 공개 주소가 저장되지 않게.
+    match body.kind.as_str() {
+        "s3" => verified_s3_row(crypto, relay_base_ready, id, body).await,
+        "fs" => verified_fs_row(relay_base_ready, id, body).await,
+        _ => Err(bad_request("kind must be 's3' or 'fs'")),
+    }
+}
+
+async fn verified_s3_row(
+    crypto: &Crypto,
+    relay_base_ready: bool,
+    id: &str,
+    body: StorageSpecBody,
+) -> Result<StorageRow, ApiError> {
+    if body.root_path.as_deref().is_some_and(|v| !v.is_empty()) {
+        return Err(bad_request("s3 storage does not take root_path"));
+    }
+    if body.force_relay && !relay_base_ready {
+        return Err(bad_request(
+            "relay storage requires FILEGATE_PUBLIC_URL to be configured",
+        ));
+    }
+    let endpoint = require(body.endpoint, "endpoint")?;
     let public_endpoint = body
         .public_endpoint
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| body.endpoint.clone());
-    // 주소는 서명 URL의 재료다 — 등록 시점에 형식을 고정한다 (spec 01).
-    require_http_url(&body.endpoint, "endpoint")?;
+        .unwrap_or_else(|| endpoint.clone());
+    require_http_url(&endpoint, "endpoint")?;
     require_http_url(&public_endpoint, "public_endpoint")?;
     let spec = S3StorageSpec {
-        endpoint: body.endpoint,
+        endpoint,
         public_endpoint,
-        region: body.region,
-        bucket: body.bucket,
+        region: require(body.region, "region")?,
+        bucket: require(body.bucket, "bucket")?,
         force_path_style: body.force_path_style,
-        access_key: body.access_key,
-        secret_key: body.secret_key,
+        access_key: require(body.access_key, "access_key")?,
+        secret_key: body
+            .secret_key
+            .ok_or_else(|| bad_request("s3 storage requires secret_key"))?,
     };
     if let Err(error) = s3_connect(&spec).await {
         return Err(bad_request(&format!(
@@ -105,29 +144,99 @@ async fn verified_row(
     let encrypted = crypto.encrypt(id, &spec.secret_key)?;
     Ok(StorageRow {
         id: id.to_owned(),
-        endpoint: spec.endpoint,
-        public_endpoint: spec.public_endpoint,
-        region: spec.region,
-        bucket: spec.bucket,
+        kind: "s3".to_owned(),
+        force_relay: body.force_relay,
+        root_path: None,
+        endpoint: Some(spec.endpoint),
+        public_endpoint: Some(spec.public_endpoint),
+        region: Some(spec.region),
+        bucket: Some(spec.bucket),
         force_path_style: spec.force_path_style,
-        access_key: spec.access_key,
-        secret_key_ciphertext: encrypted.ciphertext,
-        secret_key_nonce: encrypted.nonce,
-        enc_key_id: crypto.active_key_id().to_owned(),
-        capacity_bytes,
+        access_key: Some(spec.access_key),
+        secret_key_ciphertext: Some(encrypted.ciphertext),
+        secret_key_nonce: Some(encrypted.nonce),
+        enc_key_id: Some(crypto.active_key_id().to_owned()),
+        capacity_bytes: body.capacity_bytes,
     })
 }
 
-/// 부팅 재검증 — 등록된 모든 storage 행을 복호해 접근을 확인한다 (ADR 001).
+async fn verified_fs_row(
+    relay_base_ready: bool,
+    id: &str,
+    body: StorageSpecBody,
+) -> Result<StorageRow, ApiError> {
+    let present = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.is_empty());
+    if present(&body.endpoint)
+        || present(&body.public_endpoint)
+        || present(&body.region)
+        || present(&body.bucket)
+        || present(&body.access_key)
+        || body.secret_key.is_some()
+        || body.force_relay
+    {
+        return Err(bad_request(
+            "fs storage takes only root_path and capacity_bytes",
+        ));
+    }
+    if !relay_base_ready {
+        return Err(bad_request(
+            "relay storage requires FILEGATE_PUBLIC_URL to be configured",
+        ));
+    }
+    let root_path = body
+        .root_path
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| bad_request("fs storage requires root_path"))?;
+    if let Err(error) = filegate_infra::fs::connect(&root_path).await {
+        return Err(bad_request(&format!(
+            "storage verification failed: {error}"
+        )));
+    }
+    Ok(StorageRow {
+        id: id.to_owned(),
+        kind: "fs".to_owned(),
+        force_relay: false,
+        root_path: Some(root_path),
+        endpoint: None,
+        public_endpoint: None,
+        region: None,
+        bucket: None,
+        force_path_style: false,
+        access_key: None,
+        secret_key_ciphertext: None,
+        secret_key_nonce: None,
+        enc_key_id: None,
+        capacity_bytes: body.capacity_bytes,
+    })
+}
+
+fn require(value: Option<String>, field: &str) -> Result<String, ApiError> {
+    value
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| bad_request(&format!("s3 storage requires {field}")))
+}
+
+/// 부팅 재검증 — 등록된 모든 storage의 접근을 확인한다 (ADR 001).
 /// 실패하면 부팅 중단. 잘못된 마스터 키 설정도 여기서 잡힌다 (spec 01).
 pub async fn verify_registered(pool: &PgPool, crypto: &Crypto) -> anyhow::Result<()> {
     for row in registry::list_storages(pool).await? {
-        let spec = crate::storage_access::spec_from_row(crypto, &row)
+        let backend = backend_from_row(crypto, &row)
             .map_err(|error| anyhow::anyhow!("storage '{}': {error}", row.id))?;
-        s3_connect(&spec)
-            .await
-            .map_err(|error| anyhow::anyhow!("storage '{}' re-verification: {error}", row.id))?;
-        tracing::info!(event = "storage.connected", storage = %row.id);
+        match &backend {
+            StorageBackend::S3 { spec, .. } => {
+                s3_connect(spec).await.map_err(|error| {
+                    anyhow::anyhow!("storage '{}' re-verification: {error}", row.id)
+                })?;
+            }
+            StorageBackend::Fs { root } => {
+                filegate_infra::fs::connect(&root.to_string_lossy())
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("storage '{}' re-verification: {error}", row.id)
+                    })?;
+            }
+        }
+        tracing::info!(event = "storage.connected", storage = %row.id, kind = %row.kind);
     }
     Ok(())
 }
@@ -136,9 +245,10 @@ pub(super) async fn create(
     State(state): State<AppState>,
     Json(body): Json<StorageCreateBody>,
 ) -> Result<Response, ApiError> {
-    let row = verified_row(&state.crypto, &body.id, body.spec).await?;
+    let relay_base_ready = state.public_url.is_some();
+    let row = verified_row(&state.crypto, relay_base_ready, &body.id, body.spec).await?;
     registry::insert_storage(&state.pool, &row).await?;
-    tracing::info!(event = "storage.registered", storage = %row.id);
+    tracing::info!(event = "storage.registered", storage = %row.id, kind = %row.kind);
     Ok((StatusCode::CREATED, Json(StorageOut::from(row))).into_response())
 }
 
@@ -151,7 +261,8 @@ pub(super) async fn update(
     if registry::get_storage(&state.pool, &id).await?.is_none() {
         return Err(not_found("storage not found"));
     }
-    let row = verified_row(&state.crypto, &id, body).await?;
+    let relay_base_ready = state.public_url.is_some();
+    let row = verified_row(&state.crypto, relay_base_ready, &id, body).await?;
     if !registry::update_storage(&state.pool, &row).await? {
         return Err(not_found("storage not found"));
     }

@@ -11,11 +11,11 @@
 
 이번 범위: `create`→`commit`(업로드), `read`(다운로드), `stat`, `delete`, `usage`(운영자).
 
-접근 모드의 계약은 둘(직결·중계)이지만, **v0는 직결만 구현한다.** 중계는 presigned를 지원하지 않는 저장소(로컬 fs/NFS, CORS 없는 벤더)를 위한 호환 기능이며, 그런 storage가 등장할 때 추가한다 — 서비스 계약은 두 모드에서 같다 (ADR 001·002). v0 storage는 MinIO(S3 호환, 직결)다.
+접근 모드는 둘 다 구현되어 있다 — **직결**(저장소 presigned URL)과 **중계**(filegate 바이트 엔드포인트). 서비스 계약은 두 모드에서 같고(ADR 001·002), 모드는 storage 선언이 정한다: fs는 항상 중계, s3는 기본 직결에 `force_relay`로 중계 강제(CORS 없는 벤더, 사설망 뒤 저장소).
 
 다음 범위로 미룬다:
 
-- 중계 모드와 fs storage(NFS) — presigned 미지원 저장소 호환. OCI 등 외부 벤더 추가도 이때.
+- OCI 등 외부 벤더 추가.
 - 폴더·배치 업로드 — 폴더는 서비스가 단일 업로드를 반복해 표현한다 (공리 1).
 - 갱신·재개(resumable) 업로드.
 - 5GiB 초과 파일 — multipart는 ETag가 MD5가 아니라 체크섬 대조가 단일 PUT에서만 성립한다 (실측).
@@ -138,4 +138,4 @@ create ──▶ pending ──commit──▶ active ──delete──▶ dele
 - 업로드 한 번은 create·commit 두 호출이다.
 - 직결 PUT은 크기를 앞단에서 막지 못한다 (실측). commit이 사후 검증 게이트다. 상한을 넘는 실물은 파일이 되지 못하고 reconciler가 회수하며, 회수 전까지 초과 바이트가 잠시 존재한다. 중계 모드는 선언 크기에서 스트림을 끊는다.
 - 전송 주체는 Content-Length를 보낸다. 길이 미상(chunked) 전송은 저장소가 거부한다 (실측).
-- 중계 바이트 엔드포인트의 상세(PUT/GET/OPTIONS, CORS 응답, 스트림 중 차단, fs의 임시 경로 + rename 원자성)는 다음 범위다.
+- 중계 바이트 엔드포인트(`/b/{lease}`)의 확정 사항: 인증은 lease별 secret(URL에만, 서버는 해시), Content-Length 필수(411)·선언 크기와 일치(400)·초과 시 스트림 차단(413), CORS 응대, fs는 임시 경로 + rename 원자성. 중계 쓰기는 스트림 중 크기·MD5를 직접 계산해 기록하고 commit이 그것을 대조한다.
