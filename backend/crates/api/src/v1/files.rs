@@ -19,7 +19,7 @@ use uuid::Uuid;
 use super::ClientId;
 use crate::error::{bad_request, not_found, ApiError};
 use crate::routes::AppState;
-use crate::storage_access::spec_from_row;
+use crate::storage_access::{backend_from_row, StorageBackend};
 
 /// 쓰기 lease TTL — 짧게 둔다 (spec 00: 쓰기 URL은 확정 후에도 만료 전까지
 /// 유효하므로, 변조 창을 줄이는 건 TTL이다).
@@ -105,17 +105,37 @@ pub(super) async fn create(
         }
     };
 
-    // 서명은 전송 주체가 접속할 공개 주소로 — SigV4는 호스트를 묶는다 (spec 01).
-    let storage_spec = spec_from_row(&state.crypto, &created.storage)?;
-    let storage = s3_client(&storage_spec, Address::Public);
-    let put_url = s3_presign_put(
-        &storage,
-        &created.object_key,
-        body.content_type.as_deref(),
-        WRITE_LEASE_TTL,
-    )
-    .await
-    .map_err(ApiError::Storage)?;
+    // 접근 모드는 storage 선언이 정한다 (ADR 001). 직결이면 공개 주소로
+    // presign(SigV4는 호스트를 묶는다, spec 01), 중계면 filegate 바이트
+    // 엔드포인트 URL + lease secret.
+    let backend = backend_from_row(&state.crypto, &created.storage)?;
+    let put_url = match &backend {
+        StorageBackend::S3 {
+            spec,
+            force_relay: false,
+        } => {
+            let storage = s3_client(spec, Address::Public);
+            s3_presign_put(
+                &storage,
+                &created.object_key,
+                body.content_type.as_deref(),
+                WRITE_LEASE_TTL,
+            )
+            .await
+            .map_err(ApiError::Storage)?
+        }
+        _ => {
+            let base = relay_base(&state)?;
+            let secret = filegate_core::generate_url_secret();
+            files::attach_write_secret(
+                &state.pool,
+                created.lease_id,
+                &filegate_core::client_key_hash(&secret),
+            )
+            .await?;
+            format!("{base}/b/{}?s={secret}", created.lease_id)
+        }
+    };
 
     tracing::info!(
         event = "file.created",
@@ -154,15 +174,29 @@ pub(super) async fn commit(
         _ => {}
     }
 
-    // 실물 검증 — 내부 주소로 조회한다.
-    let storage_spec = spec_from_row(&state.crypto, &file.storage)?;
-    let storage = s3_client(&storage_spec, Address::Internal);
-    let head = s3_head_object(&storage, &file.object_key)
-        .await
-        .map_err(ApiError::Storage)?;
-    let Some((actual_size, etag)) = head else {
-        // 아직 업로드 전 — pending에 남아 재시도할 수 있다 (spec 00).
-        return Err(bad_request("no uploaded object to commit"));
+    // 실물 검증. 중계는 스트림 중 filegate가 직접 기록한 실측을, 직결은
+    // 내부 주소의 head_object를 대조한다 — 계약은 같다 (spec 00).
+    let backend = backend_from_row(&state.crypto, &file.storage)?;
+    let (actual_size, etag) = if backend.is_relay() {
+        match files::recorded_upload(&state.pool, file_id).await? {
+            Some(recorded) => recorded,
+            // 아직 업로드 전 — pending에 남아 재시도할 수 있다 (spec 00).
+            None => return Err(bad_request("no uploaded object to commit")),
+        }
+    } else {
+        let StorageBackend::S3 { spec, .. } = &backend else {
+            return Err(ApiError::Internal(filegate_core::Error::internal(
+                "direct access requires an s3 storage",
+            )));
+        };
+        let storage = s3_client(spec, Address::Internal);
+        match s3_head_object(&storage, &file.object_key)
+            .await
+            .map_err(ApiError::Storage)?
+        {
+            Some(head) => head,
+            None => return Err(bad_request("no uploaded object to commit")),
+        }
     };
     if actual_size != file.declared_size {
         return Err(bad_request("uploaded size does not match declaration"));
@@ -240,18 +274,46 @@ pub(super) async fn read(
     }
 
     // 현재 location 재해석 — 이동해도 같은 file_id로 접근한다 (spec 00).
-    let storage_spec = spec_from_row(&state.crypto, &file.storage)?;
-    let storage = s3_client(&storage_spec, Address::Public);
-    let get_url = s3_presign_get(
-        &storage,
-        &file.object_key,
-        body.filename.as_deref(),
-        READ_LEASE_TTL,
-    )
-    .await
-    .map_err(ApiError::Storage)?;
-    // lease는 서명이 성공한 뒤에 기록한다 — 실패한 발급은 원장에 남지 않는다.
-    files::issue_read_lease(&state.pool, file_id, READ_LEASE_TTL.as_secs() as i64).await?;
+    let backend = backend_from_row(&state.crypto, &file.storage)?;
+    let get_url = match &backend {
+        StorageBackend::S3 {
+            spec,
+            force_relay: false,
+        } => {
+            let storage = s3_client(spec, Address::Public);
+            let url = s3_presign_get(
+                &storage,
+                &file.object_key,
+                body.filename.as_deref(),
+                READ_LEASE_TTL,
+            )
+            .await
+            .map_err(ApiError::Storage)?;
+            // lease는 서명이 성공한 뒤에 기록 — 실패한 발급은 원장에 없다.
+            files::issue_read_lease(
+                &state.pool,
+                file_id,
+                READ_LEASE_TTL.as_secs() as i64,
+                None,
+                None,
+            )
+            .await?;
+            url
+        }
+        _ => {
+            let base = relay_base(&state)?;
+            let secret = filegate_core::generate_url_secret();
+            let lease_id = files::issue_read_lease(
+                &state.pool,
+                file_id,
+                READ_LEASE_TTL.as_secs() as i64,
+                Some(&filegate_core::client_key_hash(&secret)),
+                body.filename.as_deref(),
+            )
+            .await?;
+            format!("{base}/b/{lease_id}?s={secret}")
+        }
+    };
 
     tracing::info!(event = "file.read", file = %file_id, client = %client.0);
     Ok(Json(ReadOut { file_id, get_url }).into_response())
@@ -321,6 +383,15 @@ fn deleted_response(file_id: Uuid) -> Response {
         state: "deleted",
     })
     .into_response()
+}
+
+/// 중계 URL의 베이스 — 등록이 이미 검사했으므로 없으면 설정 오류다.
+fn relay_base(state: &AppState) -> Result<&str, ApiError> {
+    state.public_url.as_deref().ok_or_else(|| {
+        ApiError::Internal(filegate_core::Error::internal(
+            "FILEGATE_PUBLIC_URL is not configured but a relay storage is registered",
+        ))
+    })
 }
 
 fn is_intent_slug(value: &str) -> bool {

@@ -58,6 +58,40 @@ resource "filegate_client_key" "notegate" {
   key_hash  = "sha256:${sha256(local.notegate_raw_key)}"
 }
 
+# ── 중계 모드 (relay): 같은 MinIO를 filegate 중계로, 그리고 로컬 fs ──
+# 서버에 FILEGATE_PUBLIC_URL이 서 있어야 등록된다.
+
+resource "filegate_storage" "minio_relay" {
+  id               = "minio-relay"
+  endpoint         = "http://127.0.0.1:9000"
+  region           = "us-east-1"
+  bucket           = "filegate-std"
+  force_path_style = true
+  force_relay      = true # 직결 대신 filegate 바이트 엔드포인트로
+
+  access_key     = "filegate"
+  secret_key     = "filegate-secret"
+  capacity_bytes = 1073741824
+}
+
+resource "filegate_storage_fs" "local_fs" {
+  id             = "fs-local"
+  root_path      = "/tmp/filegate-fs-demo" # 로컬 개발용 — 실전은 NFS 마운트
+  capacity_bytes = 1073741824
+}
+
+resource "filegate_binding" "notegate_relay_att" {
+  client_id  = filegate_client.notegate.id
+  intent     = "relay-att"
+  storage_id = filegate_storage.minio_relay.id
+}
+
+resource "filegate_binding" "notegate_fs_att" {
+  client_id  = filegate_client.notegate.id
+  intent     = "fs-att"
+  storage_id = filegate_storage_fs.local_fs.id
+}
+
 # ── binding: 두 노드를 잇는 엣지 ─────────────────────────────────
 # storage_id 한 줄이 배치 선언이다. 바꾸면 새 파일만 새 곳으로 간다 (v0).
 

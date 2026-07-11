@@ -21,9 +21,11 @@ pub struct CreateSpec<'a> {
     pub lease_ttl_secs: i64,
 }
 
-/// create가 예약을 마친 결과. presign은 호출자가 storage로 한다.
+/// create가 예약을 마친 결과. URL 발급(presign 또는 중계 secret)은
+/// 호출자가 storage 종류에 따라 한다.
 pub struct CreatedFile {
     pub file_id: Uuid,
+    pub lease_id: Uuid,
     pub object_key: String,
     pub storage: StorageRow,
 }
@@ -97,18 +99,19 @@ pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome
         .execute(&mut *tx)
         .await?;
 
-    sqlx::query(
+    let lease_id: Uuid = sqlx::query_scalar(
         "INSERT INTO leases (file_id, kind, expires_at) \
-         VALUES ($1, 'write', now() + $2 * interval '1 second')",
+         VALUES ($1, 'write', now() + $2 * interval '1 second') RETURNING id",
     )
     .bind(file_id)
     .bind(spec.lease_ttl_secs)
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
 
     tx.commit().await?;
     Ok(CreateOutcome::Created(Box::new(CreatedFile {
         file_id,
+        lease_id,
         object_key,
         storage,
     })))
@@ -163,21 +166,137 @@ pub async fn for_access(
 }
 
 /// 읽기 lease 기록 — 모든 바이트 접근은 lease다 (ADR 002, 원장이 감사 기록).
-/// 읽기는 용량을 소비하지 않는다 (spec 00).
+/// 읽기는 용량을 소비하지 않는다 (spec 00). 중계면 secret 해시와 표현
+/// 파일명이 함께 실린다 — 직결의 서명 파라미터 등가물.
 pub async fn issue_read_lease(
     pool: &PgPool,
     file_id: Uuid,
     ttl_secs: i64,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO leases (file_id, kind, expires_at) \
-         VALUES ($1, 'read', now() + $2 * interval '1 second')",
+    secret_hash: Option<&str>,
+    read_filename: Option<&str>,
+) -> Result<Uuid, sqlx::Error> {
+    sqlx::query_scalar(
+        "INSERT INTO leases (file_id, kind, expires_at, secret_hash, read_filename) \
+         VALUES ($1, 'read', now() + $2 * interval '1 second', $3, $4) RETURNING id",
     )
     .bind(file_id)
     .bind(ttl_secs)
-    .execute(pool)
+    .bind(secret_hash)
+    .bind(read_filename)
+    .fetch_one(pool)
     .await
-    .map(|_| ())
+}
+
+// ---- 중계 바이트 엔드포인트의 lease 접근 (ADR 003: lease별 secret) ----
+
+/// 쓰기 lease에 중계 secret을 붙인다 (발급 직후 한 번).
+pub async fn attach_write_secret(
+    pool: &PgPool,
+    lease_id: Uuid,
+    secret_hash: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE leases SET secret_hash = $2 WHERE id = $1")
+        .bind(lease_id)
+        .bind(secret_hash)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
+/// 바이트 엔드포인트가 lease id + secret 해시로 여는 접근 정보.
+/// 유효(issued·미만료)하고 해시가 일치할 때만 Some — 그 외는 구분 없이 None.
+pub struct ByteLease {
+    pub lease_kind: String,
+    pub file_id: Uuid,
+    pub declared_size: i64,
+    pub content_type: Option<String>,
+    pub read_filename: Option<String>,
+    /// purge·회수 뒤에는 위치가 없다 — lease는 유효하되 실물 없음(404 등가).
+    pub location: Option<(String, StorageRow)>,
+}
+
+pub async fn byte_lease(
+    pool: &PgPool,
+    lease_id: Uuid,
+    secret_hash: &str,
+) -> Result<Option<ByteLease>, sqlx::Error> {
+    type Row = (
+        String,
+        Uuid,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT le.kind, f.id, f.declared_size, f.content_type, le.read_filename, l.object_key \
+         FROM leases le \
+         JOIN files f ON f.id = le.file_id \
+         LEFT JOIN locations l ON l.file_id = f.id \
+         WHERE le.id = $1 AND le.secret_hash = $2 \
+         AND le.state = 'issued' AND le.expires_at > now()",
+    )
+    .bind(lease_id)
+    .bind(secret_hash)
+    .fetch_optional(pool)
+    .await?;
+    let Some((lease_kind, file_id, declared_size, content_type, read_filename, object_key)) = row
+    else {
+        return Ok(None);
+    };
+    let location = match object_key {
+        None => None,
+        Some(object_key) => {
+            let storage: StorageRow = sqlx::query_as(&format!(
+                "SELECT {STORAGE_COLUMNS} FROM storages s \
+                 JOIN locations l ON l.storage_id = s.id WHERE l.file_id = $1"
+            ))
+            .bind(file_id)
+            .fetch_one(pool)
+            .await?;
+            Some((object_key, storage))
+        }
+    };
+    Ok(Some(ByteLease {
+        lease_kind,
+        file_id,
+        declared_size,
+        content_type,
+        read_filename,
+        location,
+    }))
+}
+
+/// 중계 쓰기가 스트림 중 직접 계산한 실측을 기록한다 — commit의 사후
+/// 검증이 head_object 대신 이것을 대조한다.
+pub async fn record_upload(
+    pool: &PgPool,
+    lease_id: Uuid,
+    size: i64,
+    md5: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE leases SET uploaded_size = $2, uploaded_md5 = $3 WHERE id = $1")
+        .bind(lease_id)
+        .bind(size)
+        .bind(md5)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
+/// 이 파일의 최신 중계 업로드 실측 (없으면 아직 업로드 전).
+pub async fn recorded_upload(
+    pool: &PgPool,
+    file_id: Uuid,
+) -> Result<Option<(i64, String)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT uploaded_size, uploaded_md5 FROM leases \
+         WHERE file_id = $1 AND kind = 'write' AND uploaded_size IS NOT NULL \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(file_id)
+    .fetch_optional(pool)
+    .await
 }
 
 /// stat (spec 00): 상태·크기·intent만 — location·URL은 내보내지 않는다.

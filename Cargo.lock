@@ -904,6 +904,8 @@ dependencies = [
  "filegate-core",
  "filegate-db",
  "filegate-infra",
+ "futures-util",
+ "md-5 0.10.6",
  "metrics",
  "metrics-exporter-prometheus",
  "serde",
@@ -947,6 +949,7 @@ dependencies = [
  "anyhow",
  "aws-sdk-s3",
  "secrecy",
+ "tokio",
 ]
 
 [[package]]

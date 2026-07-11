@@ -17,7 +17,7 @@ use std::time::Duration;
 use filegate_core::Crypto;
 use filegate_db::files::{self, SweepCandidate};
 use filegate_db::{registry, PgPool};
-use filegate_infra::{s3_client, s3_delete_object, Address};
+use filegate_infra::{fs as fs_backend, s3_client, s3_delete_object, Address};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
@@ -131,8 +131,8 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto) {
     }
 }
 
-/// 실물 제거 — 등록부에서 접근 명세를 복호해 내부 주소로 지운다.
-/// DeleteObject는 없는 키에도 성공하므로 멱등이다.
+/// 실물 제거 — 등록부에서 백엔드를 복원해 내부 경로로 지운다.
+/// s3 DeleteObject·fs remove 모두 없는 대상에 성공하므로 멱등이다.
 async fn sweep_object(
     pool: &PgPool,
     crypto: &Crypto,
@@ -141,7 +141,13 @@ async fn sweep_object(
     let row = registry::get_storage(pool, &candidate.storage_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("storage '{}' not registered", candidate.storage_id))?;
-    let spec = crate::storage_access::spec_from_row(crypto, &row)?;
-    let storage = s3_client(&spec, Address::Internal);
-    s3_delete_object(&storage, &candidate.object_key).await
+    match crate::storage_access::backend_from_row(crypto, &row)? {
+        crate::storage_access::StorageBackend::S3 { spec, .. } => {
+            let storage = s3_client(&spec, Address::Internal);
+            s3_delete_object(&storage, &candidate.object_key).await
+        }
+        crate::storage_access::StorageBackend::Fs { root } => {
+            fs_backend::delete(&root, &candidate.object_key).await
+        }
+    }
 }

@@ -5,20 +5,25 @@
 
 use sqlx::PgPool;
 
-/// storages 행. 시크릿은 암호문 컬럼 셋(ciphertext/nonce/enc_key_id)으로만
-/// 존재한다 — 복호는 core::Crypto가 행의 enc_key_id 라벨로 한다 (spec 01).
+/// storages 행. 종류(kind)가 s3/fs를 가르고, 종류별 필수는 DB CHECK가
+/// 집행한다 (0005). s3 시크릿은 암호문 컬럼 셋으로만 존재 — 복호는
+/// core::Crypto가 행의 enc_key_id 라벨로 한다 (spec 01). fs는 시크릿이
+/// 없는 storage다 — root_path가 접근 계약의 전부.
 #[derive(Clone, sqlx::FromRow)]
 pub struct StorageRow {
     pub id: String,
-    pub endpoint: String,
-    pub public_endpoint: String,
-    pub region: String,
-    pub bucket: String,
+    pub kind: String,
+    pub force_relay: bool,
+    pub root_path: Option<String>,
+    pub endpoint: Option<String>,
+    pub public_endpoint: Option<String>,
+    pub region: Option<String>,
+    pub bucket: Option<String>,
     pub force_path_style: bool,
-    pub access_key: String,
-    pub secret_key_ciphertext: Vec<u8>,
-    pub secret_key_nonce: Vec<u8>,
-    pub enc_key_id: String,
+    pub access_key: Option<String>,
+    pub secret_key_ciphertext: Option<Vec<u8>>,
+    pub secret_key_nonce: Option<Vec<u8>>,
+    pub enc_key_id: Option<String>,
     pub capacity_bytes: i64,
 }
 
@@ -26,6 +31,7 @@ impl std::fmt::Debug for StorageRow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StorageRow")
             .field("id", &self.id)
+            .field("kind", &self.kind)
             .field("endpoint", &self.endpoint)
             .field("bucket", &self.bucket)
             .field("enc_key_id", &self.enc_key_id)
@@ -34,19 +40,24 @@ impl std::fmt::Debug for StorageRow {
 }
 
 pub(crate) const STORAGE_COLUMNS: &str =
-    "id, endpoint, public_endpoint, region, bucket, force_path_style, access_key, \
-     secret_key_ciphertext, secret_key_nonce, enc_key_id, capacity_bytes";
+    "id, kind, force_relay, root_path, endpoint, public_endpoint, region, bucket, \
+     force_path_style, access_key, secret_key_ciphertext, secret_key_nonce, enc_key_id, \
+     capacity_bytes";
 
 /// 등록과 동시에 회계 0행을 시드한다 (같은 트랜잭션) — 예약(files::create)이
 /// 항상 조건부 UPDATE 한 문장으로 끝나게 (INSERT 경합 없음).
 pub async fn insert_storage(pool: &PgPool, row: &StorageRow) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO storages (id, endpoint, public_endpoint, region, bucket, force_path_style, access_key, \
-         secret_key_ciphertext, secret_key_nonce, enc_key_id, capacity_bytes) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        "INSERT INTO storages (id, kind, force_relay, root_path, endpoint, public_endpoint, \
+         region, bucket, force_path_style, access_key, secret_key_ciphertext, secret_key_nonce, \
+         enc_key_id, capacity_bytes) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
     )
     .bind(&row.id)
+    .bind(&row.kind)
+    .bind(row.force_relay)
+    .bind(&row.root_path)
     .bind(&row.endpoint)
     .bind(&row.public_endpoint)
     .bind(&row.region)
@@ -70,11 +81,15 @@ pub async fn insert_storage(pool: &PgPool, row: &StorageRow) -> Result<(), sqlx:
 /// 재암호화가 바로 이 경로다. 행이 없으면 false.
 pub async fn update_storage(pool: &PgPool, row: &StorageRow) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
-        "UPDATE storages SET endpoint = $2, public_endpoint = $3, region = $4, bucket = $5, \
-         force_path_style = $6, access_key = $7, secret_key_ciphertext = $8, secret_key_nonce = $9, \
-         enc_key_id = $10, capacity_bytes = $11, updated_at = now() WHERE id = $1",
+        "UPDATE storages SET kind = $2, force_relay = $3, root_path = $4, endpoint = $5, \
+         public_endpoint = $6, region = $7, bucket = $8, force_path_style = $9, access_key = $10, \
+         secret_key_ciphertext = $11, secret_key_nonce = $12, enc_key_id = $13, \
+         capacity_bytes = $14, updated_at = now() WHERE id = $1",
     )
     .bind(&row.id)
+    .bind(&row.kind)
+    .bind(row.force_relay)
+    .bind(&row.root_path)
     .bind(&row.endpoint)
     .bind(&row.public_endpoint)
     .bind(&row.region)

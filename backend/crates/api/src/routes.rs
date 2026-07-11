@@ -7,6 +7,7 @@
 //!   /metrics     Prometheus 스크레이프
 //!   /admin/*     운영자 API (정적 운영자 토큰 — admin 모듈)
 //!   /v1/*        클라이언트 API (클라이언트 키 — v1 모듈)
+//!   /b/*         중계 바이트 엔드포인트 (lease secret — bytes 모듈)
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,22 +37,30 @@ pub struct AppState {
     pub metrics: Arc<PrometheusHandle>,
     pub security: filegate_core::SecurityConfig,
     pub crypto: Arc<filegate_core::Crypto>,
+    /// 중계 바이트 URL의 공개 베이스 (FILEGATE_PUBLIC_URL). 중계 storage
+    /// 등록·발급이 요구한다 — 없으면 등록이 400으로 거부된다.
+    pub public_url: Option<String>,
 }
 
 pub fn app(state: AppState) -> Router {
+    // 표면이 둘이다: 컨트롤(JSON, 본문 상한·타임아웃)과 바이트(/b, 스트리밍 —
+    // 상한·타임아웃 없음: 크기는 스트림 차단이, 수명은 lease 만료가 다스린다).
     // Router::layer는 나중에 추가한 레이어가 바깥이다. 요청 기준 실행 순서가
-    // SetRequestId → Trace → 메트릭 → Timeout → BodyLimit이 되도록 역순으로 쌓는다.
-    Router::new()
+    // SetRequestId → Trace → 메트릭 → (컨트롤만: Timeout → BodyLimit)이다.
+    let control = Router::new()
         .route("/", get(root))
         .merge(system_routes())
         .nest("/admin", admin_guarded(state.clone()))
         .nest("/v1", v1_guarded(state.clone()))
-        .with_state(state)
         .layer(RequestBodyLimitLayer::new(CONTROL_BODY_LIMIT))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,
-        ))
+        ));
+    Router::new()
+        .merge(control)
+        .nest("/b", crate::bytes::routes())
+        .with_state(state)
         .layer(middleware::from_fn(track_metrics))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(

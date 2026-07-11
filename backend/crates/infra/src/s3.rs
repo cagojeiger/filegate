@@ -141,7 +141,7 @@ pub async fn presign_get(
 }
 
 /// RFC 5987 value-chars 이외를 UTF-8 바이트 단위로 퍼센트 인코딩한다.
-fn rfc5987_encode(value: &str) -> String {
+pub fn rfc5987_encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         let attr_char = byte.is_ascii_alphanumeric()
@@ -157,6 +157,64 @@ fn rfc5987_encode(value: &str) -> String {
         }
     }
     out
+}
+
+/// 중계 쓰기의 뒷단 업로드 — 스풀 파일에서 스트리밍한다 (크기 기지).
+/// filegate가 스트림 중 크기·MD5를 이미 검증했으므로 여기서는 전달만.
+pub async fn put_object_from_path(
+    storage: &S3Storage,
+    object_key: &str,
+    path: &std::path::Path,
+    content_type: Option<&str>,
+) -> anyhow::Result<()> {
+    let body = aws_sdk_s3::primitives::ByteStream::from_path(path).await?;
+    let mut request = storage
+        .client
+        .put_object()
+        .bucket(&storage.bucket)
+        .key(object_key)
+        .body(body);
+    if let Some(content_type) = content_type {
+        request = request.content_type(content_type);
+    }
+    request.send().await?;
+    Ok(())
+}
+
+/// 중계 읽기의 뒷단 스트림 — (AsyncRead, 크기). 없으면 None.
+pub async fn open_read(
+    storage: &S3Storage,
+    object_key: &str,
+) -> anyhow::Result<Option<(impl tokio::io::AsyncRead + Send + Unpin, i64)>> {
+    let result = storage
+        .client
+        .get_object()
+        .bucket(&storage.bucket)
+        .key(object_key)
+        .send()
+        .await;
+    match result {
+        Ok(output) => {
+            let len = output.content_length().unwrap_or(0);
+            Ok(Some((output.body.into_async_read(), len)))
+        }
+        Err(error) => {
+            let not_found = error
+                .as_service_error()
+                .map(|service| {
+                    matches!(
+                        service,
+                        aws_sdk_s3::operation::get_object::GetObjectError::NoSuchKey(_)
+                    )
+                })
+                .unwrap_or(false);
+            if not_found {
+                Ok(None)
+            } else {
+                Err(error.into())
+            }
+        }
+    }
 }
 
 /// 물리 삭제 (reconciler의 purge·회수). S3 DeleteObject는 없는 키에도

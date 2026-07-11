@@ -2,6 +2,7 @@
 //! → HTTP + reconciler → graceful shutdown.
 
 mod admin;
+mod bytes;
 mod error;
 mod metrics;
 mod reconciler;
@@ -61,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
         metrics,
         security: config.security.clone(),
         crypto,
+        public_url: config.server.public_url.clone(),
     };
     let http_shutdown = shutdown.clone().cancelled_owned();
     let server = async move {

@@ -94,6 +94,7 @@ func (p *filegateProvider) Configure(
 func (p *filegateProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewStorageResource,
+		NewStorageFsResource,
 		NewClientResource,
 		NewClientKeyResource,
 		NewBindingResource,

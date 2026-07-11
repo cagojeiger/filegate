@@ -61,6 +61,9 @@ impl SecurityConfig {
 pub struct ServerConfig {
     pub bind_addr: SocketAddr,
     pub log_format: LogFormat,
+    /// 중계 바이트 엔드포인트의 공개 베이스 URL (예: https://filegate.example.com).
+    /// 중계 storage(fs 또는 force_relay)를 등록하려면 필수 — 등록이 검사한다.
+    pub public_url: Option<String>,
     /// reconciler tick 간격 (기본 60초). 테스트에서만 줄인다.
     pub reconciler_interval_secs: u64,
 }
@@ -98,6 +101,18 @@ impl Config {
                     return Err(Error::config(format!(
                         "FILEGATE_LOG_FORMAT must be pretty|json, got '{other}'"
                     )))
+                }
+            },
+            public_url: match env("FILEGATE_PUBLIC_URL") {
+                None => None,
+                Some(url) => {
+                    let trimmed = url.trim_end_matches('/').to_owned();
+                    let valid = (trimmed.starts_with("http://") && trimmed.len() > 7)
+                        || (trimmed.starts_with("https://") && trimmed.len() > 8);
+                    if !valid {
+                        return Err(Error::config("FILEGATE_PUBLIC_URL must be an http(s) URL"));
+                    }
+                    Some(trimmed)
                 }
             },
             reconciler_interval_secs: env("FILEGATE_RECONCILER_INTERVAL_SECS")

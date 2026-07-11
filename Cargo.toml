@@ -21,7 +21,7 @@ filegate-infra = { path = "backend/crates/infra" }
 filegate-service = { path = "backend/crates/service" }
 
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { version = "0.7", features = ["rt", "io"] }
 axum = { version = "0.8" }
 tower-http = { version = "0.6", features = ["trace", "request-id", "limit", "timeout"] }
 sqlx = { version = "0.8", default-features = false, features = [
@@ -49,6 +49,8 @@ secrecy = { version = "0.10", features = ["serde"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
+md-5 = "0.10"
+futures-util = { version = "0.3", default-features = false }
 subtle = "2"
 dotenvy = "0.15"
 

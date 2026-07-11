@@ -27,6 +27,7 @@ func NewStorageResource() resource.Resource {
 
 type storageResourceModel struct {
 	ID             types.String `tfsdk:"id"`
+	ForceRelay     types.Bool   `tfsdk:"force_relay"`
 	Endpoint       types.String `tfsdk:"endpoint"`
 	PublicEndpoint types.String `tfsdk:"public_endpoint"`
 	Region         types.String `tfsdk:"region"`
@@ -40,12 +41,15 @@ type storageResourceModel struct {
 // 운영자 API의 요청·응답 모양 (admin.rs와 일치).
 type storageAPIModel struct {
 	ID             string `json:"id,omitempty"`
-	Endpoint       string `json:"endpoint"`
-	PublicEndpoint string `json:"public_endpoint"`
-	Region         string `json:"region"`
-	Bucket         string `json:"bucket"`
+	Kind           string `json:"kind,omitempty"`
+	ForceRelay     bool   `json:"force_relay"`
+	RootPath       string `json:"root_path,omitempty"`
+	Endpoint       string `json:"endpoint,omitempty"`
+	PublicEndpoint string `json:"public_endpoint,omitempty"`
+	Region         string `json:"region,omitempty"`
+	Bucket         string `json:"bucket,omitempty"`
 	ForcePathStyle bool   `json:"force_path_style"`
-	AccessKey      string `json:"access_key"`
+	AccessKey      string `json:"access_key,omitempty"`
 	SecretKey      string `json:"secret_key,omitempty"`
 	CapacityBytes  int64  `json:"capacity_bytes"`
 }
@@ -103,6 +107,13 @@ func (r *storageResource) Schema(
 				Optional: true,
 				Computed: true,
 				Default:  booldefault.StaticBool(false),
+			},
+			"force_relay": schema.BoolAttribute{
+				Optional: true,
+				Computed: true,
+				Default:  booldefault.StaticBool(false),
+				Description: "직결(presigned) 대신 filegate 중계로 강제한다 — " +
+					"CORS 없는 벤더, 사설망 뒤의 storage. FILEGATE_PUBLIC_URL 필요.",
 			},
 			"access_key": schema.StringAttribute{
 				Required: true,
@@ -179,6 +190,7 @@ func (r *storageResource) Read(
 	state.Region = types.StringValue(remote.Region)
 	state.Bucket = types.StringValue(remote.Bucket)
 	state.ForcePathStyle = types.BoolValue(remote.ForcePathStyle)
+	state.ForceRelay = types.BoolValue(remote.ForceRelay)
 	state.AccessKey = types.StringValue(remote.AccessKey)
 	state.CapacityBytes = types.Int64Value(remote.CapacityBytes)
 	response.Diagnostics.Append(response.State.Set(ctx, state)...)
@@ -227,6 +239,8 @@ func (r *storageResource) Delete(
 func apiModelFrom(model storageResourceModel) storageAPIModel {
 	return storageAPIModel{
 		ID:             model.ID.ValueString(),
+		Kind:           "s3",
+		ForceRelay:     model.ForceRelay.ValueBool(),
 		Endpoint:       model.Endpoint.ValueString(),
 		PublicEndpoint: model.PublicEndpoint.ValueString(),
 		Region:         model.Region.ValueString(),
