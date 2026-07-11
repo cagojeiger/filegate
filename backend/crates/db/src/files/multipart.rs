@@ -156,6 +156,17 @@ impl PartClaim {
     }
 }
 
+/// done인 part가 하나라도 있는가 (fs 승격의 조립 파일 유실 방어용).
+/// 이미 done인 part가 있는데 조립 파일이 사라졌다면 그 바이트가 유실된 것이다.
+pub async fn has_done_parts(pool: &PgPool, lease_id: Uuid) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM lease_parts WHERE lease_id = $1 AND state = 'done')",
+    )
+    .bind(lease_id)
+    .fetch_one(pool)
+    .await
+}
+
 /// 완료된 part 실측 목록 (commit의 대조 재료): (번호, 크기, 체크섬), 번호순.
 pub async fn done_parts(
     pool: &PgPool,

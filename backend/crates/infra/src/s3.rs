@@ -377,7 +377,14 @@ pub async fn list_parts(
             parts.push((number, size, etag));
         }
         if output.is_truncated() == Some(true) {
-            marker = output.next_part_number_marker().map(str::to_owned);
+            let next = output.next_part_number_marker().map(str::to_owned);
+            // 방어: 비표준 S3 호환 백엔드가 truncated인데 마커를 안 주거나
+            // 전진시키지 않으면 첫 페이지를 영원히 재요청한다 — 전진 못 하면
+            // 있는 만큼만 반환하고 멈춘다 (commit이 개수 불일치로 거부).
+            if next.is_none() || next == marker {
+                break;
+            }
+            marker = next;
         } else {
             break;
         }

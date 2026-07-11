@@ -199,6 +199,21 @@ fn candidate_from(row: (Uuid, i64, String, String)) -> SweepCandidate {
     }
 }
 
+/// 진행 중 multipart 조립 파일(.fg-tmp-mp-{lease})을 temp sweep에서 보호하기
+/// 위한 활성 lease 목록 — pending 파일의 issued write lease만. 확정·회수된
+/// 것은 조립 파일이 이미 rename되었거나 회수 경로가 지운다. part 재개가 물리
+/// 쓰기 없이 lease만 갱신할 수 있어 mtime 노화로는 진행 중과 크래시를 못
+/// 가르므로, sweep은 이 목록으로 활성 조립 파일을 명시적으로 제외한다.
+pub async fn active_multipart_lease_ids(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT le.id FROM leases le JOIN files f ON f.id = le.file_id \
+         WHERE le.kind = 'write' AND le.state = 'issued' \
+         AND f.state = 'pending' AND f.part_size IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// 만료된 read lease를 원장에서 expired로 정리한다 (유계 배치).
 /// 읽기는 회계가 없으므로 상태 전이가 전부다.
 pub async fn expire_read_leases(pool: &PgPool, limit: i64) -> Result<u64, sqlx::Error> {

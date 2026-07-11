@@ -233,6 +233,27 @@ async fn upload_part(
                 }
             };
             let target = fs_backend::multipart_temp(root, &lease_id.to_string());
+            // 방어선: 이미 done인 part가 있는데 조립 파일이 사라졌다면 그 part의
+            // 바이트가 유실된 것이다. write_part_at은 없는 파일을 조용히
+            // 재생성(자기 offset만 쓰고 나머지는 0 hole)하므로, 여기서 끊지
+            // 않으면 손상본이 크기 검증만 통과해 커밋된다. sweep의 활성 lease
+            // 보호가 1차 방어이고 이것이 최후 방어선이다.
+            let assembly_missing = !tokio::fs::try_exists(&target).await.unwrap_or(false);
+            if assembly_missing {
+                match files::has_done_parts(&state.pool, lease_id).await {
+                    Ok(true) => {
+                        fs_backend::abort_write(&temp_path).await;
+                        return Err(internal(
+                            "multipart assembly file is missing; restart the upload",
+                        ));
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        fs_backend::abort_write(&temp_path).await;
+                        return Err(error.into());
+                    }
+                }
+            }
             let promoted = fs_backend::write_part_at(
                 &target,
                 files::part_offset(part_size, part_no),

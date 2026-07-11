@@ -83,9 +83,19 @@ pub async fn open_read(root: &Path, object_key: &str) -> anyhow::Result<Option<(
 }
 
 /// 장부 밖 임시 정리 (spec 00 물리 배치): 디렉토리 최상위의 `.fg-tmp-*` 중
-/// mtime이 max_age를 넘은 것을 지운다. DB를 보지 않는다 — 진행 중 업로드는
-/// 어리므로 걸리지 않고, 크래시가 남긴 것만 늙어서 걸린다 (멀티 pod 안전).
-pub async fn sweep_stale_temps(dir: &Path, max_age: std::time::Duration) -> anyhow::Result<u32> {
+/// mtime이 max_age를 넘은 것을 지운다. 단일 PUT temp는 DB를 보지 않는다 —
+/// 진행 중 업로드는 어리므로 걸리지 않고, 크래시가 남긴 것만 늙어서 걸린다.
+///
+/// multipart 조립 파일(.fg-tmp-mp-{lease})은 예외다: part 재개가 물리 쓰기
+/// 없이 lease만 갱신할 수 있어 mtime 노화가 진행 중과 크래시를 못 가른다.
+/// 그래서 활성 lease 목록(`protected_mp_leases`, 호출자가 DB에서 조회)에
+/// 있는 조립 파일은 mtime과 무관하게 건너뛴다 — 활성 조립 파일은 고아가
+/// 아니고, 지우면 재개된 part 쓰기가 파일을 재생성해 손상본이 커밋된다.
+pub async fn sweep_stale_temps(
+    dir: &Path,
+    max_age: std::time::Duration,
+    protected_mp_leases: &std::collections::HashSet<String>,
+) -> anyhow::Result<u32> {
     let mut entries = fs::read_dir(dir).await?;
     let mut removed = 0u32;
     while let Some(entry) = entries.next_entry().await? {
@@ -93,6 +103,11 @@ pub async fn sweep_stale_temps(dir: &Path, max_age: std::time::Duration) -> anyh
         let Some(name) = name.to_str() else { continue };
         if !name.starts_with(".fg-tmp-") {
             continue;
+        }
+        if let Some(lease_id) = name.strip_prefix(".fg-tmp-mp-") {
+            if protected_mp_leases.contains(lease_id) {
+                continue;
+            }
         }
         let Ok(meta) = entry.metadata().await else {
             continue;
