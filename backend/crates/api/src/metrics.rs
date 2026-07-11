@@ -28,10 +28,7 @@ pub fn install_recorder() -> anyhow::Result<PrometheusHandle> {
         .map_err(|error| anyhow::anyhow!("failed to install metrics recorder: {error}"))
 }
 
-/// 계측에서 뺄 경로 — 프로브와 스크레이프.
-fn is_excluded(path: &str) -> bool {
-    matches!(path, "/health" | "/ready" | "/metrics")
-}
+use crate::routes::is_system_path as is_excluded;
 
 /// 요청 수(`http_requests_total`)와 지연(`http_request_duration_seconds`)을
 /// method·route·status 라벨로 기록한다.

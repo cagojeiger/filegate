@@ -91,6 +91,12 @@ fn system_routes() -> Router<AppState> {
         .route("/metrics", get(metrics_scrape))
 }
 
+/// 시스템 경로 판정 — 스팬과 메트릭 계측이 함께 제외한다.
+/// 위 system_routes 등록 목록과 같아야 한다.
+pub(crate) fn is_system_path(path: &str) -> bool {
+    matches!(path, "/health" | "/ready" | "/metrics")
+}
+
 /// 클라이언트 API — 전 경로가 클라이언트 키 미들웨어 뒤에 있다 (spec 00).
 fn v1_guarded(state: AppState) -> Router<AppState> {
     crate::v1::v1_routes().route_layer(middleware::from_fn_with_state(
@@ -149,7 +155,7 @@ fn make_request_span(req: &Request) -> Span {
         .map(MatchedPath::as_str)
         .unwrap_or("");
     let path = req.uri().path();
-    if matches!(path, "/health" | "/ready" | "/metrics") {
+    if is_system_path(path) {
         info_span!("health-check", method = %req.method(), route)
     } else {
         info_span!("request", method = %req.method(), route)
