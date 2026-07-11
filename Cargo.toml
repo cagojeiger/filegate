@@ -5,6 +5,7 @@ members = [
     "backend/crates/db",
     "backend/crates/infra",
     "backend/crates/api",
+    "backend/crates/client",
 ]
 
 [workspace.package]
@@ -49,6 +50,7 @@ md-5 = "0.10"
 futures-util = { version = "0.3", default-features = false }
 subtle = "2"
 dotenvy = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 
 [workspace.lints.clippy]
 await_holding_lock = "warn"
