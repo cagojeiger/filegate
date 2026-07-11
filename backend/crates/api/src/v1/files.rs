@@ -153,7 +153,20 @@ pub(super) async fn create(
                 )
                 .await
                 .map_err(ApiError::Storage)?;
-                files::attach_upload_id(&state.pool, created.lease_id, &upload_id).await?;
+                // 벤더 세션을 열었으니 upload_id를 반드시 DB에 남겨야 한다 —
+                // 기록 전에 실패하면 회수가 핸들을 몰라 세션이 영구 과금 고아가
+                // 된다. 기록 실패 시 방금 연 세션을 즉시 best-effort로 중단한다.
+                if let Err(error) =
+                    files::attach_upload_id(&state.pool, created.lease_id, &upload_id).await
+                {
+                    let _ = filegate_infra::s3_abort_multipart(
+                        &storage,
+                        &created.object_key,
+                        &upload_id,
+                    )
+                    .await;
+                    return Err(error.into());
+                }
                 if *force_relay {
                     let relay = RelaySecret::generate();
                     files::attach_multipart_secret(
@@ -370,9 +383,15 @@ pub(super) async fn read(
             )
             .await
             .map_err(ApiError::Storage)?;
-            // lease는 서명이 성공한 뒤에 기록 — 실패한 발급은 원장에 없다.
-            files::issue_read_lease(&state.pool, file_id, READ_LEASE_TTL.as_secs() as i64, None)
-                .await?;
+            // 감사 lease 기록은 부수 효과다 — 직결 read lease는 감사용이고
+            // S3가 검사하는 게 아니라, 이미 완성된 유효 URL을 DB 실패로 버리지
+            // 않는다. 실패해도 URL은 반환하고 경고만 남긴다 (best-effort).
+            if let Err(error) =
+                files::issue_read_lease(&state.pool, file_id, READ_LEASE_TTL.as_secs() as i64, None)
+                    .await
+            {
+                tracing::warn!(event = "file.read_audit_failed", file = %file_id, %error);
+            }
             url
         }
         _ => {

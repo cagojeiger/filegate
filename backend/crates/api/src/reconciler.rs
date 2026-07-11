@@ -95,7 +95,8 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto) {
                         }
                         tracing::info!(event = "file.reclaimed", file = %candidate.file_id);
                     }
-                    // 늦은 commit이 이겼다 — 파일은 active, 실물도 그대로 둔다.
+                    // 회수 취소: 늦은 commit이 이겼거나(파일 active) 스냅샷 이후
+                    // lease가 갱신됐다 — 어느 쪽이든 실물을 건드리지 않는다.
                     Ok(false) => {}
                     Err(error) => {
                         tracing::error!(event = "reconciler.reclaim_failed", %error)
