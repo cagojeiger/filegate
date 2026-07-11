@@ -140,6 +140,15 @@ pub async fn presign_get(
     Ok(presigned.uri().to_owned())
 }
 
+/// 응답 ETag를 따옴표 제거해 꺼낸다 — 없으면 벤더 규약 위반 에러.
+/// (단일 PUT ETag는 MD5, multipart는 digest-of-digests `-N`, 실측.)
+fn strip_etag(etag: Option<&str>, op: &str) -> anyhow::Result<String> {
+    Ok(etag
+        .ok_or_else(|| anyhow::anyhow!("{op} returned no etag"))?
+        .trim_matches('"')
+        .to_owned())
+}
+
 /// RFC 5987 value-chars 이외를 UTF-8 바이트 단위로 퍼센트 인코딩한다.
 pub fn rfc5987_encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
@@ -248,11 +257,7 @@ pub async fn head_object(
             let size = head
                 .content_length()
                 .ok_or_else(|| anyhow::anyhow!("head_object returned no content length"))?;
-            let etag = head
-                .e_tag()
-                .ok_or_else(|| anyhow::anyhow!("head_object returned no etag"))?
-                .trim_matches('"')
-                .to_owned();
+            let etag = strip_etag(head.e_tag(), "head_object")?;
             Ok(Some((size, etag)))
         }
         Err(error) => {
@@ -334,11 +339,7 @@ pub async fn upload_part_from_path(
         .body(body)
         .send()
         .await?;
-    Ok(output
-        .e_tag()
-        .ok_or_else(|| anyhow::anyhow!("upload_part returned no etag"))?
-        .trim_matches('"')
-        .to_owned())
+    strip_etag(output.e_tag(), "upload_part")
 }
 
 /// 벤더에 실재하는 part 목록 (직결 commit의 대조 재료): (번호, 크기, ETag).
@@ -415,11 +416,7 @@ pub async fn complete_multipart(
         .multipart_upload(completed)
         .send()
         .await?;
-    Ok(output
-        .e_tag()
-        .ok_or_else(|| anyhow::anyhow!("complete_multipart returned no etag"))?
-        .trim_matches('"')
-        .to_owned())
+    strip_etag(output.e_tag(), "complete_multipart")
 }
 
 /// 중단 — 미완성 part의 점유·과금을 제거한다 (회수 경로, spec 02).

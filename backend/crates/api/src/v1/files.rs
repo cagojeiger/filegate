@@ -16,6 +16,7 @@ use filegate_infra::{s3_client, s3_head_object, s3_presign_get, s3_presign_put, 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::relay::{relay_base, relay_url, RelaySecret};
 use super::ClientId;
 use crate::error::{bad_request, conflict, internal, not_found, ApiError};
 use crate::routes::AppState;
@@ -23,7 +24,7 @@ use crate::storage_access::{backend_from_row, StorageBackend};
 
 /// 쓰기 lease TTL — 짧게 둔다 (spec 00: 쓰기 URL은 확정 후에도 만료 전까지
 /// 유효하므로, 변조 창을 줄이는 건 TTL이다).
-const WRITE_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
+pub(super) const WRITE_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
 /// 읽기 lease TTL. 발급된 직결 URL은 만료로만 소멸한다 (ADR 002).
 const READ_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
 /// v0 단일 PUT 상한 (spec 00: 5GiB 초과는 multipart와 함께 다음 범위).
@@ -236,224 +237,12 @@ pub(super) async fn create(
         .into_response())
 }
 
-/// multipart 확정 (spec 02): part의 진실 원천은 filegate다 — 서비스는 part
-/// 목록을 제출하지 않는다. 중계는 자기 원장(part 실측), 직결은 벤더
-/// ListParts를 대조해 완성한다. 미완성이면 400과 함께 pending에 남는다.
-async fn commit_multipart(
-    state: &AppState,
-    client: &ClientId,
-    file_id: Uuid,
-    file: &filegate_db::files::FileAccess,
-    part_size: i64,
-    backend: &StorageBackend,
-) -> Result<Response, ApiError> {
-    let count = files::part_count(file.declared_size, part_size);
-    let Some((lease_id, upload_id, _)) = files::write_lease(&state.pool, file_id).await? else {
-        return Err(internal("multipart file has no write lease"));
-    };
-
-    let etag = match backend {
-        StorageBackend::S3 {
-            spec,
-            force_relay: false,
-        } => {
-            // 직결: 실물은 벤더에 있다 — ListParts가 대조 재료다.
-            let upload_id =
-                upload_id.ok_or_else(|| internal("direct multipart lease has no upload id"))?;
-            let storage = s3_client(spec, Address::Internal);
-            let vendor = filegate_infra::s3_list_parts(&storage, &file.object_key, &upload_id)
-                .await
-                .map_err(ApiError::Storage)?;
-            if vendor.len() != count as usize {
-                return Err(bad_request("upload is incomplete (missing parts)"));
-            }
-            for (n, size, _) in &vendor {
-                if *size != files::part_expected_size(file.declared_size, part_size, *n) {
-                    return Err(bad_request("part size does not match declaration"));
-                }
-            }
-            let listed: Vec<(i32, String)> =
-                vendor.into_iter().map(|(n, _, etag)| (n, etag)).collect();
-            filegate_infra::s3_complete_multipart(&storage, &file.object_key, &upload_id, &listed)
-                .await
-                .map_err(ApiError::Storage)?
-        }
-        _ => {
-            // 중계: 원장(part 실측)이 대조 재료다.
-            let parts = files::done_parts(&state.pool, lease_id).await?;
-            if parts.len() != count as usize {
-                return Err(bad_request("upload is incomplete (missing parts)"));
-            }
-            for (n, size, _) in &parts {
-                if *size != files::part_expected_size(file.declared_size, part_size, *n) {
-                    return Err(bad_request("part size does not match declaration"));
-                }
-            }
-            match backend {
-                StorageBackend::S3 { spec, .. } => {
-                    // 중계 s3: part는 도착 즉시 벤더에 올라가 있다 — 완성 선언만.
-                    let upload_id = upload_id
-                        .ok_or_else(|| internal("relay multipart lease has no upload id"))?;
-                    let storage = s3_client(spec, Address::Internal);
-                    let ledger: Vec<(i32, String)> =
-                        parts.into_iter().map(|(n, _, md5)| (n, md5)).collect();
-                    filegate_infra::s3_complete_multipart(
-                        &storage,
-                        &file.object_key,
-                        &upload_id,
-                        &ledger,
-                    )
-                    .await
-                    .map_err(ApiError::Storage)?
-                }
-                StorageBackend::Fs { root } => {
-                    // 중계 fs: offset 기록이 이미 조립이다 — rename 한 번 (spec 02).
-                    let temp = filegate_infra::fs::multipart_temp(root, &lease_id.to_string());
-                    filegate_infra::fs::commit_path(root, &temp, &file.object_key)
-                        .await
-                        .map_err(internal)?;
-                    // ETag는 S3 multipart와 같은 합성 규칙: md5(part md5들) + "-N".
-                    composite_etag(&parts)
-                }
-            }
-        }
-    };
-
-    if files::finalize_commit(
-        &state.pool,
-        file_id,
-        &file.storage.id,
-        file.declared_size,
-        &etag,
-    )
-    .await?
-    {
-        tracing::info!(event = "file.committed", file = %file_id, client = %client.0, multipart = true);
-        return Ok(committed_response(file_id, etag));
-    }
-    // 전이 경합의 패자 — 현재 상태로 멱등 응답 (단일 PUT commit과 동일).
-    let now = files::for_access(&state.pool, &client.0, file_id)
-        .await?
-        .ok_or_else(|| not_found("file not found"))?;
-    match now.state.as_str() {
-        "active" => Ok(committed_response(file_id, now.etag.unwrap_or_default())),
-        _ => Err(conflict("file is not committable")),
-    }
-}
-
-/// S3 multipart ETag와 같은 합성 규칙: 각 part MD5의 raw 바이트를 이어
-/// md5한 값 + "-{part 수}". fs 중계의 기록용 — 전체 MD5가 아님이 표식된다.
-fn composite_etag(parts: &[(i32, i64, String)]) -> String {
-    use md5::Digest as _;
-    let mut hasher = md5::Md5::new();
-    for (_, _, hex) in parts {
-        let mut bytes = Vec::with_capacity(hex.len() / 2);
-        for pair in hex.as_bytes().chunks_exact(2) {
-            if let [high, low] = pair {
-                let high = (*high as char).to_digit(16).unwrap_or(0) as u8;
-                let low = (*low as char).to_digit(16).unwrap_or(0) as u8;
-                bytes.push((high << 4) | low);
-            }
-        }
-        hasher.update(&bytes);
-    }
-    format!("{:x}-{}", hasher.finalize(), parts.len())
-}
-
-#[derive(Deserialize)]
-pub(super) struct PartsBody {
-    parts: Vec<i32>,
-}
-
-#[derive(Serialize)]
-struct PartOut {
-    part: i32,
-    url: String,
-}
-
-/// part 접근 발급 = 갱신 = 재개 (spec 02). 같은 part의 재요청이 재시도이고,
-/// 발급마다 write lease 만료가 연장된다 — 발급이 이어지는 한 회수되지 않는다.
-/// 중계는 발급마다 lease secret을 새로 민팅한다 (서버는 raw를 저장하지 않으므로,
-/// ADR 003) — 최신 발급 배치의 URL만 유효하다.
-pub(super) async fn parts(
-    State(state): State<AppState>,
-    Extension(client): Extension<ClientId>,
-    Path(file_id): Path<Uuid>,
-    Json(body): Json<PartsBody>,
-) -> Result<Response, ApiError> {
-    let file = files::for_access(&state.pool, &client.0, file_id)
-        .await?
-        .ok_or_else(|| not_found("file not found"))?;
-    if file.state != "pending" {
-        return Err(conflict("file is not pending"));
-    }
-    let Some(part_size) = file.part_size else {
-        return Err(bad_request("file is not a multipart upload"));
-    };
-    let count = files::part_count(file.declared_size, part_size);
-    if body.parts.is_empty() || body.parts.len() > 1000 {
-        return Err(bad_request("request 1 to 1000 parts at a time"));
-    }
-    if body.parts.iter().any(|&n| n < 1 || n > count) {
-        return Err(bad_request("part number out of range"));
-    }
-    let Some((lease_id, upload_id, write_secret)) =
-        files::write_lease(&state.pool, file_id).await?
-    else {
-        return Err(internal("multipart file has no write lease"));
-    };
-    // 갱신 (ADR 002): 살아 있는 lease에만 성립 — 회수 뒤라면 재시도 불가.
-    if !files::extend_write_lease(&state.pool, lease_id, WRITE_LEASE_TTL.as_secs() as i64).await? {
-        return Err(conflict("upload is no longer active"));
-    }
-
-    let backend = backend_from_row(&state.crypto, &file.storage)?;
-    let mut out = Vec::with_capacity(body.parts.len());
-    match &backend {
-        StorageBackend::S3 {
-            spec,
-            force_relay: false,
-        } => {
-            let upload_id =
-                upload_id.ok_or_else(|| internal("direct multipart lease has no upload id"))?;
-            let storage = s3_client(spec, Address::Public);
-            for &n in &body.parts {
-                let url = filegate_infra::s3_presign_upload_part(
-                    &storage,
-                    &file.object_key,
-                    &upload_id,
-                    n,
-                    WRITE_LEASE_TTL,
-                )
-                .await
-                .map_err(ApiError::Storage)?;
-                out.push(PartOut { part: n, url });
-            }
-        }
-        _ => {
-            // 중계: create 때 동결한 secret으로 URL을 조립한다 — 발급마다
-            // 회전하지 않으므로 다배치·재개에서 앞 배치 URL이 살아 있다 (spec 02).
-            let base = relay_base(&state)?;
-            let secret =
-                write_secret.ok_or_else(|| internal("relay multipart lease has no secret"))?;
-            for &n in &body.parts {
-                out.push(PartOut {
-                    part: n,
-                    url: format!("{base}/b/{lease_id}?s={secret}&part={n}"),
-                });
-            }
-        }
-    }
-    tracing::info!(event = "file.parts_issued", file = %file_id, client = %client.0, count = out.len());
-    Ok(Json(serde_json::json!({ "parts": out })).into_response())
-}
-
 pub(super) async fn commit(
     State(state): State<AppState>,
     Extension(client): Extension<ClientId>,
     Path(file_id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let file = files::for_access(&state.pool, &client.0, file_id)
+    let file = files::access(&state.pool, &client.0, file_id)
         .await?
         .ok_or_else(|| not_found("file not found"))?;
 
@@ -469,7 +258,8 @@ pub(super) async fn commit(
     let backend = backend_from_row(&state.crypto, &file.storage)?;
     // multipart는 검증 단위가 part다 (ADR 002, spec 02) — 별도 게이트로.
     if let Some(part_size) = file.part_size {
-        return commit_multipart(&state, &client, file_id, &file, part_size, &backend).await;
+        return super::multipart::commit(&state, &client, file_id, &file, part_size, &backend)
+            .await;
     }
     let (actual_size, etag) = if backend.is_relay() {
         match files::recorded_upload(&state.pool, file_id).await? {
@@ -515,7 +305,17 @@ pub(super) async fn commit(
     }
 
     // 전이 경합의 패자 — 현재 상태로 멱등 응답한다.
-    let now = files::for_access(&state.pool, &client.0, file_id)
+    committed_or_conflict(&state, &client, file_id).await
+}
+
+/// commit 전이 경합의 패자 처리 (단일 PUT·multipart 공용): 현재 상태를 다시
+/// 읽어 active면 멱등 응답, 아니면 409. 승자가 확정을 끝낸 뒤라 대개 active다.
+pub(super) async fn committed_or_conflict(
+    state: &AppState,
+    client: &ClientId,
+    file_id: Uuid,
+) -> Result<Response, ApiError> {
+    let now = files::access(&state.pool, &client.0, file_id)
         .await?
         .ok_or_else(|| not_found("file not found"))?;
     match now.state.as_str() {
@@ -544,7 +344,7 @@ pub(super) async fn read(
     body: Option<Json<ReadBody>>,
 ) -> Result<Response, ApiError> {
     let body = body.map(|Json(inner)| inner).unwrap_or_default();
-    let file = files::for_access(&state.pool, &client.0, file_id)
+    let file = files::access(&state.pool, &client.0, file_id)
         .await?
         .ok_or_else(|| not_found("file not found"))?;
     match file.state.as_str() {
@@ -656,57 +456,6 @@ fn deleted_response(file_id: Uuid) -> Response {
     .into_response()
 }
 
-/// 중계 접근 secret 한 벌 — 원문은 URL로만 나가고 서버엔 해시만 남는다
-/// (ADR 003). write는 기존 lease에 부착하고 read는 발급하며 결합하므로,
-/// lease 결합은 호출자 몫이다.
-struct RelaySecret {
-    secret: String,
-    hash: String,
-}
-
-impl RelaySecret {
-    fn generate() -> Self {
-        let secret = filegate_core::generate_url_secret();
-        let hash = filegate_core::client_key_hash(&secret);
-        Self { secret, hash }
-    }
-}
-
-/// 표현 파일명은 저장하지 않고 URL로만 나른다 (spec 00) — 직결의 서명
-/// 파라미터 등가물. 쿼리 값 인코딩은 rfc5987이 아니라 전용 인코더다:
-/// rfc5987은 헤더 문법이라 `&`(파라미터 절단)·`+`(공백 변질)·`#`(fragment
-/// 소실)을 감싸지 않는다. 다운로드 쪽 헤더 재인코딩은 rfc5987이 맞다.
-fn relay_url(base: &str, lease_id: Uuid, secret: &str, filename: Option<&str>) -> String {
-    match filename {
-        Some(name) => format!("{base}/b/{lease_id}?s={secret}&f={}", query_encode(name)),
-        None => format!("{base}/b/{lease_id}?s={secret}"),
-    }
-}
-
-/// URL 쿼리 값 percent 인코딩 — unreserved(RFC 3986)만 남기고 전부 감싼다.
-fn query_encode(value: &str) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(value.len() * 3);
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(byte as char)
-            }
-            _ => {
-                let _ = write!(out, "%{byte:02X}");
-            }
-        }
-    }
-    out
-}
-
-/// 중계 URL의 베이스 — 등록이 이미 검사했으므로 없으면 설정 오류다.
-fn relay_base(state: &AppState) -> Result<&str, ApiError> {
-    state.public_url.as_deref().ok_or_else(|| {
-        internal("FILEGATE_PUBLIC_URL is not configured but a relay storage is registered")
-    })
-}
-
 fn is_intent_slug(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -717,11 +466,29 @@ fn is_intent_slug(value: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-fn committed_response(file_id: Uuid, etag: String) -> Response {
+pub(super) fn committed_response(file_id: Uuid, etag: String) -> Response {
     Json(CommitOut {
         file_id,
         state: "active",
         etag,
     })
     .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_intent_slug;
+
+    #[test]
+    fn intent_slug_accepts_lowercase_kebab_and_rejects_the_rest() {
+        assert!(is_intent_slug("avatar"));
+        assert!(is_intent_slug("user-avatar-2"));
+        assert!(!is_intent_slug("")); // 빈 문자열
+        assert!(!is_intent_slug("-lead")); // 하이픈 시작
+        assert!(!is_intent_slug("trail-")); // 하이픈 끝
+        assert!(!is_intent_slug("Upper")); // 대문자
+        assert!(!is_intent_slug("has space")); // 공백
+        assert!(!is_intent_slug("nul\0byte")); // 제어 문자
+        assert!(!is_intent_slug(&"a".repeat(65))); // 길이 초과
+    }
 }
