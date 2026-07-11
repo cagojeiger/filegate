@@ -18,14 +18,11 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{middleware, Json, Router};
 use filegate_db::PgPool;
-use metrics_exporter_prometheus::PrometheusHandle;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{info, info_span, Span};
-
-use crate::metrics::track as track_metrics;
 
 /// 컨트롤 API 요청 본문 상한. 바이트는 이 표면을 지나지 않는다 (공리 2).
 const CONTROL_BODY_LIMIT: usize = 1024 * 1024;
@@ -34,7 +31,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
-    pub metrics: Arc<PrometheusHandle>,
     pub security: filegate_core::SecurityConfig,
     pub crypto: Arc<filegate_core::Crypto>,
     /// 중계 바이트 URL의 공개 베이스 (FILEGATE_PUBLIC_URL). 중계 storage
@@ -62,7 +58,7 @@ pub fn app(state: AppState) -> Router {
     // bytes의 청크 유휴 타임아웃이 다스린다. lease 만료는 진입 시에만 검사된다.
     // GET의 저속 수신은 여기서 다스리지 않는다 — 앞단 프록시의 몫).
     // Router::layer는 나중에 추가한 레이어가 바깥이다. 요청 기준 실행 순서가
-    // SetRequestId → Trace → 메트릭 → (컨트롤만: Timeout → BodyLimit)이다.
+    // SetRequestId → Trace → (컨트롤만: Timeout → BodyLimit)이다.
     let control = Router::new()
         .route("/", get(root))
         .merge(system_routes())
@@ -77,7 +73,6 @@ pub fn app(state: AppState) -> Router {
         .merge(control)
         .nest("/b", crate::bytes::routes())
         .with_state(state)
-        .layer(middleware::from_fn(track_metrics))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(
             TraceLayer::new_for_http()
@@ -87,18 +82,17 @@ pub fn app(state: AppState) -> Router {
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
 }
 
-/// 시스템 표면: 프로브와 메트릭. 인증 밖에 둔다.
+/// 시스템 표면: 프로브. 인증 밖에 둔다.
 fn system_routes() -> Router<AppState> {
     Router::new()
         .route("/health", get(health))
         .route("/ready", get(ready))
-        .route("/metrics", get(metrics_scrape))
 }
 
-/// 시스템 경로 판정 — 스팬과 메트릭 계측이 함께 제외한다.
+/// 시스템 경로 판정 — 성공 프로브의 스팬 로그를 제외한다.
 /// 위 system_routes 등록 목록과 같아야 한다.
 pub(crate) fn is_system_path(path: &str) -> bool {
-    matches!(path, "/health" | "/ready" | "/metrics")
+    matches!(path, "/health" | "/ready")
 }
 
 /// 클라이언트 API — 전 경로가 클라이언트 키 미들웨어 뒤에 있다 (spec 00).
@@ -145,10 +139,6 @@ async fn ready(State(state): State<AppState>) -> impl IntoResponse {
             )
         }
     }
-}
-
-async fn metrics_scrape(State(state): State<AppState>) -> impl IntoResponse {
-    state.metrics.render()
 }
 
 /// 프로브·스크레이프는 "health-check" 스팬으로 만들어 성공 시 로그를 뺀다.
