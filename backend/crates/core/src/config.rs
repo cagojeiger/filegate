@@ -61,6 +61,8 @@ impl SecurityConfig {
 pub struct ServerConfig {
     pub bind_addr: SocketAddr,
     pub log_format: LogFormat,
+    /// reconciler tick 간격 (기본 60초). 테스트에서만 줄인다.
+    pub reconciler_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -98,6 +100,11 @@ impl Config {
                     )))
                 }
             },
+            reconciler_interval_secs: env("FILEGATE_RECONCILER_INTERVAL_SECS")
+                .map(|v| v.parse())
+                .transpose()
+                .map_err(|e| Error::config(format!("FILEGATE_RECONCILER_INTERVAL_SECS: {e}")))?
+                .unwrap_or(60),
         };
         let database = DatabaseConfig {
             url: SecretString::from(env("FILEGATE_DATABASE_URL").unwrap_or_else(|| {
@@ -109,6 +116,13 @@ impl Config {
                 .map_err(|e| Error::config(format!("FILEGATE_DB_MAX_CONNECTIONS: {e}")))?
                 .unwrap_or(5),
         };
+        // reconciler가 advisory lock 트랜잭션으로 커넥션 하나를 쥔 채
+        // 잡 트랜잭션을 pool에서 또 연다 — 1개면 데드락이다.
+        if database.max_connections < 2 {
+            return Err(Error::config(
+                "FILEGATE_DB_MAX_CONNECTIONS must be at least 2",
+            ));
+        }
         let required =
             |key: &str| env(key).ok_or_else(|| Error::config(format!("{key} is not set")));
         let operator_tokens: Vec<SecretString> = required("FILEGATE_OPERATOR_TOKENS")?

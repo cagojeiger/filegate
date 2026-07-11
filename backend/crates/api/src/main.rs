@@ -2,9 +2,12 @@
 //! → HTTP + reconciler → graceful shutdown.
 
 mod admin;
+mod error;
 mod metrics;
 mod reconciler;
 mod routes;
+mod storage_access;
+mod v1;
 
 use std::io;
 use std::sync::Arc;
@@ -46,7 +49,12 @@ async fn main() -> anyhow::Result<()> {
     info!(event = "server.listening", addr = %config.server.bind_addr);
 
     let shutdown = CancellationToken::new();
-    let worker = reconciler::spawn(pool.clone(), shutdown.clone());
+    let worker = reconciler::spawn(
+        pool.clone(),
+        crypto.clone(),
+        std::time::Duration::from_secs(config.server.reconciler_interval_secs),
+        shutdown.clone(),
+    );
 
     let state = routes::AppState {
         pool: pool.clone(),

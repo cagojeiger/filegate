@@ -9,8 +9,8 @@
 
 mod bindings;
 mod clients;
-mod error;
 mod storages;
+mod usage;
 
 pub use storages::verify_registered;
 
@@ -25,6 +25,7 @@ use crate::routes::AppState;
 
 pub fn admin_routes() -> Router<AppState> {
     Router::new()
+        .route("/usage", get(usage::report))
         .route("/storages", get(storages::list).post(storages::create))
         .route(
             "/storages/{id}",
@@ -65,6 +66,6 @@ pub async fn require_operator(
         .and_then(|(scheme, token)| scheme.eq_ignore_ascii_case("bearer").then_some(token));
     match presented {
         Some(token) if state.security.operator_token_matches(token) => next.run(request).await,
-        _ => error::unauthorized().into_response(),
+        _ => crate::error::unauthorized("operator token required").into_response(),
     }
 }
