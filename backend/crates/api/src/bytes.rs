@@ -39,6 +39,10 @@ use crate::storage_access::{backend_from_row, StorageBackend};
 /// 흘리며 연결·임시 파일을 점유하는 것을 끊는다.
 const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// 스트림 버퍼 크기 — 다운로드 재청크와 업로드 스풀 쓰기가 공유한다.
+/// 기본 4KiB로 두면 GiB급 전송이 수십만 번의 블로킹 풀 왕복이 된다.
+const STREAM_BUF_SIZE: usize = 256 * 1024;
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/{lease_id}", put(upload).get(download).options(preflight))
@@ -97,12 +101,21 @@ async fn upload(
     // 같은 lease의 재PUT이 겹쳐도 서로 다른 임시 파일에 쓴다 — 이름을
     // lease_id로만 지으면 truncate로 두 스트림이 섞여 손상본이 커밋될 수 있다.
     let temp_name = format!("{lease_id}-{}", Uuid::new_v4());
-    let (temp_path, mut file) = fs_backend::begin_write(&temp_root, &temp_name)
+    let (temp_path, file) = fs_backend::begin_write(&temp_root, &temp_name)
         .await
         .map_err(internal)?;
+    let mut writer = tokio::io::BufWriter::with_capacity(STREAM_BUF_SIZE, file);
 
     let (written, md5_hex) =
-        stream_to_temp(body, &mut file, &temp_path, lease.declared_size).await?;
+        stream_to_temp(body, &mut writer, &temp_path, lease.declared_size).await?;
+
+    // 버퍼 잔량을 파일로 내리고 원본 핸들을 되찾는다 — 이후 확정 단계는
+    // 버퍼를 모른다 (fs는 sync+rename, s3는 스풀 업로드).
+    if let Err(error) = writer.flush().await {
+        fs_backend::abort_write(&temp_path).await;
+        return Err(internal(error));
+    }
+    let file = writer.into_inner();
 
     // 뒷단 확정: fs는 rename, s3는 스풀에서 업로드.
     match &backend {
@@ -113,10 +126,6 @@ async fn upload(
             }
         }
         StorageBackend::S3 { spec, .. } => {
-            if let Err(error) = file.flush().await {
-                fs_backend::abort_write(&temp_path).await;
-                return Err(internal(error));
-            }
             drop(file);
             let storage = s3_client(spec, Address::Internal);
             let uploaded = s3_put_object_from_path(
@@ -149,7 +158,7 @@ async fn upload(
 /// 성공 시 (실측 크기, md5 hex)를 돌려준다.
 async fn stream_to_temp(
     body: Body,
-    file: &mut tokio::fs::File,
+    file: &mut (impl tokio::io::AsyncWrite + Unpin),
     temp_path: &std::path::Path,
     declared_size: i64,
 ) -> Result<(i64, String), ApiError> {
@@ -225,7 +234,8 @@ async fn download(
     };
 
     tracing::info!(event = "bytes.downloaded", lease = %lease_id, file = %lease.file_id);
-    let mut response = Body::from_stream(ReaderStream::new(reader)).into_response();
+    let mut response =
+        Body::from_stream(ReaderStream::with_capacity(reader, STREAM_BUF_SIZE)).into_response();
     let headers = response.headers_mut();
     if let Ok(value) = HeaderValue::from_str(&size.to_string()) {
         headers.insert(header::CONTENT_LENGTH, value);
