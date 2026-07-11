@@ -369,15 +369,31 @@ impl RelaySecret {
 }
 
 /// 표현 파일명은 저장하지 않고 URL로만 나른다 (spec 00) — 직결의 서명
-/// 파라미터 등가물. 인코딩은 rfc5987과 쿼리 양쪽에 안전한 부분집합이다.
+/// 파라미터 등가물. 쿼리 값 인코딩은 rfc5987이 아니라 전용 인코더다:
+/// rfc5987은 헤더 문법이라 `&`(파라미터 절단)·`+`(공백 변질)·`#`(fragment
+/// 소실)을 감싸지 않는다. 다운로드 쪽 헤더 재인코딩은 rfc5987이 맞다.
 fn relay_url(base: &str, lease_id: Uuid, secret: &str, filename: Option<&str>) -> String {
     match filename {
-        Some(name) => format!(
-            "{base}/b/{lease_id}?s={secret}&f={}",
-            filegate_infra::rfc5987_encode(name)
-        ),
+        Some(name) => format!("{base}/b/{lease_id}?s={secret}&f={}", query_encode(name)),
         None => format!("{base}/b/{lease_id}?s={secret}"),
     }
+}
+
+/// URL 쿼리 값 percent 인코딩 — unreserved(RFC 3986)만 남기고 전부 감싼다.
+fn query_encode(value: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(value.len() * 3);
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => {
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
 }
 
 /// 중계 URL의 베이스 — 등록이 이미 검사했으므로 없으면 설정 오류다.

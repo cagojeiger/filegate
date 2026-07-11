@@ -52,12 +52,14 @@ run_mode() {
   CM=$(curl -s -w '\n%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$FID/commit)
   expect "[$INTENT] commit 200" 200 "$(printf '%s' "$CM" | tail -1)"
   case "$CM" in *"$MD5"*) ok;; *) bad "[$INTENT] commit ETag != MD5: $CM";; esac
-  R=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files/$FID/read -d '{"filename":"모드 검증.txt"}')
+  R=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files/$FID/read -d '{"filename":"모드 검증 v1+2&3#final.txt"}')
   GURL=$(printf '%s' "$R" | sed -n 's/.*"get_url":"\([^"]*\)".*/\1/p')
   if [ -n "$GURL" ]; then ok; else bad "[$INTENT] read 실패: $R"; return; fi
   expect "[$INTENT] 다운로드 내용 일치" "$PAYLOAD" "$(curl -s "$GURL")"
   DISPO=$(curl -s -o /dev/null -D - "$GURL" | grep -i '^content-disposition' | tr -d '\r')
   case "$DISPO" in *"filename*=UTF-8''"*) ok;; *) bad "[$INTENT] RFC5987 없음: $DISPO";; esac
+  # 파일명 URL 왕복 무결: &(절단)·+(공백 변질)·#(fragment 소실)이 살아남아야 한다.
+  case "$DISPO" in *"v1+2&3#final.txt"*) ok;; *) bad "[$INTENT] 파일명 악문자 왕복 실패: $DISPO";; esac
   expect "[$INTENT] 회계 active" "$SIZE" "$($PSQL "SELECT active_bytes FROM storage_usage WHERE storage_id='$SID';" | tr -d ' ')"
   ST=$(curl -s -H "$AUTH" $BASE/v1/files/$FID)
   case "$ST" in *'"state":"active"'*) ok;; *) bad "[$INTENT] stat: $ST";; esac
