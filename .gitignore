@@ -31,3 +31,6 @@ tf-provider/dev.tfrc
 *.tfstate.backup
 .terraform/
 .terraform.lock.hcl
+
+# 커버리지 계측 산출물
+*.profraw
