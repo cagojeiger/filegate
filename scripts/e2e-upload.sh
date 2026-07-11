@@ -48,6 +48,11 @@ CREATE=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files \
 FILE_ID=$(printf '%s' "$CREATE" | sed -n 's/.*"file_id":"\([^"]*\)".*/\1/p')
 PUT_URL=$(printf '%s' "$CREATE" | sed -n 's/.*"put_url":"\([^"]*\)".*/\1/p')
 if [ -n "$FILE_ID" ] && [ -n "$PUT_URL" ]; then ok; else bad "create 응답에 file_id/put_url 없음: $CREATE"; fi
+# 물리 배치 규약 (spec 00): 직결 URL의 키가 fg/{client}/{yyyy}/{mm}/...이어야 한다.
+case "$PUT_URL" in
+  */fg/notegate/20[0-9][0-9]/[0-9][0-9]/*.txt*) ok;;
+  *) bad "직결 키가 규약 경로 아님: $PUT_URL";;
+esac
 
 echo "=== 업로드 전 commit → 400 ==="
 expect "실물 없음 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$FILE_ID/commit)"

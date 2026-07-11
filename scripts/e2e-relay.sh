@@ -24,7 +24,11 @@ $PSQL "DELETE FROM locations;" >/dev/null 2>&1
 $PSQL "DELETE FROM files;" >/dev/null 2>&1
 $PSQL "UPDATE storage_usage SET reserved_bytes=0, active_bytes=0, purge_pending_bytes=0;" >/dev/null 2>&1
 mkdir -p /tmp/filegate-fs-demo
-rm -f /tmp/filegate-fs-demo/* /tmp/filegate-fs-demo/.tmp-* 2>/dev/null
+rm -rf /tmp/filegate-fs-demo/fg /tmp/filegate-fs-demo/.fg-tmp-* 2>/dev/null
+
+# fs 실물 파일 수 — 물리 배치(fg/{client}/{yyyy}/{mm}/{zz}/...)가 중첩이라
+# 재귀로 센다. 임시(.fg-tmp-*)는 제외.
+fs_count() { find /tmp/filegate-fs-demo -type f ! -name '.fg-tmp-*' | wc -l | tr -d ' '; }
 
 md5of() { printf '%s' "$1" | md5 -q 2>/dev/null || printf '%s' "$1" | md5sum | cut -d' ' -f1; }
 
@@ -66,9 +70,14 @@ run_mode attachment minio-local  direct "동등성 페이로드 — 직결 minio
 run_mode relay-att  minio-relay  relay  "동등성 페이로드 — 중계 minio"
 run_mode fs-att     fs-local     relay  "동등성 페이로드 — 중계 fs"
 
-echo "=== fs 실물 확인 (root_path에 파일이 실제로) ==="
-FSCOUNT=$(ls /tmp/filegate-fs-demo | grep -vc '^\.')
-expect "fs 객체 1개" 1 "$FSCOUNT"
+echo "=== fs 실물 확인 (root_path에 파일이 실제로, 규약 경로로) ==="
+expect "fs 객체 1개" 1 "$(fs_count)"
+# 물리 배치 규약 검증 (spec 00): fg/{client}/{yyyy}/{mm}/{zz}/{uuid}[.ext]
+FSPATH=$(find /tmp/filegate-fs-demo -type f ! -name '.fg-tmp-*' | head -1)
+case "$FSPATH" in
+  /tmp/filegate-fs-demo/fg/notegate/20[0-9][0-9]/[0-9][0-9]/??/*) ok;;
+  *) bad "fs 키가 규약 경로 아님: $FSPATH";;
+esac
 
 echo "=== 중계 강화 케이스 ==="
 # 새 중계 파일 하나로 secret 계열 공격
@@ -114,7 +123,7 @@ sleep 8
 expect "회계 전부 0" "0" "$($PSQL "SELECT coalesce(sum(reserved_bytes+active_bytes+purge_pending_bytes),0) FROM storage_usage WHERE storage_id IN ('minio-relay','fs-local');" | tr -d ' ')"
 GURL_R=$(eval echo "\$GURL_relay_att")
 expect "purge 후 중계 GET 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' "$GURL_R")"
-expect "fs 디렉토리 비움" 0 "$(ls /tmp/filegate-fs-demo | grep -vc '^\.')"
+expect "fs 실물 전부 소멸" 0 "$(fs_count)"
 
 # 정리
 $PSQL "DELETE FROM leases;" >/dev/null 2>&1

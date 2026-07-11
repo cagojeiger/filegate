@@ -25,6 +25,10 @@ use tokio_util::sync::CancellationToken;
 /// 한 tick에 잡별로 처리하는 최대 건수 (유계 배치, docs/stack).
 const BATCH_LIMIT: i64 = 20;
 
+/// 장부 밖 임시 파일(.fg-tmp-*)의 나이 상한 — 이보다 늙으면 크래시 잔여물이다.
+/// 진행 중 업로드의 유휴는 30초에 끊기므로(bytes) 여유가 크다.
+const TEMP_MAX_AGE: Duration = Duration::from_secs(48 * 3600);
+
 pub fn spawn(
     pool: PgPool,
     crypto: Arc<Crypto>,
@@ -127,6 +131,33 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto) {
         Ok(count) => tracing::debug!(event = "reconciler.read_leases_expired", count),
         Err(error) => {
             tracing::error!(event = "reconciler.scan_failed", job = "read_leases", %error)
+        }
+    }
+
+    // 잡 4: 장부 밖 임시 정리 (spec 00 물리 배치). 이름 접두사와 mtime만
+    // 본다 — DB 조회 없음. 크래시가 남긴 스풀·임시 파일이 대상이다.
+    // 대상 디렉토리: OS temp(s3 중계 스풀)와 각 fs storage의 root.
+    let mut temp_dirs = vec![std::env::temp_dir()];
+    match registry::list_storages(pool).await {
+        Ok(rows) => temp_dirs.extend(
+            rows.into_iter()
+                .filter_map(|row| row.root_path.map(std::path::PathBuf::from)),
+        ),
+        Err(error) => tracing::error!(event = "reconciler.scan_failed", job = "temps", %error),
+    }
+    for dir in temp_dirs {
+        match fs_backend::sweep_stale_temps(&dir, TEMP_MAX_AGE).await {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(
+                event = "reconciler.temps_swept",
+                dir = %dir.display(),
+                count,
+            ),
+            Err(error) => tracing::warn!(
+                event = "reconciler.temp_sweep_failed",
+                dir = %dir.display(),
+                %error,
+            ),
         }
     }
 }

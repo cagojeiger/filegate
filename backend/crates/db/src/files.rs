@@ -89,9 +89,9 @@ pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome
     .fetch_one(&mut *tx)
     .await?;
 
-    // 불투명 객체 키 (ADR 001). v0는 file_id 문자열 — 위치가 옮겨져도
-    // 키는 location 행에 남으므로 정체성과 묶이지 않는다.
-    let object_key = file_id.to_string();
+    // 키는 규칙으로 조합해 저장한다 (spec 00 물리 배치). 읽기·삭제는 저장된
+    // 키만 따르므로, 규칙이 바뀌어도 기존 객체는 계속 동작한다 (ADR 001).
+    let object_key = object_key(spec.client_id, &storage.kind, file_id, spec.content_type);
     sqlx::query("INSERT INTO locations (file_id, storage_id, object_key) VALUES ($1, $2, $3)")
         .bind(file_id)
         .bind(&storage_id)
@@ -115,6 +115,76 @@ pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome
         object_key,
         storage,
     })))
+}
+
+/// 물리 배치 규칙 (spec 00): `fg/{client}/{yyyy}/{mm}/[{zz}/]{file_id}[.ext]`.
+/// 날짜는 create 시각(UTC), zz(id 마지막 2 hex)는 fs 전용 팬아웃 —
+/// 한 디렉토리에 파일이 무한히 쌓이지 않게 월 안에서 256칸으로 나눈다.
+/// 경로 안전은 등록부 슬러그 CHECK(client_id)와 허용목록 확장자가 보장한다.
+fn object_key(
+    client_id: &str,
+    storage_kind: &str,
+    file_id: Uuid,
+    content_type: Option<&str>,
+) -> String {
+    let date = chrono::Utc::now().format("%Y/%m");
+    let name = match ext_for(content_type) {
+        Some(ext) => format!("{file_id}.{ext}"),
+        None => file_id.to_string(),
+    };
+    if storage_kind == "fs" {
+        let hex = file_id.simple().to_string();
+        let zz = hex.get(30..).unwrap_or("00").to_owned();
+        format!("fg/{client_id}/{date}/{zz}/{name}")
+    } else {
+        format!("fg/{client_id}/{date}/{name}")
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn s3_key_is_flat_and_fs_key_fans_out_by_trailing_hex() {
+        let id = Uuid::parse_str("0198a3f2-1111-4222-8333-4444555566ab").unwrap();
+        let s3 = object_key("notegate", "s3", id, Some("application/pdf"));
+        assert!(s3.starts_with("fg/notegate/"));
+        assert!(s3.ends_with(&format!("/{id}.pdf")));
+        assert_eq!(s3.matches('/').count(), 4); // fg/client/yyyy/mm/name
+
+        let fs = object_key("notegate", "fs", id, None);
+        assert!(fs.ends_with(&format!("/ab/{id}")));
+        assert_eq!(fs.matches('/').count(), 5);
+    }
+
+    #[test]
+    fn ext_comes_only_from_the_allowlist() {
+        assert_eq!(ext_for(Some("image/png")), Some("png"));
+        assert_eq!(ext_for(Some("application/octet-stream")), None);
+        assert_eq!(ext_for(Some("x/../escape")), None);
+        assert_eq!(ext_for(None), None);
+    }
+}
+
+/// 확장자 허용목록 — content_type 문자열을 자르지 않는다 (spec 00: 경로
+/// 오염 차단). 모르는 타입은 확장자 없음. 선언의 반영일 뿐 검증이 아니다.
+fn ext_for(content_type: Option<&str>) -> Option<&'static str> {
+    Some(match content_type? {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "application/pdf" => "pdf",
+        "text/plain" => "txt",
+        "text/markdown" => "md",
+        "application/json" => "json",
+        "application/zip" => "zip",
+        "video/mp4" => "mp4",
+        "audio/mpeg" => "mp3",
+        _ => return None,
+    })
 }
 
 /// commit의 사후 검증과 read의 위치 해석에 필요한 정보 (조회 전용).
@@ -166,23 +236,21 @@ pub async fn for_access(
 }
 
 /// 읽기 lease 기록 — 모든 바이트 접근은 lease다 (ADR 002, 원장이 감사 기록).
-/// 읽기는 용량을 소비하지 않는다 (spec 00). 중계면 secret 해시와 표현
-/// 파일명이 함께 실린다 — 직결의 서명 파라미터 등가물.
+/// 읽기는 용량을 소비하지 않는다 (spec 00). 중계면 secret 해시가 실린다.
+/// 표현 파일명은 저장하지 않는다 — URL 쿼리로 나가는 표현일 뿐이다 (spec 00).
 pub async fn issue_read_lease(
     pool: &PgPool,
     file_id: Uuid,
     ttl_secs: i64,
     secret_hash: Option<&str>,
-    read_filename: Option<&str>,
 ) -> Result<Uuid, sqlx::Error> {
     sqlx::query_scalar(
-        "INSERT INTO leases (file_id, kind, expires_at, secret_hash, read_filename) \
-         VALUES ($1, 'read', now() + $2 * interval '1 second', $3, $4) RETURNING id",
+        "INSERT INTO leases (file_id, kind, expires_at, secret_hash) \
+         VALUES ($1, 'read', now() + $2 * interval '1 second', $3) RETURNING id",
     )
     .bind(file_id)
     .bind(ttl_secs)
     .bind(secret_hash)
-    .bind(read_filename)
     .fetch_one(pool)
     .await
 }
@@ -210,7 +278,6 @@ pub struct ByteLease {
     pub file_id: Uuid,
     pub declared_size: i64,
     pub content_type: Option<String>,
-    pub read_filename: Option<String>,
     /// purge·회수 뒤에는 위치가 없다 — lease는 유효하되 실물 없음(404 등가).
     pub location: Option<(String, StorageRow)>,
 }
@@ -220,16 +287,9 @@ pub async fn byte_lease(
     lease_id: Uuid,
     secret_hash: &str,
 ) -> Result<Option<ByteLease>, sqlx::Error> {
-    type Row = (
-        String,
-        Uuid,
-        i64,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    );
+    type Row = (String, Uuid, i64, Option<String>, Option<String>);
     let row: Option<Row> = sqlx::query_as(
-        "SELECT le.kind, f.id, f.declared_size, f.content_type, le.read_filename, l.object_key \
+        "SELECT le.kind, f.id, f.declared_size, f.content_type, l.object_key \
          FROM leases le \
          JOIN files f ON f.id = le.file_id \
          LEFT JOIN locations l ON l.file_id = f.id \
@@ -240,8 +300,7 @@ pub async fn byte_lease(
     .bind(secret_hash)
     .fetch_optional(pool)
     .await?;
-    let Some((lease_kind, file_id, declared_size, content_type, read_filename, object_key)) = row
-    else {
+    let Some((lease_kind, file_id, declared_size, content_type, object_key)) = row else {
         return Ok(None);
     };
     let location = match object_key {
@@ -262,7 +321,6 @@ pub async fn byte_lease(
         file_id,
         declared_size,
         content_type,
-        read_filename,
         location,
     }))
 }
