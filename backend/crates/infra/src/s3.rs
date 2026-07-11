@@ -268,3 +268,187 @@ pub async fn head_object(
         }
     }
 }
+
+// ---- multipart (spec 02) ----
+
+/// multipart 세션 시작 — 벤더 upload_id를 돌려준다. lease에 저장되어
+/// 완성(Complete)·중단(Abort)의 핸들이 된다 (파생 불가능한 외부 값).
+pub async fn create_multipart(
+    storage: &S3Storage,
+    object_key: &str,
+    content_type: Option<&str>,
+) -> anyhow::Result<String> {
+    let mut request = storage
+        .client
+        .create_multipart_upload()
+        .bucket(&storage.bucket)
+        .key(object_key);
+    if let Some(content_type) = content_type {
+        request = request.content_type(content_type);
+    }
+    let output = request.send().await?;
+    output
+        .upload_id()
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("create_multipart returned no upload id"))
+}
+
+/// part 쓰기 presigned URL (직결 multipart). presign이므로 공개 주소
+/// 클라이언트로 서명해야 한다 (spec 01 — SigV4는 호스트를 묶는다).
+pub async fn presign_upload_part(
+    storage: &S3Storage,
+    object_key: &str,
+    upload_id: &str,
+    part_number: i32,
+    expires_in: Duration,
+) -> anyhow::Result<String> {
+    let presigned = storage
+        .client
+        .upload_part()
+        .bucket(&storage.bucket)
+        .key(object_key)
+        .upload_id(upload_id)
+        .part_number(part_number)
+        .presigned(PresigningConfig::expires_in(expires_in)?)
+        .await?;
+    Ok(presigned.uri().to_owned())
+}
+
+/// 중계 s3의 part 전달 — 스풀 파일에서 벤더 part로 (spec 02: 도착 즉시
+/// 올리고 스풀을 지워 디스크 점유를 유계로). 반환: 벤더 part ETag.
+pub async fn upload_part_from_path(
+    storage: &S3Storage,
+    object_key: &str,
+    upload_id: &str,
+    part_number: i32,
+    path: &std::path::Path,
+) -> anyhow::Result<String> {
+    let body = aws_sdk_s3::primitives::ByteStream::from_path(path).await?;
+    let output = storage
+        .client
+        .upload_part()
+        .bucket(&storage.bucket)
+        .key(object_key)
+        .upload_id(upload_id)
+        .part_number(part_number)
+        .body(body)
+        .send()
+        .await?;
+    Ok(output
+        .e_tag()
+        .ok_or_else(|| anyhow::anyhow!("upload_part returned no etag"))?
+        .trim_matches('"')
+        .to_owned())
+}
+
+/// 벤더에 실재하는 part 목록 (직결 commit의 대조 재료): (번호, 크기, ETag).
+/// 페이지네이션을 따른다 — part는 최대 10,000개다.
+pub async fn list_parts(
+    storage: &S3Storage,
+    object_key: &str,
+    upload_id: &str,
+) -> anyhow::Result<Vec<(i32, i64, String)>> {
+    let mut parts = Vec::new();
+    let mut marker: Option<String> = None;
+    loop {
+        let mut request = storage
+            .client
+            .list_parts()
+            .bucket(&storage.bucket)
+            .key(object_key)
+            .upload_id(upload_id);
+        if let Some(marker) = &marker {
+            request = request.part_number_marker(marker);
+        }
+        let output = request.send().await?;
+        for part in output.parts() {
+            let number = part
+                .part_number()
+                .ok_or_else(|| anyhow::anyhow!("list_parts returned a part without number"))?;
+            let size = part
+                .size()
+                .ok_or_else(|| anyhow::anyhow!("list_parts returned a part without size"))?;
+            let etag = part
+                .e_tag()
+                .ok_or_else(|| anyhow::anyhow!("list_parts returned a part without etag"))?
+                .trim_matches('"')
+                .to_owned();
+            parts.push((number, size, etag));
+        }
+        if output.is_truncated() == Some(true) {
+            marker = output.next_part_number_marker().map(str::to_owned);
+        } else {
+            break;
+        }
+    }
+    Ok(parts)
+}
+
+/// 완성 — 검증된 part 목록으로 조립을 선언한다 (조립은 벤더 몫).
+/// 반환: multipart ETag (digest-of-digests, `-N` 접미 — 전체 MD5가 아니다).
+pub async fn complete_multipart(
+    storage: &S3Storage,
+    object_key: &str,
+    upload_id: &str,
+    parts: &[(i32, String)],
+) -> anyhow::Result<String> {
+    use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+    let completed = CompletedMultipartUpload::builder()
+        .set_parts(Some(
+            parts
+                .iter()
+                .map(|(number, etag)| {
+                    CompletedPart::builder()
+                        .part_number(*number)
+                        .e_tag(etag)
+                        .build()
+                })
+                .collect(),
+        ))
+        .build();
+    let output = storage
+        .client
+        .complete_multipart_upload()
+        .bucket(&storage.bucket)
+        .key(object_key)
+        .upload_id(upload_id)
+        .multipart_upload(completed)
+        .send()
+        .await?;
+    Ok(output
+        .e_tag()
+        .ok_or_else(|| anyhow::anyhow!("complete_multipart returned no etag"))?
+        .trim_matches('"')
+        .to_owned())
+}
+
+/// 중단 — 미완성 part의 점유·과금을 제거한다 (회수 경로, spec 02).
+/// 이미 없는 세션(NoSuchUpload)도 성공 — 회수는 멱등하다.
+pub async fn abort_multipart(
+    storage: &S3Storage,
+    object_key: &str,
+    upload_id: &str,
+) -> anyhow::Result<()> {
+    let result = storage
+        .client
+        .abort_multipart_upload()
+        .bucket(&storage.bucket)
+        .key(object_key)
+        .upload_id(upload_id)
+        .send()
+        .await;
+    match result {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let gone = error
+                .raw_response()
+                .map(|response| response.status().as_u16() == 404)
+                .unwrap_or(false);
+            if gone {
+                Ok(())
+            } else {
+                Err(error.into())
+            }
+        }
+    }
+}

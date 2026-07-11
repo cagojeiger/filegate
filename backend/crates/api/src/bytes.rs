@@ -55,6 +55,8 @@ struct SecretQuery {
     /// 읽기의 표현 파일명 — 발급이 URL에 실어 보낸 것 (spec 00: 저장하지
     /// 않는다). 소지자가 바꿔도 자기 다운로드의 저장 이름만 달라진다.
     f: Option<String>,
+    /// multipart part 번호 (spec 02) — multipart lease의 PUT에 필수.
+    part: Option<i32>,
 }
 
 /// 브라우저 preflight — presigned 직결에서 저장소가 하던 응대의 등가물.
@@ -83,17 +85,40 @@ async fn upload(
             "content-length required",
         ));
     };
+
+    let Some((object_key, storage_row)) = &lease.location else {
+        return Err(not_found("object not found"));
+    };
+    let backend = backend_from_row(&state.crypto, storage_row)?;
+
+    // multipart lease면 part 수신 경로로 (spec 02) — 계측 계약은 같고
+    // 단위가 part다.
+    if let Some(part_size) = lease.part_size {
+        return upload_part(
+            &state,
+            lease_id,
+            &lease,
+            part_size,
+            query.part,
+            content_length,
+            object_key,
+            &backend,
+            body,
+        )
+        .await;
+    }
+    if query.part.is_some() {
+        return Err(status(
+            StatusCode::BAD_REQUEST,
+            "part is only valid for multipart uploads",
+        ));
+    }
     if content_length != lease.declared_size {
         return Err(status(
             StatusCode::BAD_REQUEST,
             "content-length must equal the declared size",
         ));
     }
-
-    let Some((object_key, storage_row)) = &lease.location else {
-        return Err(not_found("object not found"));
-    };
-    let backend = backend_from_row(&state.crypto, storage_row)?;
 
     // 쓰기 목적지: fs는 대상 root의 임시 파일(같은 마운트 rename),
     // s3 중계는 로컬 스풀을 거친다.
@@ -148,6 +173,115 @@ async fn upload(
     files::record_upload(&state.pool, lease_id, written, &md5_hex).await?;
     tracing::info!(event = "bytes.uploaded", lease = %lease_id, file = %lease.file_id, size = written);
 
+    let mut response = StatusCode::OK.into_response();
+    if let Ok(value) = HeaderValue::from_str(&format!("\"{md5_hex}\"")) {
+        response.headers_mut().insert(header::ETAG, value);
+    }
+    Ok(response)
+}
+
+/// multipart part 수신 (spec 02): 고유 스풀에 계측해 받고, part claim(행 락)
+/// 아래에서만 승격한다 — 같은 part 동시 PUT의 인터리브 손상을 단일 PUT의
+/// temp 충돌과 같은 처방으로 막는다. fs는 대상 임시 파일의 자기 offset에,
+/// s3는 벤더 part로 즉시 전달해 스풀 점유를 유계로 유지한다.
+#[allow(clippy::too_many_arguments)]
+async fn upload_part(
+    state: &AppState,
+    lease_id: Uuid,
+    lease: &ByteLease,
+    part_size: i64,
+    part: Option<i32>,
+    content_length: i64,
+    object_key: &str,
+    backend: &StorageBackend,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let Some(part_no) = part else {
+        return Err(status(
+            StatusCode::BAD_REQUEST,
+            "part number required for multipart uploads",
+        ));
+    };
+    let count = files::part_count(lease.declared_size, part_size);
+    if part_no < 1 || part_no > count {
+        return Err(status(StatusCode::BAD_REQUEST, "part number out of range"));
+    }
+    let expected = files::part_expected_size(lease.declared_size, part_size, part_no);
+    if content_length != expected {
+        return Err(status(
+            StatusCode::BAD_REQUEST,
+            "content-length must equal the part size",
+        ));
+    }
+
+    let temp_root = match backend {
+        StorageBackend::Fs { root } => root.clone(),
+        StorageBackend::S3 { .. } => std::env::temp_dir(),
+    };
+    let temp_name = format!("{lease_id}-p{part_no}-{}", Uuid::new_v4());
+    let (temp_path, file) = fs_backend::begin_write(&temp_root, &temp_name)
+        .await
+        .map_err(internal)?;
+    let mut writer = tokio::io::BufWriter::with_capacity(STREAM_BUF_SIZE, file);
+    let (written, md5_hex) = stream_to_temp(body, &mut writer, &temp_path, expected).await?;
+    if let Err(error) = writer.flush().await {
+        fs_backend::abort_write(&temp_path).await;
+        return Err(internal(error));
+    }
+    drop(writer.into_inner());
+
+    match backend {
+        StorageBackend::Fs { root } => {
+            // 같은 part 동시 승격을 직렬화한다 — 인터리브 손상 방지 (spec 02).
+            // 락은 로컬 디스크 쓰기에만 걸린다 (네트워크 없음). claim이 drop되면
+            // 롤백이라 실패한 승격은 재시도가 덮어쓴다.
+            let claim = match files::claim_part(&state.pool, lease_id, part_no).await {
+                Ok(claim) => claim,
+                Err(error) => {
+                    fs_backend::abort_write(&temp_path).await;
+                    return Err(error.into());
+                }
+            };
+            let target = fs_backend::multipart_temp(root, &lease_id.to_string());
+            let promoted = fs_backend::write_part_at(
+                &target,
+                files::part_offset(part_size, part_no),
+                &temp_path,
+            )
+            .await;
+            fs_backend::abort_write(&temp_path).await;
+            if let Err(error) = promoted {
+                return Err(internal(error));
+            }
+            claim.done(written, &md5_hex).await?;
+        }
+        StorageBackend::S3 { spec, .. } => {
+            let Some(upload_id) = &lease.upload_id else {
+                fs_backend::abort_write(&temp_path).await;
+                return Err(internal("multipart lease has no upload id"));
+            };
+            // 네트워크(UploadPart)는 DB 트랜잭션 밖에서 한다 — 커넥션을 전송
+            // 내내 붙잡지 않는다 (files.rs 모듈 불변식). 벤더가 part 번호로
+            // last-write-wins 하므로 승격 직렬화 락도 불필요하고, 기록은
+            // 전송이 끝난 뒤 짧은 upsert 하나다.
+            let storage = s3_client(spec, Address::Internal);
+            let uploaded = filegate_infra::s3_upload_part_from_path(
+                &storage, object_key, upload_id, part_no, &temp_path,
+            )
+            .await;
+            fs_backend::abort_write(&temp_path).await;
+            let vendor_etag = uploaded.map_err(ApiError::Storage)?;
+            // 실측 md5와 벤더 part ETag 대조 — 전달 중 손상을 여기서 끊는다.
+            if !vendor_etag.eq_ignore_ascii_case(&md5_hex) {
+                return Err(ApiError::Storage(anyhow::anyhow!(
+                    "vendor part etag does not match measured md5"
+                )));
+            }
+            files::record_part_done(&state.pool, lease_id, part_no, written, &vendor_etag).await?;
+        }
+    }
+
+    tracing::info!(event = "bytes.part_uploaded", lease = %lease_id, file = %lease.file_id, part = part_no, size = written);
     let mut response = StatusCode::OK.into_response();
     if let Ok(value) = HeaderValue::from_str(&format!("\"{md5_hex}\"")) {
         response.headers_mut().insert(header::ETAG, value);

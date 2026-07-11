@@ -58,6 +58,11 @@ CREATE TABLE leases (
                   CHECK (state IN ('issued', 'committed', 'expired', 'canceled')),
     expires_at    timestamptz NOT NULL,
     secret_hash   text CHECK (secret_hash ~ '^sha256:[0-9a-f]{64}$'),
+    -- multipart relay의 write secret raw — parts() 발급이 매번 같은 secret으로
+    -- URL을 조립해야 하므로(회전 금지, spec 02), 업로드 중에만 원문을 보관한다.
+    -- 종료(commit·회수) 시 NULL로 지운다. 단일 PUT relay는 URL 1회 발급이라
+    -- 이 컬럼을 쓰지 않는다(해시만).
+    write_secret  text,
     uploaded_size bigint CHECK (uploaded_size >= 0),
     uploaded_md5  text,
     upload_id     text,

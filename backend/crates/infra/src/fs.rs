@@ -117,3 +117,43 @@ pub async fn delete(root: &Path, object_key: &str) -> anyhow::Result<()> {
         Err(e) => Err(e.into()),
     }
 }
+
+// ---- multipart (spec 02) ----
+
+/// multipart 대상 임시 파일 경로 — 결정적 이름이라 승격·commit·회수가
+/// 같은 파일을 본다. `.fg-tmp-` 접두사를 상속하므로 버려지면 mtime sweep이
+/// 줍는다 (진행 중엔 part 쓰기가 mtime을 갱신해 걸리지 않는다).
+pub fn multipart_temp(root: &Path, lease_id: &str) -> PathBuf {
+    root.join(format!(".fg-tmp-mp-{lease_id}"))
+}
+
+/// part 승격 — part 스풀을 대상 임시 파일의 자기 offset에 기록한다.
+/// 범위가 겹치지 않아 병렬·멀티 pod 안전하고, 같은 part의 동시 승격
+/// 직렬화는 호출자의 part claim(행 락) 몫이다 (spec 02).
+pub async fn write_part_at(target: &Path, offset: u64, source: &Path) -> anyhow::Result<()> {
+    use tokio::io::AsyncSeekExt;
+    // truncate 금지 — 다른 part들의 offset 기록이 이미 이 파일에 있다.
+    let mut dst = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(target)
+        .await?;
+    dst.seek(std::io::SeekFrom::Start(offset)).await?;
+    let mut src = fs::File::open(source).await?;
+    tokio::io::copy(&mut src, &mut dst).await?;
+    dst.flush().await?;
+    dst.sync_all().await?;
+    Ok(())
+}
+
+/// 경로 기반 확정 — multipart 대상 임시 파일을 실체 경로로 rename.
+/// (단일 PUT의 commit_write와 같은 계약, 핸들 대신 경로를 받는 변형.)
+pub async fn commit_path(root: &Path, temp: &Path, object_key: &str) -> anyhow::Result<()> {
+    let target = object_path(root, object_key);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    fs::rename(temp, target).await?;
+    Ok(())
+}

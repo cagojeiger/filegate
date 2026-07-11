@@ -24,6 +24,7 @@ pub fn v1_routes() -> Router<AppState> {
         .route("/files", post(files::create))
         .route("/files/{id}", get(files::stat).delete(files::delete))
         .route("/files/{id}/commit", post(files::commit))
+        .route("/files/{id}/parts", post(files::parts))
         .route("/files/{id}/read", post(files::read))
 }
 

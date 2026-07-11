@@ -29,6 +29,10 @@ const BATCH_LIMIT: i64 = 20;
 /// 진행 중 업로드의 유휴는 30초에 끊기므로(bytes) 여유가 크다.
 const TEMP_MAX_AGE: Duration = Duration::from_secs(48 * 3600);
 
+/// 종료 lease의 보존 기간 — 이보다 오래된 issued 아닌 lease는 GC한다.
+/// CASCADE로 lease_parts가 함께 사라진다. 어떤 진행 중 업로드보다 넉넉하다.
+const LEASE_RETENTION: Duration = Duration::from_secs(24 * 3600);
+
 pub fn spawn(
     pool: PgPool,
     crypto: Arc<Crypto>,
@@ -48,6 +52,10 @@ pub fn spawn(
                     return;
                 }
                 _ = ticker.tick() => {
+                    // pod 로컬 OS temp의 크래시 스풀은 락 없이 매 pod가 직접
+                    // 치운다 — 자기 디스크는 자기 몫이고, 락 승자만 치우면
+                    // 락을 못 이긴 pod의 잔여물이 밀린다.
+                    sweep_local_temps().await;
                     let result = filegate_db::with_reconciler_lock(&pool, || async {
                         run_jobs(&pool, &crypto).await;
                     })
@@ -134,36 +142,65 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto) {
         }
     }
 
-    // 잡 4: 장부 밖 임시 정리 (spec 00 물리 배치). 이름 접두사와 mtime만
-    // 본다 — DB 조회 없음. 크래시가 남긴 스풀·임시 파일이 대상이다.
-    // 대상 디렉토리: OS temp(s3 중계 스풀)와 각 fs storage의 root.
-    let mut temp_dirs = vec![std::env::temp_dir()];
+    // 잡 5: 종료 lease GC — issued가 아닌 오래된 lease를 삭제해 lease·
+    // lease_parts(CASCADE)의 무한 누적을 막는다 (spec 02). files 행은 남긴다
+    // (stat 계약). 회계와 무관하다 — 이미 정산된 lease의 원장 정리일 뿐이다.
+    match files::prune_terminal_leases(pool, LEASE_RETENTION.as_secs() as i64, BATCH_LIMIT).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(event = "reconciler.leases_pruned", count),
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", job = "prune_leases", %error)
+        }
+    }
+
+    // 잡 4: 공유 fs root의 장부 밖 임시 정리 (spec 00 물리 배치). 이름
+    // 접두사와 mtime만 본다 — DB 조회 없음. 공유 마운트라 락 승자 하나만
+    // 훑으면 된다. pod 로컬 OS temp는 tick 루프에서 각 pod가 스스로 치운다.
     match registry::list_storages(pool).await {
-        Ok(rows) => temp_dirs.extend(
-            rows.into_iter()
-                .filter_map(|row| row.root_path.map(std::path::PathBuf::from)),
-        ),
+        Ok(rows) => {
+            let roots = rows
+                .into_iter()
+                .filter_map(|row| row.root_path.map(std::path::PathBuf::from));
+            for dir in roots {
+                match fs_backend::sweep_stale_temps(&dir, TEMP_MAX_AGE).await {
+                    Ok(0) => {}
+                    Ok(count) => tracing::info!(
+                        event = "reconciler.temps_swept",
+                        dir = %dir.display(),
+                        count,
+                    ),
+                    Err(error) => tracing::warn!(
+                        event = "reconciler.temp_sweep_failed",
+                        dir = %dir.display(),
+                        %error,
+                    ),
+                }
+            }
+        }
         Err(error) => tracing::error!(event = "reconciler.scan_failed", job = "temps", %error),
     }
-    for dir in temp_dirs {
-        match fs_backend::sweep_stale_temps(&dir, TEMP_MAX_AGE).await {
-            Ok(0) => {}
-            Ok(count) => tracing::info!(
-                event = "reconciler.temps_swept",
-                dir = %dir.display(),
-                count,
-            ),
-            Err(error) => tracing::warn!(
-                event = "reconciler.temp_sweep_failed",
-                dir = %dir.display(),
-                %error,
-            ),
-        }
+}
+
+/// pod 로컬 스풀 정리 — OS temp의 `.fg-tmp-*` 중 늙은 것. DB·락과 무관하게
+/// 매 tick, 모든 pod에서 돈다 (s3 중계 스풀은 pod 로컬 디스크에 살므로).
+async fn sweep_local_temps() {
+    let dir = std::env::temp_dir();
+    match fs_backend::sweep_stale_temps(&dir, TEMP_MAX_AGE).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(event = "reconciler.local_temps_swept", count),
+        Err(error) => tracing::warn!(
+            event = "reconciler.temp_sweep_failed",
+            dir = %dir.display(),
+            %error,
+        ),
     }
 }
 
 /// 실물 제거 — 등록부에서 백엔드를 복원해 내부 경로로 지운다.
 /// s3 DeleteObject·fs remove 모두 없는 대상에 성공하므로 멱등이다.
+/// multipart 회수 재료가 있으면 함께 치운다 (spec 02): s3는 벤더 세션
+/// 중단(중단하지 않은 미완성 part는 보이지 않게 과금된다), fs는 offset
+/// 기록 중이던 대상 임시 파일.
 async fn sweep_object(
     pool: &PgPool,
     crypto: &Crypto,
@@ -175,9 +212,17 @@ async fn sweep_object(
     match crate::storage_access::backend_from_row(crypto, &row)? {
         crate::storage_access::StorageBackend::S3 { spec, .. } => {
             let storage = s3_client(&spec, Address::Internal);
+            if let Some(upload_id) = &candidate.upload_id {
+                filegate_infra::s3_abort_multipart(&storage, &candidate.object_key, upload_id)
+                    .await?;
+            }
             s3_delete_object(&storage, &candidate.object_key).await
         }
         crate::storage_access::StorageBackend::Fs { root } => {
+            if let Some(lease_id) = &candidate.write_lease_id {
+                let temp = fs_backend::multipart_temp(&root, &lease_id.to_string());
+                fs_backend::abort_write(&temp).await;
+            }
             fs_backend::delete(&root, &candidate.object_key).await
         }
     }

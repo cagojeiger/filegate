@@ -63,6 +63,8 @@ async fn main() -> anyhow::Result<()> {
         security: config.security.clone(),
         crypto,
         public_url: config.server.public_url.clone(),
+        multipart_threshold: config.server.multipart_threshold_bytes,
+        part_size: config.server.part_size_bytes,
     };
     let http_shutdown = shutdown.clone().cancelled_owned();
     let server = async move {

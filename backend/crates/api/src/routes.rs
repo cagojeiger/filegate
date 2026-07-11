@@ -40,6 +40,10 @@ pub struct AppState {
     /// 중계 바이트 URL의 공개 베이스 (FILEGATE_PUBLIC_URL). 중계 storage
     /// 등록·발급이 요구한다 — 없으면 등록이 400으로 거부된다.
     pub public_url: Option<String>,
+    /// 이 선언 크기를 넘으면 create가 multipart를 발급한다 (spec 02).
+    pub multipart_threshold: i64,
+    /// multipart part 크기 — create 시점 값이 업로드별로 동결된다 (spec 02).
+    pub part_size: i64,
 }
 
 /// `Authorization: Bearer <token>`에서 토큰을 꺼낸다 — 두 인증 미들웨어
