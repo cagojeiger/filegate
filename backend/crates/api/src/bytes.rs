@@ -29,6 +29,11 @@ use uuid::Uuid;
 use crate::routes::AppState;
 use crate::storage_access::{backend_from_row, StorageBackend};
 
+/// 청크 사이 유휴 상한. lease 만료는 진입(authorize) 시에만 검사되므로
+/// 진행 중 연결의 수명은 이 타임아웃이 다스린다 — 바이트를 극소량씩
+/// 흘리며 연결·임시 파일을 점유하는 것을 끊는다.
+const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub fn routes() -> Router<AppState> {
     Router::new().route("/{lease_id}", put(upload).get(download).options(preflight))
 }
@@ -84,46 +89,19 @@ async fn upload(
         StorageBackend::Fs { root } => root.clone(),
         StorageBackend::S3 { .. } => std::env::temp_dir(),
     };
-    let temp_name = lease_id.to_string();
+    // 같은 lease의 재PUT이 겹쳐도 서로 다른 임시 파일에 쓴다 — 이름을
+    // lease_id로만 지으면 truncate로 두 스트림이 섞인 손상본이 커밋될 수 있다.
+    let temp_name = format!("{lease_id}-{}", Uuid::new_v4());
     let (temp_path, mut file) = match fs_backend::begin_write(&temp_root, &temp_name).await {
         Ok(pair) => pair,
         Err(error) => return internal(error.to_string()),
     };
 
-    // 스트림 통과: MD5·크기 계산 + 선언 크기 초과 시 즉시 차단 (ADR 002).
-    let mut hasher = Md5::new();
-    let mut written: i64 = 0;
-    let mut stream = body.into_data_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = match chunk {
-            Ok(chunk) => chunk,
-            Err(_) => {
-                fs_backend::abort_write(&temp_path).await;
-                return respond(StatusCode::BAD_REQUEST, "upload stream aborted");
-            }
+    let (written, md5_hex) =
+        match stream_to_temp(body, &mut file, &temp_path, lease.declared_size).await {
+            Ok(measured) => measured,
+            Err(response) => return response,
         };
-        written += chunk.len() as i64;
-        if written > lease.declared_size {
-            fs_backend::abort_write(&temp_path).await;
-            return respond(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "upload exceeds the declared size",
-            );
-        }
-        hasher.update(&chunk);
-        if let Err(error) = file.write_all(&chunk).await {
-            fs_backend::abort_write(&temp_path).await;
-            return internal(error.to_string());
-        }
-    }
-    if written != lease.declared_size {
-        fs_backend::abort_write(&temp_path).await;
-        return respond(
-            StatusCode::BAD_REQUEST,
-            "upload is smaller than the declared size",
-        );
-    }
-    let md5_hex = format!("{:x}", hasher.finalize());
 
     // 뒷단 확정: fs는 rename, s3는 스풀에서 업로드.
     match &backend {
@@ -164,6 +142,59 @@ async fn upload(
         response.headers_mut().insert(header::ETAG, value);
     }
     with_cors(response)
+}
+
+/// 스트림 통과 계측 (ADR 002): body를 임시 파일에 쓰며 크기·MD5를 실측하고,
+/// 선언 크기를 넘는 순간 끊는다 — 직결(presigned)이 못 하는 사전 차단.
+/// 유휴·단절·초과·미달 등 모든 실패는 임시 파일을 지우고 완성된 응답으로
+/// 돌아간다. 성공 시 (실측 크기, md5 hex)를 돌려준다.
+async fn stream_to_temp(
+    body: Body,
+    file: &mut tokio::fs::File,
+    temp_path: &std::path::Path,
+    declared_size: i64,
+) -> Result<(i64, String), Response> {
+    let mut hasher = Md5::new();
+    let mut written: i64 = 0;
+    let mut stream = body.into_data_stream();
+    loop {
+        let chunk = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
+            Err(_) => {
+                fs_backend::abort_write(temp_path).await;
+                return Err(respond(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "upload stream idle for too long",
+                ));
+            }
+            Ok(None) => break,
+            Ok(Some(Err(_))) => {
+                fs_backend::abort_write(temp_path).await;
+                return Err(respond(StatusCode::BAD_REQUEST, "upload stream aborted"));
+            }
+            Ok(Some(Ok(chunk))) => chunk,
+        };
+        written += chunk.len() as i64;
+        if written > declared_size {
+            fs_backend::abort_write(temp_path).await;
+            return Err(respond(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "upload exceeds the declared size",
+            ));
+        }
+        hasher.update(&chunk);
+        if let Err(error) = file.write_all(&chunk).await {
+            fs_backend::abort_write(temp_path).await;
+            return Err(internal(error.to_string()));
+        }
+    }
+    if written != declared_size {
+        fs_backend::abort_write(temp_path).await;
+        return Err(respond(
+            StatusCode::BAD_REQUEST,
+            "upload is smaller than the declared size",
+        ));
+    }
+    Ok((written, format!("{:x}", hasher.finalize())))
 }
 
 async fn download(
