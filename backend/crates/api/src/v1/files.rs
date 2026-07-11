@@ -44,7 +44,19 @@ pub(super) struct CreateBody {
 struct CreateOut {
     file_id: Uuid,
     /// 만료가 있는 PUT URL. URL 구조는 계약이 아니다 (spec 00).
-    put_url: String,
+    /// multipart면 없다 — 접근은 parts 발급으로 받는다 (spec 02).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    put_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    multipart: Option<MultipartOut>,
+}
+
+/// multipart 서술자 (spec 02) — 서비스는 이대로 자르고, 구조에 의존하지
+/// 않는다. part 접근은 POST /v1/files/{id}/parts로 받는다.
+#[derive(Serialize)]
+struct MultipartOut {
+    part_size: i64,
+    part_count: i32,
 }
 
 #[derive(Serialize)]
@@ -62,7 +74,21 @@ pub(super) async fn create(
     if body.declared_size < 0 {
         return Err(bad_request("declared_size must be >= 0"));
     }
-    if body.declared_size > MAX_DECLARED_SIZE {
+    // 임계값을 넘으면 multipart다 (spec 02). 크기 상한은 모드가 정한다:
+    // 단일 PUT은 벤더 한계 5GiB, multipart는 part × 10,000 (벤더 part 수 한계).
+    let multipart = body.declared_size > state.multipart_threshold;
+    if multipart {
+        if body.declared_size > state.part_size.saturating_mul(10_000) {
+            return Err(bad_request("declared_size exceeds the multipart limit"));
+        }
+        // 전체 MD5는 multipart의 어떤 모드에서도 실측되지 않는다 —
+        // 검증 단위는 part다 (ADR 002). 받아주는 것이 거짓 계약이라 400.
+        if body.declared_md5.is_some() {
+            return Err(bad_request(
+                "declared_md5 is not accepted for multipart uploads (verification is per part)",
+            ));
+        }
+    } else if body.declared_size > MAX_DECLARED_SIZE {
         return Err(bad_request(
             "declared_size exceeds the single-upload limit (5 GiB)",
         ));
@@ -91,6 +117,7 @@ pub(super) async fn create(
         content_type: body.content_type.as_deref(),
         declared_md5: body.declared_md5.as_deref(),
         lease_ttl_secs: WRITE_LEASE_TTL.as_secs() as i64,
+        part_size: multipart.then_some(state.part_size),
     };
     let created = match files::create(&state.pool, spec).await? {
         CreateOutcome::Created(created) => created,
@@ -109,6 +136,42 @@ pub(super) async fn create(
     // presign(SigV4는 호스트를 묶는다, spec 01), 중계면 filegate 바이트
     // 엔드포인트 URL + lease secret.
     let backend = backend_from_row(&state.crypto, &created.storage)?;
+
+    if multipart {
+        // multipart는 PUT URL 대신 서술자를 준다 — part 접근은 parts 발급으로
+        // (spec 02). s3 계열은 지금 벤더 세션을 열어 핸들을 lease에 기록한다.
+        if let StorageBackend::S3 { spec, .. } = &backend {
+            let storage = s3_client(spec, Address::Internal);
+            let upload_id = filegate_infra::s3_create_multipart(
+                &storage,
+                &created.object_key,
+                body.content_type.as_deref(),
+            )
+            .await
+            .map_err(ApiError::Storage)?;
+            files::attach_upload_id(&state.pool, created.lease_id, &upload_id).await?;
+        }
+        tracing::info!(
+            event = "file.created",
+            file = %created.file_id,
+            client = %client.0,
+            storage = %created.storage.id,
+            multipart = true,
+        );
+        return Ok((
+            StatusCode::CREATED,
+            Json(CreateOut {
+                file_id: created.file_id,
+                put_url: None,
+                multipart: Some(MultipartOut {
+                    part_size: state.part_size,
+                    part_count: files::part_count(body.declared_size, state.part_size),
+                }),
+            }),
+        )
+            .into_response());
+    }
+
     let put_url = match &backend {
         StorageBackend::S3 {
             spec,
@@ -142,10 +205,219 @@ pub(super) async fn create(
         StatusCode::CREATED,
         Json(CreateOut {
             file_id: created.file_id,
-            put_url,
+            put_url: Some(put_url),
+            multipart: None,
         }),
     )
         .into_response())
+}
+
+/// multipart 확정 (spec 02): part의 진실 원천은 filegate다 — 서비스는 part
+/// 목록을 제출하지 않는다. 중계는 자기 원장(part 실측), 직결은 벤더
+/// ListParts를 대조해 완성한다. 미완성이면 400과 함께 pending에 남는다.
+async fn commit_multipart(
+    state: &AppState,
+    client: &ClientId,
+    file_id: Uuid,
+    file: &filegate_db::files::FileAccess,
+    part_size: i64,
+    backend: &StorageBackend,
+) -> Result<Response, ApiError> {
+    let count = files::part_count(file.declared_size, part_size);
+    let Some((lease_id, upload_id)) = files::write_lease(&state.pool, file_id).await? else {
+        return Err(internal("multipart file has no write lease"));
+    };
+
+    let etag = match backend {
+        StorageBackend::S3 {
+            spec,
+            force_relay: false,
+        } => {
+            // 직결: 실물은 벤더에 있다 — ListParts가 대조 재료다.
+            let upload_id =
+                upload_id.ok_or_else(|| internal("direct multipart lease has no upload id"))?;
+            let storage = s3_client(spec, Address::Internal);
+            let vendor = filegate_infra::s3_list_parts(&storage, &file.object_key, &upload_id)
+                .await
+                .map_err(ApiError::Storage)?;
+            if vendor.len() != count as usize {
+                return Err(bad_request("upload is incomplete (missing parts)"));
+            }
+            for (n, size, _) in &vendor {
+                if *size != files::part_expected_size(file.declared_size, part_size, *n) {
+                    return Err(bad_request("part size does not match declaration"));
+                }
+            }
+            let listed: Vec<(i32, String)> =
+                vendor.into_iter().map(|(n, _, etag)| (n, etag)).collect();
+            filegate_infra::s3_complete_multipart(&storage, &file.object_key, &upload_id, &listed)
+                .await
+                .map_err(ApiError::Storage)?
+        }
+        _ => {
+            // 중계: 원장(part 실측)이 대조 재료다.
+            let parts = files::done_parts(&state.pool, lease_id).await?;
+            if parts.len() != count as usize {
+                return Err(bad_request("upload is incomplete (missing parts)"));
+            }
+            for (n, size, _) in &parts {
+                if *size != files::part_expected_size(file.declared_size, part_size, *n) {
+                    return Err(bad_request("part size does not match declaration"));
+                }
+            }
+            match backend {
+                StorageBackend::S3 { spec, .. } => {
+                    // 중계 s3: part는 도착 즉시 벤더에 올라가 있다 — 완성 선언만.
+                    let upload_id = upload_id
+                        .ok_or_else(|| internal("relay multipart lease has no upload id"))?;
+                    let storage = s3_client(spec, Address::Internal);
+                    let ledger: Vec<(i32, String)> =
+                        parts.into_iter().map(|(n, _, md5)| (n, md5)).collect();
+                    filegate_infra::s3_complete_multipart(
+                        &storage,
+                        &file.object_key,
+                        &upload_id,
+                        &ledger,
+                    )
+                    .await
+                    .map_err(ApiError::Storage)?
+                }
+                StorageBackend::Fs { root } => {
+                    // 중계 fs: offset 기록이 이미 조립이다 — rename 한 번 (spec 02).
+                    let temp = filegate_infra::fs::multipart_temp(root, &lease_id.to_string());
+                    filegate_infra::fs::commit_path(root, &temp, &file.object_key)
+                        .await
+                        .map_err(internal)?;
+                    // ETag는 S3 multipart와 같은 합성 규칙: md5(part md5들) + "-N".
+                    composite_etag(&parts)
+                }
+            }
+        }
+    };
+
+    if files::finalize_commit(
+        &state.pool,
+        file_id,
+        &file.storage.id,
+        file.declared_size,
+        &etag,
+    )
+    .await?
+    {
+        tracing::info!(event = "file.committed", file = %file_id, client = %client.0, multipart = true);
+        return Ok(committed_response(file_id, etag));
+    }
+    // 전이 경합의 패자 — 현재 상태로 멱등 응답 (단일 PUT commit과 동일).
+    let now = files::for_access(&state.pool, &client.0, file_id)
+        .await?
+        .ok_or_else(|| not_found("file not found"))?;
+    match now.state.as_str() {
+        "active" => Ok(committed_response(file_id, now.etag.unwrap_or_default())),
+        _ => Err(conflict("file is not committable")),
+    }
+}
+
+/// S3 multipart ETag와 같은 합성 규칙: 각 part MD5의 raw 바이트를 이어
+/// md5한 값 + "-{part 수}". fs 중계의 기록용 — 전체 MD5가 아님이 표식된다.
+fn composite_etag(parts: &[(i32, i64, String)]) -> String {
+    use md5::Digest as _;
+    let mut hasher = md5::Md5::new();
+    for (_, _, hex) in parts {
+        let mut bytes = Vec::with_capacity(hex.len() / 2);
+        for pair in hex.as_bytes().chunks_exact(2) {
+            if let [high, low] = pair {
+                let high = (*high as char).to_digit(16).unwrap_or(0) as u8;
+                let low = (*low as char).to_digit(16).unwrap_or(0) as u8;
+                bytes.push((high << 4) | low);
+            }
+        }
+        hasher.update(&bytes);
+    }
+    format!("{:x}-{}", hasher.finalize(), parts.len())
+}
+
+#[derive(Deserialize)]
+pub(super) struct PartsBody {
+    parts: Vec<i32>,
+}
+
+#[derive(Serialize)]
+struct PartOut {
+    part: i32,
+    url: String,
+}
+
+/// part 접근 발급 = 갱신 = 재개 (spec 02). 같은 part의 재요청이 재시도이고,
+/// 발급마다 write lease 만료가 연장된다 — 발급이 이어지는 한 회수되지 않는다.
+/// 중계는 발급마다 lease secret을 새로 민팅한다 (서버는 raw를 저장하지 않으므로,
+/// ADR 003) — 최신 발급 배치의 URL만 유효하다.
+pub(super) async fn parts(
+    State(state): State<AppState>,
+    Extension(client): Extension<ClientId>,
+    Path(file_id): Path<Uuid>,
+    Json(body): Json<PartsBody>,
+) -> Result<Response, ApiError> {
+    let file = files::for_access(&state.pool, &client.0, file_id)
+        .await?
+        .ok_or_else(|| not_found("file not found"))?;
+    if file.state != "pending" {
+        return Err(conflict("file is not pending"));
+    }
+    let Some(part_size) = file.part_size else {
+        return Err(bad_request("file is not a multipart upload"));
+    };
+    let count = files::part_count(file.declared_size, part_size);
+    if body.parts.is_empty() || body.parts.len() > 100 {
+        return Err(bad_request("request 1 to 100 parts at a time"));
+    }
+    if body.parts.iter().any(|&n| n < 1 || n > count) {
+        return Err(bad_request("part number out of range"));
+    }
+    let Some((lease_id, upload_id)) = files::write_lease(&state.pool, file_id).await? else {
+        return Err(internal("multipart file has no write lease"));
+    };
+    // 갱신 (ADR 002): 살아 있는 lease에만 성립 — 회수 뒤라면 재시도 불가.
+    if !files::extend_write_lease(&state.pool, lease_id, WRITE_LEASE_TTL.as_secs() as i64).await? {
+        return Err(conflict("upload is no longer active"));
+    }
+
+    let backend = backend_from_row(&state.crypto, &file.storage)?;
+    let mut out = Vec::with_capacity(body.parts.len());
+    match &backend {
+        StorageBackend::S3 {
+            spec,
+            force_relay: false,
+        } => {
+            let upload_id =
+                upload_id.ok_or_else(|| internal("direct multipart lease has no upload id"))?;
+            let storage = s3_client(spec, Address::Public);
+            for &n in &body.parts {
+                let url = filegate_infra::s3_presign_upload_part(
+                    &storage,
+                    &file.object_key,
+                    &upload_id,
+                    n,
+                    WRITE_LEASE_TTL,
+                )
+                .await
+                .map_err(ApiError::Storage)?;
+                out.push(PartOut { part: n, url });
+            }
+        }
+        _ => {
+            let base = relay_base(&state)?;
+            let relay = RelaySecret::generate();
+            files::attach_write_secret(&state.pool, lease_id, &relay.hash).await?;
+            for &n in &body.parts {
+                out.push(PartOut {
+                    part: n,
+                    url: format!("{base}/b/{lease_id}?s={}&part={n}", relay.secret),
+                });
+            }
+        }
+    }
+    tracing::info!(event = "file.parts_issued", file = %file_id, client = %client.0, count = out.len());
+    Ok(Json(serde_json::json!({ "parts": out })).into_response())
 }
 
 pub(super) async fn commit(
@@ -167,6 +439,10 @@ pub(super) async fn commit(
     // 실물 검증. 중계는 스트림 중 filegate가 직접 기록한 실측을, 직결은
     // 내부 주소의 head_object를 대조한다 — 계약은 같다 (spec 00).
     let backend = backend_from_row(&state.crypto, &file.storage)?;
+    // multipart는 검증 단위가 part다 (ADR 002, spec 02) — 별도 게이트로.
+    if let Some(part_size) = file.part_size {
+        return commit_multipart(&state, &client, file_id, &file, part_size, &backend).await;
+    }
     let (actual_size, etag) = if backend.is_relay() {
         match files::recorded_upload(&state.pool, file_id).await? {
             Some(recorded) => recorded,

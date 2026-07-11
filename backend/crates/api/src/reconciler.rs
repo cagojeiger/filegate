@@ -164,6 +164,9 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto) {
 
 /// 실물 제거 — 등록부에서 백엔드를 복원해 내부 경로로 지운다.
 /// s3 DeleteObject·fs remove 모두 없는 대상에 성공하므로 멱등이다.
+/// multipart 회수 재료가 있으면 함께 치운다 (spec 02): s3는 벤더 세션
+/// 중단(중단하지 않은 미완성 part는 보이지 않게 과금된다), fs는 offset
+/// 기록 중이던 대상 임시 파일.
 async fn sweep_object(
     pool: &PgPool,
     crypto: &Crypto,
@@ -175,9 +178,17 @@ async fn sweep_object(
     match crate::storage_access::backend_from_row(crypto, &row)? {
         crate::storage_access::StorageBackend::S3 { spec, .. } => {
             let storage = s3_client(&spec, Address::Internal);
+            if let Some(upload_id) = &candidate.upload_id {
+                filegate_infra::s3_abort_multipart(&storage, &candidate.object_key, upload_id)
+                    .await?;
+            }
             s3_delete_object(&storage, &candidate.object_key).await
         }
         crate::storage_access::StorageBackend::Fs { root } => {
+            if let Some(lease_id) = &candidate.write_lease_id {
+                let temp = fs_backend::multipart_temp(&root, &lease_id.to_string());
+                fs_backend::abort_write(&temp).await;
+            }
             fs_backend::delete(&root, &candidate.object_key).await
         }
     }

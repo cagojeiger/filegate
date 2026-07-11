@@ -66,6 +66,11 @@ pub struct ServerConfig {
     pub public_url: Option<String>,
     /// reconciler tick 간격 (기본 60초). 테스트에서만 줄인다.
     pub reconciler_interval_secs: u64,
+    /// 이 선언 크기를 넘으면 create가 multipart를 발급한다 (spec 02).
+    pub multipart_threshold_bytes: i64,
+    /// multipart part 크기 (균일, 마지막만 나머지). 업로드별로 동결된다 —
+    /// 설정 변경은 새 업로드부터다 (spec 02). 벤더 규칙상 5MiB..=5GiB.
+    pub part_size_bytes: i64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -120,7 +125,28 @@ impl Config {
                 .transpose()
                 .map_err(|e| Error::config(format!("FILEGATE_RECONCILER_INTERVAL_SECS: {e}")))?
                 .unwrap_or(60),
+            multipart_threshold_bytes: env("FILEGATE_MULTIPART_THRESHOLD_BYTES")
+                .map(|v| v.parse())
+                .transpose()
+                .map_err(|e| Error::config(format!("FILEGATE_MULTIPART_THRESHOLD_BYTES: {e}")))?
+                .unwrap_or(256 * 1024 * 1024),
+            part_size_bytes: env("FILEGATE_PART_SIZE_BYTES")
+                .map(|v| v.parse())
+                .transpose()
+                .map_err(|e| Error::config(format!("FILEGATE_PART_SIZE_BYTES: {e}")))?
+                .unwrap_or(64 * 1024 * 1024),
         };
+        // 벤더 규칙 (S3 multipart): part는 5MiB 이상(마지막 제외), 5GiB 이하.
+        if !(5 * 1024 * 1024..=5 * 1024 * 1024 * 1024).contains(&server.part_size_bytes) {
+            return Err(Error::config(
+                "FILEGATE_PART_SIZE_BYTES must be between 5MiB and 5GiB",
+            ));
+        }
+        if server.multipart_threshold_bytes < 1 {
+            return Err(Error::config(
+                "FILEGATE_MULTIPART_THRESHOLD_BYTES must be positive",
+            ));
+        }
         let database = DatabaseConfig {
             url: SecretString::from(env("FILEGATE_DATABASE_URL").unwrap_or_else(|| {
                 "postgres://filegate:filegate@127.0.0.1:55432/filegate".to_owned()
@@ -196,6 +222,17 @@ mod tests {
         assert_eq!(config.database.max_connections, 5);
         assert_eq!(config.security.enc_key_id, "v1");
         assert_eq!(config.security.operator_tokens.len(), 2);
+        assert_eq!(config.server.multipart_threshold_bytes, 256 * 1024 * 1024);
+        assert_eq!(config.server.part_size_bytes, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn part_size_outside_vendor_bounds_is_rejected() {
+        let too_small = |key: &str| match key {
+            "FILEGATE_PART_SIZE_BYTES" => Some("1048576".to_owned()), // 1MiB < 5MiB
+            other => base_env(other),
+        };
+        assert!(Config::load_from(&too_small).is_err());
     }
 
     #[test]

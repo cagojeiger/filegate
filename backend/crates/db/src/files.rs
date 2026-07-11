@@ -19,6 +19,8 @@ pub struct CreateSpec<'a> {
     pub content_type: Option<&'a str>,
     pub declared_md5: Option<&'a str>,
     pub lease_ttl_secs: i64,
+    /// multipart면 Some — create 시점 설정값이 업로드별로 동결된다 (spec 02).
+    pub part_size: Option<i64>,
 }
 
 /// create가 예약을 마친 결과. URL 발급(presign 또는 중계 secret)은
@@ -78,14 +80,15 @@ pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome
     }
 
     let file_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO files (client_id, intent, declared_size, content_type, declared_md5) \
-         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        "INSERT INTO files (client_id, intent, declared_size, content_type, declared_md5, \
+         part_size) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
     )
     .bind(spec.client_id)
     .bind(spec.intent)
     .bind(spec.declared_size)
     .bind(spec.content_type)
     .bind(spec.declared_md5)
+    .bind(spec.part_size)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -194,11 +197,20 @@ pub struct FileAccess {
     pub declared_md5: Option<String>,
     pub etag: Option<String>,
     pub object_key: String,
+    /// multipart 업로드의 동결 part 크기 — None이면 단일 PUT (spec 02).
+    pub part_size: Option<i64>,
     pub storage: StorageRow,
 }
 
-/// (state, declared_size, declared_md5, etag, object_key)
-type CommitRow = (String, i64, Option<String>, Option<String>, String);
+/// (state, declared_size, declared_md5, etag, object_key, part_size)
+type CommitRow = (
+    String,
+    i64,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<i64>,
+);
 
 /// 소유 검사 포함 조회 — 남의 file_id는 존재 자체를 모른다 (404).
 pub async fn for_access(
@@ -207,7 +219,7 @@ pub async fn for_access(
     file_id: Uuid,
 ) -> Result<Option<FileAccess>, sqlx::Error> {
     let row: Option<CommitRow> = sqlx::query_as(
-        "SELECT f.state, f.declared_size, f.declared_md5, f.etag, l.object_key \
+        "SELECT f.state, f.declared_size, f.declared_md5, f.etag, l.object_key, f.part_size \
          FROM files f JOIN locations l ON l.file_id = f.id \
          WHERE f.id = $1 AND f.client_id = $2",
     )
@@ -215,7 +227,7 @@ pub async fn for_access(
     .bind(client_id)
     .fetch_optional(pool)
     .await?;
-    let Some((state, declared_size, declared_md5, etag, object_key)) = row else {
+    let Some((state, declared_size, declared_md5, etag, object_key, part_size)) = row else {
         return Ok(None);
     };
     let storage: StorageRow = sqlx::query_as(&format!(
@@ -231,6 +243,7 @@ pub async fn for_access(
         declared_md5,
         etag,
         object_key,
+        part_size,
         storage,
     }))
 }
@@ -278,6 +291,10 @@ pub struct ByteLease {
     pub file_id: Uuid,
     pub declared_size: i64,
     pub content_type: Option<String>,
+    /// multipart의 동결 part 크기 — None이면 단일 PUT (spec 02).
+    pub part_size: Option<i64>,
+    /// 직결·중계 s3 multipart의 벤더 세션 핸들.
+    pub upload_id: Option<String>,
     /// purge·회수 뒤에는 위치가 없다 — lease는 유효하되 실물 없음(404 등가).
     pub location: Option<(String, StorageRow)>,
 }
@@ -287,9 +304,18 @@ pub async fn byte_lease(
     lease_id: Uuid,
     secret_hash: &str,
 ) -> Result<Option<ByteLease>, sqlx::Error> {
-    type Row = (String, Uuid, i64, Option<String>, Option<String>);
+    type Row = (
+        String,
+        Uuid,
+        i64,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    );
     let row: Option<Row> = sqlx::query_as(
-        "SELECT le.kind, f.id, f.declared_size, f.content_type, l.object_key \
+        "SELECT le.kind, f.id, f.declared_size, f.content_type, f.part_size, le.upload_id, \
+         l.object_key \
          FROM leases le \
          JOIN files f ON f.id = le.file_id \
          LEFT JOIN locations l ON l.file_id = f.id \
@@ -300,7 +326,9 @@ pub async fn byte_lease(
     .bind(secret_hash)
     .fetch_optional(pool)
     .await?;
-    let Some((lease_kind, file_id, declared_size, content_type, object_key)) = row else {
+    let Some((lease_kind, file_id, declared_size, content_type, part_size, upload_id, object_key)) =
+        row
+    else {
         return Ok(None);
     };
     let location = match object_key {
@@ -321,6 +349,8 @@ pub async fn byte_lease(
         file_id,
         declared_size,
         content_type,
+        part_size,
+        upload_id,
         location,
     }))
 }
@@ -500,6 +530,10 @@ pub struct SweepCandidate {
     pub declared_size: i64,
     pub storage_id: String,
     pub object_key: String,
+    /// multipart 회수 재료 (spec 02) — 벤더 Abort용 세션 핸들.
+    pub upload_id: Option<String>,
+    /// multipart fs 회수 재료 — 대상 임시 파일(.fg-tmp-mp-{lease}) 식별.
+    pub write_lease_id: Option<Uuid>,
 }
 
 /// 쓰기 lease가 만료된 pending 파일들 (spec 00: 만료 회수 대상).
@@ -507,8 +541,8 @@ pub async fn expired_pending(
     pool: &PgPool,
     limit: i64,
 ) -> Result<Vec<SweepCandidate>, sqlx::Error> {
-    let rows: Vec<(Uuid, i64, String, String)> = sqlx::query_as(
-        "SELECT f.id, f.declared_size, l.storage_id, l.object_key \
+    let rows: Vec<(Uuid, i64, String, String, Option<String>, Uuid)> = sqlx::query_as(
+        "SELECT f.id, f.declared_size, l.storage_id, l.object_key, le.upload_id, le.id \
          FROM files f \
          JOIN leases le ON le.file_id = f.id AND le.kind = 'write' \
          JOIN locations l ON l.file_id = f.id \
@@ -518,7 +552,17 @@ pub async fn expired_pending(
     .bind(limit)
     .fetch_all(pool)
     .await?;
-    Ok(rows.into_iter().map(candidate_from).collect())
+    Ok(rows
+        .into_iter()
+        .map(|row| SweepCandidate {
+            file_id: row.0,
+            declared_size: row.1,
+            storage_id: row.2,
+            object_key: row.3,
+            upload_id: row.4,
+            write_lease_id: Some(row.5),
+        })
+        .collect())
 }
 
 /// 만료 회수 확정: pending → reclaimed 전이가 이기면 예약 해제 + lease
@@ -600,12 +644,15 @@ pub async fn finalize_purge(
     Ok(true)
 }
 
+/// purge 후보는 확정을 지난 파일이라 multipart 잔여물이 없다 — 회수 재료는 None.
 fn candidate_from(row: (Uuid, i64, String, String)) -> SweepCandidate {
     SweepCandidate {
         file_id: row.0,
         declared_size: row.1,
         storage_id: row.2,
         object_key: row.3,
+        upload_id: None,
+        write_lease_id: None,
     }
 }
 
@@ -621,4 +668,157 @@ pub async fn expire_read_leases(pool: &PgPool, limit: i64) -> Result<u64, sqlx::
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
+}
+
+// ---- multipart part 원장 (spec 02) ----
+//
+// 기하(개수·offset·part별 크기)는 저장하지 않는다 — declared_size와 동결
+// part_size에서 파생된다. DB에 남는 것은 실측과 승격 직렬화 상태뿐이다.
+
+/// part 개수 = ⌈declared / part⌉. multipart는 declared_size ≥ 1 전제.
+pub fn part_count(declared_size: i64, part_size: i64) -> i32 {
+    ((declared_size + part_size - 1) / part_size) as i32
+}
+
+/// part의 기대 크기 — 마지막 part만 나머지다.
+pub fn part_expected_size(declared_size: i64, part_size: i64, part_no: i32) -> i64 {
+    if part_no == part_count(declared_size, part_size) {
+        declared_size - i64::from(part_no - 1) * part_size
+    } else {
+        part_size
+    }
+}
+
+/// part의 대상 임시 파일 내 offset (fs 승격용).
+pub fn part_offset(part_size: i64, part_no: i32) -> u64 {
+    (i64::from(part_no - 1) * part_size) as u64
+}
+
+#[cfg(test)]
+mod part_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn geometry_derives_from_declared_and_frozen_part_size() {
+        // 12MiB, part 5MiB → 3개 (5, 5, 2MiB)
+        let (declared, part) = (12 * 1024 * 1024_i64, 5 * 1024 * 1024_i64);
+        assert_eq!(part_count(declared, part), 3);
+        assert_eq!(part_expected_size(declared, part, 1), part);
+        assert_eq!(part_expected_size(declared, part, 2), part);
+        assert_eq!(part_expected_size(declared, part, 3), 2 * 1024 * 1024);
+        assert_eq!(part_offset(part, 3), (10 * 1024 * 1024) as u64);
+        // 정확히 나누어떨어지는 경우
+        assert_eq!(part_count(10 * 1024 * 1024, part), 2);
+        assert_eq!(part_expected_size(10 * 1024 * 1024, part, 2), part);
+        // part 하나짜리 multipart
+        assert_eq!(part_count(1, part), 1);
+        assert_eq!(part_expected_size(1, part, 1), 1);
+    }
+}
+
+/// 직결 multipart의 벤더 세션 핸들을 write lease에 기록한다 (발급 직후 한 번).
+pub async fn attach_upload_id(
+    pool: &PgPool,
+    lease_id: Uuid,
+    upload_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE leases SET upload_id = $2 WHERE id = $1")
+        .bind(lease_id)
+        .bind(upload_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
+/// 파일의 write lease (파일당 하나 — create가 유일한 발급 지점).
+/// 반환: (lease_id, upload_id). parts 발급과 multipart commit이 쓴다.
+pub async fn write_lease(
+    pool: &PgPool,
+    file_id: Uuid,
+) -> Result<Option<(Uuid, Option<String>)>, sqlx::Error> {
+    sqlx::query_as("SELECT id, upload_id FROM leases WHERE file_id = $1 AND kind = 'write'")
+        .bind(file_id)
+        .fetch_optional(pool)
+        .await
+}
+
+/// part 발급이 곧 갱신이다 (ADR 002, spec 02) — 만료를 앞으로만 민다.
+/// issued가 아니면(회수·확정 후) 0행 — 갱신은 살아 있는 lease에만 성립한다.
+pub async fn extend_write_lease(
+    pool: &PgPool,
+    lease_id: Uuid,
+    ttl_secs: i64,
+) -> Result<bool, sqlx::Error> {
+    let updated = sqlx::query(
+        "UPDATE leases SET expires_at = GREATEST(expires_at, now() + $2 * interval '1 second') \
+         WHERE id = $1 AND state = 'issued'",
+    )
+    .bind(lease_id)
+    .bind(ttl_secs)
+    .execute(pool)
+    .await?;
+    Ok(updated.rows_affected() == 1)
+}
+
+/// part 승격 claim — 행을 잡아(INSERT‥ON CONFLICT UPDATE의 행 락) 같은
+/// part의 동시 승격을 직렬화한다 (spec 02: 단일 PUT temp 충돌과 같은 처방).
+/// 물리 승격을 마친 뒤 done()으로 닫는다 — 그때 tx가 커밋되며 락이 풀린다.
+/// drop되면 롤백이라 행은 claimed로 남고, 재시도가 덮어쓴다 (last-write-wins).
+pub struct PartClaim {
+    tx: sqlx::Transaction<'static, sqlx::Postgres>,
+    lease_id: Uuid,
+    part_no: i32,
+}
+
+pub async fn claim_part(
+    pool: &PgPool,
+    lease_id: Uuid,
+    part_no: i32,
+) -> Result<PartClaim, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO lease_parts (lease_id, part_no) VALUES ($1, $2) \
+         ON CONFLICT (lease_id, part_no) \
+         DO UPDATE SET state = 'claimed', uploaded_size = NULL, uploaded_md5 = NULL",
+    )
+    .bind(lease_id)
+    .bind(part_no)
+    .execute(&mut *tx)
+    .await?;
+    Ok(PartClaim {
+        tx,
+        lease_id,
+        part_no,
+    })
+}
+
+impl PartClaim {
+    /// 승격 완료 — 실측을 기록하고 커밋한다.
+    pub async fn done(mut self, size: i64, md5: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE lease_parts SET state = 'done', uploaded_size = $3, uploaded_md5 = $4 \
+             WHERE lease_id = $1 AND part_no = $2",
+        )
+        .bind(self.lease_id)
+        .bind(self.part_no)
+        .bind(size)
+        .bind(md5)
+        .execute(&mut *self.tx)
+        .await?;
+        self.tx.commit().await
+    }
+}
+
+/// 완료된 part 실측 목록 (commit의 대조 재료): (번호, 크기, 체크섬), 번호순.
+pub async fn done_parts(
+    pool: &PgPool,
+    lease_id: Uuid,
+) -> Result<Vec<(i32, i64, String)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT part_no, uploaded_size, uploaded_md5 FROM lease_parts \
+         WHERE lease_id = $1 AND state = 'done' ORDER BY part_no",
+    )
+    .bind(lease_id)
+    .fetch_all(pool)
+    .await
 }

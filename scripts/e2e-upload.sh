@@ -40,7 +40,9 @@ expect "없는 intent 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AU
 expect "음수 크기 400"   400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":-1}')"
 expect "NUL(\\u0000) intent 404(500 아님)" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"att\u0000ack","declared_size":1}')"
 expect "제어문자 content_type 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":1,"content_type":"a\u0000b"}')"
-expect "5GiB 상한 초과 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":9999999999}')"
+# 임계값 초과 선언은 multipart로 간다 (spec 02) — 크기 상한은 part×10,000.
+# 1PB는 어떤 합리적 part 설정에서도 상한 밖이라 400.
+expect "multipart 한계 초과 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":1000000000000000}')"
 expect "capacity 초과 507" 507 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":2147483648}')"
 
 CREATE=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files \
