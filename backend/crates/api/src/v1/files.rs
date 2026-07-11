@@ -128,7 +128,7 @@ pub(super) async fn create(
             let base = relay_base(&state)?;
             let relay = RelaySecret::generate();
             files::attach_write_secret(&state.pool, created.lease_id, &relay.hash).await?;
-            relay_url(base, created.lease_id, &relay.secret)
+            relay_url(base, created.lease_id, &relay.secret, None)
         }
     };
 
@@ -267,14 +267,8 @@ pub(super) async fn read(
             .await
             .map_err(ApiError::Storage)?;
             // lease는 서명이 성공한 뒤에 기록 — 실패한 발급은 원장에 없다.
-            files::issue_read_lease(
-                &state.pool,
-                file_id,
-                READ_LEASE_TTL.as_secs() as i64,
-                None,
-                None,
-            )
-            .await?;
+            files::issue_read_lease(&state.pool, file_id, READ_LEASE_TTL.as_secs() as i64, None)
+                .await?;
             url
         }
         _ => {
@@ -285,10 +279,9 @@ pub(super) async fn read(
                 file_id,
                 READ_LEASE_TTL.as_secs() as i64,
                 Some(&relay.hash),
-                body.filename.as_deref(),
             )
             .await?;
-            relay_url(base, lease_id, &relay.secret)
+            relay_url(base, lease_id, &relay.secret, body.filename.as_deref())
         }
     };
 
@@ -375,8 +368,32 @@ impl RelaySecret {
     }
 }
 
-fn relay_url(base: &str, lease_id: Uuid, secret: &str) -> String {
-    format!("{base}/b/{lease_id}?s={secret}")
+/// 표현 파일명은 저장하지 않고 URL로만 나른다 (spec 00) — 직결의 서명
+/// 파라미터 등가물. 쿼리 값 인코딩은 rfc5987이 아니라 전용 인코더다:
+/// rfc5987은 헤더 문법이라 `&`(파라미터 절단)·`+`(공백 변질)·`#`(fragment
+/// 소실)을 감싸지 않는다. 다운로드 쪽 헤더 재인코딩은 rfc5987이 맞다.
+fn relay_url(base: &str, lease_id: Uuid, secret: &str, filename: Option<&str>) -> String {
+    match filename {
+        Some(name) => format!("{base}/b/{lease_id}?s={secret}&f={}", query_encode(name)),
+        None => format!("{base}/b/{lease_id}?s={secret}"),
+    }
+}
+
+/// URL 쿼리 값 percent 인코딩 — unreserved(RFC 3986)만 남기고 전부 감싼다.
+fn query_encode(value: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(value.len() * 3);
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => {
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
 }
 
 /// 중계 URL의 베이스 — 등록이 이미 검사했으므로 없으면 설정 오류다.

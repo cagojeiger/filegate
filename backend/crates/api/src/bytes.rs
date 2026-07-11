@@ -52,6 +52,9 @@ pub fn routes() -> Router<AppState> {
 #[derive(Deserialize)]
 struct SecretQuery {
     s: String,
+    /// 읽기의 표현 파일명 — 발급이 URL에 실어 보낸 것 (spec 00: 저장하지
+    /// 않는다). 소지자가 바꿔도 자기 다운로드의 저장 이름만 달라진다.
+    f: Option<String>,
 }
 
 /// 브라우저 preflight — presigned 직결에서 저장소가 하던 응대의 등가물.
@@ -247,7 +250,7 @@ async fn download(
     if let Ok(value) = HeaderValue::from_str(content_type) {
         headers.insert(header::CONTENT_TYPE, value);
     }
-    if let Some(filename) = &lease.read_filename {
+    if let Some(filename) = query.f.as_deref().filter(|name| !name.is_empty()) {
         let disposition = format!("attachment; filename*=UTF-8''{}", rfc5987_encode(filename));
         if let Ok(value) = HeaderValue::from_str(&disposition) {
             headers.insert(header::CONTENT_DISPOSITION, value);

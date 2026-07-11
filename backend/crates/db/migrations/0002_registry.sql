@@ -6,27 +6,55 @@
 -- 참조 무결성은 쓰기 시점에 DB가 집행한다 (ADR 004): binding이 남아 있는
 -- storage·client의 삭제는 FK가 거부한다 — 연결을 먼저 지워야 노드를 지운다.
 -- 클라이언트의 소유물(키)만 클라이언트와 함께 사라진다. id는 운영자가
--- 정하는 안정 슬러그다.
+-- 정하는 안정 슬러그다 — fs 경로와 object_key에 들어가므로 슬러그 CHECK가
+-- 경로 안전도 겸한다 (spec 00 물리 배치).
 
--- 물리 저장 공간 접근 계약. 행 생성은 운영자 API만 한다 — 시크릿이
--- 암호문(AES-256-GCM, AAD=id, 마스터 키는 env)이라 SQL로 못 만든다.
--- enc_key_id는 이 행을 잠근 마스터 키 세대 라벨 — 복호는 라벨로
--- 키를 고른다 (spec 01 회전 런북).
+-- 물리 저장 공간 접근 계약. 행 생성은 운영자 API만 한다.
+-- 종류가 둘이다 (ADR 001: capability는 선언식):
+--   s3: 접속 필드 필수, 시크릿은 암호문(AES-256-GCM, AAD=id).
+--       enc_key_id는 마스터 키 세대 라벨 (spec 01 회전 런북).
+--       force_relay로 직결 대신 중계를 강제할 수 있다.
+--   fs: root_path 하나가 접근 계약의 전부 — 시크릿 없는 storage.
+--       presigned 개념이 없으므로 항상 중계다.
 CREATE TABLE storages (
     id                    text PRIMARY KEY
                           CHECK (id ~ '^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$'),
-    endpoint              text NOT NULL,
-    region                text NOT NULL,
-    bucket                text NOT NULL,
+    kind                  text NOT NULL DEFAULT 's3' CHECK (kind IN ('s3', 'fs')),
+    force_relay           boolean NOT NULL DEFAULT false,
+    root_path             text,
+    endpoint              text,
+    -- 내부 접근 주소와 외부 서명/전송 주소의 분리 (ADR 001).
+    public_endpoint       text,
+    region                text,
+    bucket                text,
     force_path_style      boolean NOT NULL DEFAULT false,
-    access_key            text NOT NULL,
-    secret_key_ciphertext bytea NOT NULL,
-    secret_key_nonce      bytea NOT NULL CHECK (octet_length(secret_key_nonce) = 12),
-    enc_key_id            text NOT NULL,
+    access_key            text,
+    secret_key_ciphertext bytea,
+    secret_key_nonce      bytea CHECK (octet_length(secret_key_nonce) = 12),
+    enc_key_id            text,
     -- capacity 상한은 등록의 일부다 (ADR 004). 기본값 없음 — 등록자가 정한다.
     capacity_bytes        bigint NOT NULL CHECK (capacity_bytes >= 0),
     created_at            timestamptz NOT NULL DEFAULT now(),
-    updated_at            timestamptz NOT NULL DEFAULT now()
+    updated_at            timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT storages_s3_fields CHECK (
+        kind <> 's3' OR (
+            endpoint IS NOT NULL AND public_endpoint IS NOT NULL
+            AND region IS NOT NULL AND bucket IS NOT NULL
+            AND access_key IS NOT NULL AND secret_key_ciphertext IS NOT NULL
+            AND secret_key_nonce IS NOT NULL AND enc_key_id IS NOT NULL
+            AND root_path IS NULL
+        )
+    ),
+    CONSTRAINT storages_fs_fields CHECK (
+        kind <> 'fs' OR (
+            root_path IS NOT NULL
+            AND endpoint IS NULL AND public_endpoint IS NULL
+            AND region IS NULL AND bucket IS NULL
+            AND access_key IS NULL AND secret_key_ciphertext IS NULL
+            AND secret_key_nonce IS NULL AND enc_key_id IS NULL
+            AND force_relay = false -- fs는 선언 없이도 항상 중계
+        )
+    )
 );
 
 -- 서비스 신원. 키의 소유자이자 intent 이름의 네임스페이스다.

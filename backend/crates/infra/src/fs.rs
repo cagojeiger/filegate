@@ -38,14 +38,16 @@ fn object_path(root: &Path, object_key: &str) -> PathBuf {
 }
 
 /// 쓰기 시작 — 임시 파일을 연다. 완결은 rename(commit_write), 실패는
-/// abort_write가 지운다.
+/// abort_write가 지운다. 접두사 `.fg-tmp-`는 공유 /tmp에서도 filegate
+/// 것임을 식별하게 한다 — 나이(mtime) 기반 sweep의 대상 표식 (spec 00).
 pub async fn begin_write(root: &Path, temp_name: &str) -> anyhow::Result<(PathBuf, fs::File)> {
-    let temp = root.join(format!(".tmp-{temp_name}"));
+    let temp = root.join(format!(".fg-tmp-{temp_name}"));
     let file = fs::File::create(&temp).await?;
     Ok((temp, file))
 }
 
 /// 임시 → 실체 경로 rename (원자적, 같은 마운트 전제).
+/// 키가 경로를 가지므로(spec 00 물리 배치) 부모 디렉토리를 먼저 보장한다.
 pub async fn commit_write(
     mut file: fs::File,
     temp: &Path,
@@ -55,7 +57,11 @@ pub async fn commit_write(
     file.flush().await?;
     file.sync_all().await?;
     drop(file);
-    fs::rename(temp, object_path(root, object_key)).await?;
+    let target = object_path(root, object_key);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    fs::rename(temp, target).await?;
     Ok(())
 }
 
@@ -74,6 +80,33 @@ pub async fn open_read(root: &Path, object_key: &str) -> anyhow::Result<Option<(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+/// 장부 밖 임시 정리 (spec 00 물리 배치): 디렉토리 최상위의 `.fg-tmp-*` 중
+/// mtime이 max_age를 넘은 것을 지운다. DB를 보지 않는다 — 진행 중 업로드는
+/// 어리므로 걸리지 않고, 크래시가 남긴 것만 늙어서 걸린다 (멀티 pod 안전).
+pub async fn sweep_stale_temps(dir: &Path, max_age: std::time::Duration) -> anyhow::Result<u32> {
+    let mut entries = fs::read_dir(dir).await?;
+    let mut removed = 0u32;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(".fg-tmp-") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata().await else {
+            continue;
+        };
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|mtime| mtime.elapsed().ok())
+            .is_some_and(|age| age > max_age);
+        if stale && fs::remove_file(entry.path()).await.is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 /// 물리 삭제 — 없는 파일도 성공 (purge는 멱등, spec 00).
