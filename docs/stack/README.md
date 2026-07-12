@@ -21,7 +21,7 @@
 | 저장소 | `aws-sdk-s3`, `aws-config` | **filegate 신규** — 형제엔 없음 |
 | 설정 | env + `dotenvy` | YAML 설정 파일 없음 — 등록부는 DB (ADR 004) |
 | 에러 | `thiserror` 2, `anyhow` 1 | |
-| 관측 | `tracing`, `tracing-subscriber` (env-filter, json), `metrics` + `metrics-exporter-prometheus` | `/metrics` 스크레이프. 프로브·스크레이프는 메트릭·로그에서 제외 |
+| 관측 | `tracing`, `tracing-subscriber` (env-filter, json) | 구조화 로그만 — Prometheus 메트릭은 v0 범위에서 제외(필요 시 재도입). 성공 프로브는 로그에서 제외 |
 | 직렬화·타입 | `serde`, `serde_json`, `uuid` v4, `chrono`/`time`, `validator`, `schemars` | |
 | 비밀·암호 | `secrecy`, `aes-gcm`, `hkdf`, `sha2`, `subtle`, `rand` | storage 시크릿 암호화(opsgate 참조)·운영자 토큰 비교·클라이언트 키 해시 |
 | HTTP 클라이언트 | `reqwest` 0.12 (rustls-tls) | |
@@ -70,7 +70,7 @@ filegate의 reconciler 잡: pending 만료 회수(capacity 해제), deleted purg
 | **warn** | 이상 징후 (치명적 아님) | `reconciler.join_failed` |
 | **error** | 실패 | `ready.failed`, `reconciler.failed` |
 
-프로브·스크레이프(/health, /ready, /metrics)의 성공 요청은 로그·메트릭 양쪽에서 제외한다. 실패한 프로브는 남긴다.
+프로브(/health, /ready)의 성공 요청은 로그에서 제외한다. 실패한 프로브는 남긴다.
 
 ## 빌드 규율 (형제 공통)
 
