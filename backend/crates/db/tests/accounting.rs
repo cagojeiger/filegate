@@ -34,7 +34,9 @@ fn s3_row(id: &str, capacity: i64) -> StorageRow {
 /// client "c" + storage "s"(capacity) + binding(c, att → s).
 async fn wire(pool: &PgPool, capacity: i64) {
     registry::insert_client(pool, "c").await.unwrap();
-    registry::insert_storage(pool, &s3_row("s", capacity)).await.unwrap();
+    registry::insert_storage(pool, &s3_row("s", capacity))
+        .await
+        .unwrap();
     registry::insert_binding(
         pool,
         &BindingRow {
@@ -71,7 +73,11 @@ async fn create_ok(pool: &PgPool, declared_size: i64) -> CreatedFile {
 /// usage 세 버킷 중 하나를 읽는다.
 async fn bucket(pool: &PgPool, storage_id: &str, col: &str) -> i64 {
     let sql = format!("SELECT {col} FROM storage_usage WHERE storage_id = $1");
-    sqlx::query_scalar(&sql).bind(storage_id).fetch_one(pool).await.unwrap()
+    sqlx::query_scalar(&sql)
+        .bind(storage_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }
 
 // ── 예약 ─────────────────────────────────────────────────────
@@ -80,7 +86,9 @@ async fn bucket(pool: &PgPool, storage_id: &str, col: &str) -> i64 {
 async fn create_without_binding_is_no_binding(pool: PgPool) {
     // binding 없이 client·storage만 — 선언되지 않은 어휘.
     registry::insert_client(&pool, "c").await.unwrap();
-    registry::insert_storage(&pool, &s3_row("s", 1000)).await.unwrap();
+    registry::insert_storage(&pool, &s3_row("s", 1000))
+        .await
+        .unwrap();
     assert!(matches!(
         files::create(&pool, spec(100)).await.unwrap(),
         CreateOutcome::NoBinding
@@ -121,7 +129,11 @@ async fn reservations_sum_against_capacity(pool: PgPool) {
 async fn commit_settles_reservation_to_active(pool: PgPool) {
     wire(&pool, 1000).await;
     let file = create_ok(&pool, 100).await;
-    assert!(files::finalize_commit(&pool, file.file_id, "s", 100, "etag").await.unwrap());
+    assert!(
+        files::finalize_commit(&pool, file.file_id, "s", 100, "etag")
+            .await
+            .unwrap()
+    );
     assert_eq!(bucket(&pool, "s", "reserved_bytes").await, 0);
     assert_eq!(bucket(&pool, "s", "active_bytes").await, 100);
 }
@@ -130,7 +142,9 @@ async fn commit_settles_reservation_to_active(pool: PgPool) {
 async fn mark_deleted_moves_active_to_purge_pending(pool: PgPool) {
     wire(&pool, 1000).await;
     let file = create_ok(&pool, 100).await;
-    files::finalize_commit(&pool, file.file_id, "s", 100, "etag").await.unwrap();
+    files::finalize_commit(&pool, file.file_id, "s", 100, "etag")
+        .await
+        .unwrap();
     assert!(matches!(
         files::mark_deleted(&pool, "c", file.file_id).await.unwrap(),
         DeleteOutcome::Deleted
@@ -161,7 +175,9 @@ async fn expired_pending_reclaims_reservation(pool: PgPool) {
 async fn purgeable_releases_purge_pending(pool: PgPool) {
     wire(&pool, 1000).await;
     let file = create_ok(&pool, 100).await;
-    files::finalize_commit(&pool, file.file_id, "s", 100, "etag").await.unwrap();
+    files::finalize_commit(&pool, file.file_id, "s", 100, "etag")
+        .await
+        .unwrap();
     files::mark_deleted(&pool, "c", file.file_id).await.unwrap();
     let candidates = files::purgeable(&pool, 10).await.unwrap();
     assert_eq!(candidates.len(), 1);
@@ -201,9 +217,9 @@ async fn concurrent_creates_never_overbook(pool: PgPool) {
     let mut tasks = Vec::new();
     for _ in 0..10 {
         let p = pool.clone();
-        tasks.push(tokio::spawn(
-            async move { files::create(&p, spec(100)).await.unwrap() },
-        ));
+        tasks.push(tokio::spawn(async move {
+            files::create(&p, spec(100)).await.unwrap()
+        }));
     }
 
     let (mut created, mut exceeded) = (0, 0);
@@ -215,7 +231,10 @@ async fn concurrent_creates_never_overbook(pool: PgPool) {
         }
     }
 
-    assert_eq!(created, 5, "정확히 capacity/size 만큼만 성공 — 초과예약 없음");
+    assert_eq!(
+        created, 5,
+        "정확히 capacity/size 만큼만 성공 — 초과예약 없음"
+    );
     assert_eq!(exceeded, 5);
     assert_eq!(
         bucket(&pool, "s", "reserved_bytes").await,
