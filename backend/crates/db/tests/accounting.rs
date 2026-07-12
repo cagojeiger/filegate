@@ -187,3 +187,39 @@ async fn occupied_storage_cannot_be_deleted(pool: PgPool) {
     );
     assert_eq!(bucket(&pool, "s", "reserved_bytes").await, 100);
 }
+
+// ── 동시성: 초과예약 방어 ─────────────────────────────────────
+
+/// capacity 한도에 여러 create가 동시에 들어와도 정확히 한도만큼만 예약된다.
+/// 회계는 storage_usage 한 행의 조건부 UPDATE라 행 락이 이들을 직렬화하고,
+/// "reserved+active+purge_pending+size <= capacity"가 원자적으로 검사되어
+/// 초과예약이 물리적으로 불가능하다 (멀티 pod도 같은 DB 행이라 동일).
+#[sqlx::test(migrations = "./migrations")]
+async fn concurrent_creates_never_overbook(pool: PgPool) {
+    wire(&pool, 500).await; // 100짜리 정확히 5자리
+
+    let mut tasks = Vec::new();
+    for _ in 0..10 {
+        let p = pool.clone();
+        tasks.push(tokio::spawn(
+            async move { files::create(&p, spec(100)).await.unwrap() },
+        ));
+    }
+
+    let (mut created, mut exceeded) = (0, 0);
+    for t in tasks {
+        match t.await.unwrap() {
+            CreateOutcome::Created(_) => created += 1,
+            CreateOutcome::CapacityExceeded => exceeded += 1,
+            CreateOutcome::NoBinding => panic!("binding exists"),
+        }
+    }
+
+    assert_eq!(created, 5, "정확히 capacity/size 만큼만 성공 — 초과예약 없음");
+    assert_eq!(exceeded, 5);
+    assert_eq!(
+        bucket(&pool, "s", "reserved_bytes").await,
+        500,
+        "예약 합이 정확히 한도 (한 바이트도 초과 안 됨)"
+    );
+}
