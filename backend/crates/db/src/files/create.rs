@@ -1,4 +1,4 @@
-//! create의 예약과 pending 파일 기록 — 선언 해석 → capacity 예약 → 기록.
+//! create의 예약과 pending 파일 기록 — 선언 해석 → 기록 → capacity 예약.
 //!
 //! 회계 원자성이 이 경로의 핵심이다: 예약은 단일 트랜잭션이고, capacity
 //! 상한은 원자적 조건부 UPDATE가 집행한다 — 파드 수와 무관하게 초과 예약이
@@ -38,44 +38,29 @@ pub enum CreateOutcome {
     CapacityExceeded,
 }
 
-/// 선언 해석 → capacity 예약 → pending 파일 기록. 전부 한 트랜잭션.
+/// 선언 해석 → pending 파일 기록 → capacity 예약. 전부 한 트랜잭션.
+///
+/// 예약이 마지막인 이유: 조건부 UPDATE가 잡는 storage_usage 행 락이
+/// UPDATE→commit 구간에만 걸리게 — INSERT들까지 락 안에 두면 같은 storage로
+/// 향하는 동시 create가 fsync 포함 전 구간에서 직렬화된다. 거부 시 롤백이
+/// INSERT들을 되돌리므로 정합성은 순서와 무관하다.
 pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    let storage_id: Option<String> =
-        sqlx::query_scalar("SELECT storage_id FROM bindings WHERE client_id = $1 AND intent = $2")
-            .bind(spec.client_id)
-            .bind(spec.intent)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let Some(storage_id) = storage_id else {
+    // binding 해석과 storage 로드를 한 왕복으로 — 컬럼 이름이 겹치지 않아
+    // 접두 없이 안전하다 (bindings: client_id·intent·storage_id·created_at).
+    let storage: Option<StorageRow> = sqlx::query_as(&format!(
+        "SELECT {STORAGE_COLUMNS} FROM storages s \
+         JOIN bindings b ON b.storage_id = s.id \
+         WHERE b.client_id = $1 AND b.intent = $2"
+    ))
+    .bind(spec.client_id)
+    .bind(spec.intent)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(storage) = storage else {
         return Ok(CreateOutcome::NoBinding);
     };
-
-    let storage: StorageRow = sqlx::query_as(&format!(
-        "SELECT {STORAGE_COLUMNS} FROM storages WHERE id = $1"
-    ))
-    .bind(&storage_id)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    // capacity는 경성 상한이다: 예약 + 확정 + purge 대기 + 선언 크기가 상한을
-    // 넘으면 발급 거부 (spec 00). 조건부 UPDATE 한 문장이라 경합에도 원자적이다.
-    // 비교는 뺄셈 형태다 — 좌변 합산이 크기와 섞이지 않아 overflow가 없다
-    // (크기는 핸들러가 5GiB로 상한, capacity·버킷은 등록 검증이 상한).
-    let reserved = sqlx::query(
-        "UPDATE storage_usage SET reserved_bytes = reserved_bytes + $2, updated_at = now() \
-         WHERE storage_id = $1 \
-         AND reserved_bytes + active_bytes + purge_pending_bytes <= $3 - $2",
-    )
-    .bind(&storage_id)
-    .bind(spec.declared_size)
-    .bind(storage.capacity_bytes)
-    .execute(&mut *tx)
-    .await?;
-    if reserved.rows_affected() == 0 {
-        return Ok(CreateOutcome::CapacityExceeded);
-    }
 
     let file_id: Uuid = sqlx::query_scalar(
         "INSERT INTO files (client_id, intent, declared_size, content_type, declared_md5, \
@@ -95,7 +80,7 @@ pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome
     let object_key = object_key(spec.client_id, &storage.kind, file_id, spec.content_type);
     sqlx::query("INSERT INTO locations (file_id, storage_id, object_key) VALUES ($1, $2, $3)")
         .bind(file_id)
-        .bind(&storage_id)
+        .bind(&storage.id)
         .bind(&object_key)
         .execute(&mut *tx)
         .await?;
@@ -108,6 +93,25 @@ pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome
     .bind(spec.lease_ttl_secs)
     .fetch_one(&mut *tx)
     .await?;
+
+    // capacity는 경성 상한이다: 예약 + 확정 + purge 대기 + 선언 크기가 상한을
+    // 넘으면 발급 거부 (spec 00). 조건부 UPDATE 한 문장이라 경합에도 원자적이다.
+    // 비교는 뺄셈 형태다 — 좌변 합산이 크기와 섞이지 않아 overflow가 없다
+    // (크기는 핸들러가 5GiB로 상한, capacity·버킷은 등록 검증이 상한).
+    let reserved = sqlx::query(
+        "UPDATE storage_usage SET reserved_bytes = reserved_bytes + $2, updated_at = now() \
+         WHERE storage_id = $1 \
+         AND reserved_bytes + active_bytes + purge_pending_bytes <= $3 - $2",
+    )
+    .bind(&storage.id)
+    .bind(spec.declared_size)
+    .bind(storage.capacity_bytes)
+    .execute(&mut *tx)
+    .await?;
+    if reserved.rows_affected() == 0 {
+        // 트랜잭션 drop이 롤백이다 — 위 INSERT들이 전부 되돌아간다.
+        return Ok(CreateOutcome::CapacityExceeded);
+    }
 
     tx.commit().await?;
     Ok(CreateOutcome::Created(Box::new(CreatedFile {

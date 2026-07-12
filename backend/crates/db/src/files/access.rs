@@ -120,53 +120,45 @@ pub async fn byte_lease(
     lease_id: Uuid,
     secret_hash: &str,
 ) -> Result<Option<ByteLease>, sqlx::Error> {
-    type Row = (
-        String,
-        Uuid,
-        i64,
-        Option<String>,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-    );
-    let row: Option<Row> = sqlx::query_as(
-        "SELECT le.kind, f.id, f.declared_size, f.content_type, f.part_size, le.upload_id, \
-         l.object_key \
+    use sqlx::{FromRow as _, Row as _};
+    // storage까지 한 왕복으로 — /b는 모든 중계 바이트가 지나는 경로다.
+    // storages 컬럼은 le·f와 이름이 겹치므로(kind, id) s. 접두로 뽑고,
+    // 겹치는 쪽(le.kind, f.id)은 별칭으로 피한다.
+    let storage_cols = STORAGE_COLUMNS
+        .split(", ")
+        .map(|c| format!("s.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let row = sqlx::query(&format!(
+        "SELECT le.kind AS lease_kind, f.id AS file_id, f.declared_size, f.content_type, \
+         f.part_size, le.upload_id, l.object_key, {storage_cols} \
          FROM leases le \
          JOIN files f ON f.id = le.file_id \
          LEFT JOIN locations l ON l.file_id = f.id \
+         LEFT JOIN storages s ON s.id = l.storage_id \
          WHERE le.id = $1 AND le.secret_hash = $2 \
-         AND le.state = 'issued' AND le.expires_at > now()",
-    )
+         AND le.state = 'issued' AND le.expires_at > now()"
+    ))
     .bind(lease_id)
     .bind(secret_hash)
     .fetch_optional(pool)
     .await?;
-    let Some((lease_kind, file_id, declared_size, content_type, part_size, upload_id, object_key)) =
-        row
-    else {
+    let Some(row) = row else {
         return Ok(None);
     };
+    let object_key: Option<String> = row.try_get("object_key")?;
     let location = match object_key {
         None => None,
-        Some(object_key) => {
-            let storage: StorageRow = sqlx::query_as(&format!(
-                "SELECT {STORAGE_COLUMNS} FROM storages s \
-                 JOIN locations l ON l.storage_id = s.id WHERE l.file_id = $1"
-            ))
-            .bind(file_id)
-            .fetch_one(pool)
-            .await?;
-            Some((object_key, storage))
-        }
+        // location이 있으면 FK가 storage를 보장한다 — s.*는 NULL일 수 없다.
+        Some(object_key) => Some((object_key, StorageRow::from_row(&row)?)),
     };
     Ok(Some(ByteLease {
-        lease_kind,
-        file_id,
-        declared_size,
-        content_type,
-        part_size,
-        upload_id,
+        lease_kind: row.try_get("lease_kind")?,
+        file_id: row.try_get("file_id")?,
+        declared_size: row.try_get("declared_size")?,
+        content_type: row.try_get("content_type")?,
+        part_size: row.try_get("part_size")?,
+        upload_id: row.try_get("upload_id")?,
         location,
     }))
 }

@@ -151,11 +151,14 @@ impl Config {
             url: SecretString::from(env("FILEGATE_DATABASE_URL").unwrap_or_else(|| {
                 "postgres://filegate:filegate@127.0.0.1:55432/filegate".to_owned()
             })),
+            // 기본 20: 요청 트랜잭션이 커넥션을 duration 내내 쥐고, reconciler
+            // tick이 최대 2개(advisory lock + 잡 tx)를 점유한다 — 5면 서빙에
+            // ~3개만 남아 동시성이 조금만 있어도 acquire에서 큐잉된다.
             max_connections: env("FILEGATE_DB_MAX_CONNECTIONS")
                 .map(|v| v.parse())
                 .transpose()
                 .map_err(|e| Error::config(format!("FILEGATE_DB_MAX_CONNECTIONS: {e}")))?
-                .unwrap_or(5),
+                .unwrap_or(20),
         };
         // reconciler가 advisory lock 트랜잭션으로 커넥션 하나를 쥔 채
         // 잡 트랜잭션을 pool에서 또 연다 — 1개면 데드락이다.
@@ -219,7 +222,7 @@ mod tests {
         let config = Config::load_from(&base_env).unwrap();
         assert_eq!(config.server.bind_addr.port(), 8080);
         assert_eq!(config.server.log_format, LogFormat::Pretty);
-        assert_eq!(config.database.max_connections, 5);
+        assert_eq!(config.database.max_connections, 20);
         assert_eq!(config.security.enc_key_id, "v1");
         assert_eq!(config.security.operator_tokens.len(), 2);
         assert_eq!(config.server.multipart_threshold_bytes, 256 * 1024 * 1024);
