@@ -143,53 +143,38 @@ pub(super) async fn create(
         // (spec 02). s3 계열은 지금 벤더 세션을 열어 핸들을 lease에 기록하고,
         // 중계(fs 또는 force_relay)는 write secret을 지금 한 번 생성해 둔다 —
         // 이후 parts() 발급이 매번 같은 secret으로 URL을 조립해 회전이 없다.
-        match &backend {
-            StorageBackend::S3 { spec, force_relay } => {
-                let storage = state
-                    .s3_clients
-                    .get(&created.storage.id, spec, Address::Internal);
-                let upload_id = filegate_infra::s3_create_multipart(
-                    &storage,
-                    &created.object_key,
-                    body.content_type.as_deref(),
-                )
-                .await
-                .map_err(ApiError::Storage)?;
-                // 벤더 세션을 열었으니 upload_id를 반드시 DB에 남겨야 한다 —
-                // 기록 전에 실패하면 회수가 핸들을 몰라 세션이 영구 과금 고아가
-                // 된다. 기록 실패 시 방금 연 세션을 즉시 best-effort로 중단한다.
-                if let Err(error) =
-                    files::attach_upload_id(&state.pool, created.lease_id, &upload_id).await
-                {
-                    let _ = filegate_infra::s3_abort_multipart(
-                        &storage,
-                        &created.object_key,
-                        &upload_id,
-                    )
-                    .await;
-                    return Err(error.into());
-                }
-                if *force_relay {
-                    let relay = RelaySecret::generate();
-                    files::attach_multipart_secret(
-                        &state.pool,
-                        created.lease_id,
-                        &relay.secret,
-                        &relay.hash,
-                    )
-                    .await?;
-                }
+        if let StorageBackend::S3 { spec, .. } = &backend {
+            let storage = state
+                .s3_clients
+                .get(&created.storage.id, spec, Address::Internal);
+            let upload_id = filegate_infra::s3_create_multipart(
+                &storage,
+                &created.object_key,
+                body.content_type.as_deref(),
+            )
+            .await
+            .map_err(ApiError::Storage)?;
+            // 벤더 세션을 열었으니 upload_id를 반드시 DB에 남겨야 한다 —
+            // 기록 전에 실패하면 회수가 핸들을 몰라 세션이 영구 과금 고아가
+            // 된다. 기록 실패 시 방금 연 세션을 즉시 best-effort로 중단한다.
+            if let Err(error) =
+                files::attach_upload_id(&state.pool, created.lease_id, &upload_id).await
+            {
+                let _ =
+                    filegate_infra::s3_abort_multipart(&storage, &created.object_key, &upload_id)
+                        .await;
+                return Err(error.into());
             }
-            StorageBackend::Fs { .. } => {
-                let relay = RelaySecret::generate();
-                files::attach_multipart_secret(
-                    &state.pool,
-                    created.lease_id,
-                    &relay.secret,
-                    &relay.hash,
-                )
-                .await?;
-            }
+        }
+        if backend.is_relay() {
+            let relay = RelaySecret::generate();
+            files::attach_multipart_secret(
+                &state.pool,
+                created.lease_id,
+                &relay.secret,
+                &relay.hash,
+            )
+            .await?;
         }
         tracing::info!(
             event = "file.created",
