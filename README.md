@@ -37,4 +37,8 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 docker build -f deploy/docker/Dockerfile -t filegate:dev .
 ```
 
+`db` 통합 테스트(`#[sqlx::test]`)는 `DATABASE_URL`이 있어야 돈다 — `docker compose up` 후
+`export DATABASE_URL=postgres://filegate:filegate@127.0.0.1:55432/filegate`. 없으면 그 테스트는
+실패한다 (CI는 PG 서비스로 자동 공급). `migrations.rs`만 예외로 없으면 조용히 스킵한다.
+
 릴리스는 `VERSION` 파일을 올려 main에 머지하면 GitHub Actions가 ghcr 이미지와 태그를 발행한다.
