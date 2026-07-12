@@ -256,3 +256,23 @@ pub async fn prune_terminal_leases(
     .await?;
     Ok(deleted.rows_affected())
 }
+
+/// 대여 이력 보존 정리 — 보존 기간(3개월)을 지난 이력을 오래된 것부터
+/// 배치 삭제한다. 이력은 PK가 없는 로그라 ctid로 배치를 자른다.
+pub async fn prune_history(
+    pool: &PgPool,
+    retention_secs: i64,
+    limit: i64,
+) -> Result<u64, sqlx::Error> {
+    let deleted = sqlx::query(
+        "DELETE FROM lease_history WHERE ctid IN ( \
+         SELECT ctid FROM lease_history \
+         WHERE at < now() - $1 * interval '1 second' \
+         LIMIT $2)",
+    )
+    .bind(retention_secs)
+    .bind(limit)
+    .execute(pool)
+    .await?;
+    Ok(deleted.rows_affected())
+}

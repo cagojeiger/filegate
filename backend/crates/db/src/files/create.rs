@@ -94,6 +94,19 @@ pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome
     .fetch_one(&mut *tx)
     .await?;
 
+    // 대여 이력 — 발급과 같은 트랜잭션이라 lease와 항상 짝이다 (관찰용,
+    // leases가 GC된 뒤에도 남는 durable 로그).
+    sqlx::query(
+        "INSERT INTO lease_history (file_id, storage_id, client_id, kind, size) \
+         VALUES ($1, $2, $3, 'write', $4)",
+    )
+    .bind(file_id)
+    .bind(&storage.id)
+    .bind(spec.client_id)
+    .bind(spec.declared_size)
+    .execute(&mut *tx)
+    .await?;
+
     // capacity는 경성 상한이다: 예약 + 확정 + purge 대기 + 선언 크기가 상한을
     // 넘으면 발급 거부 (spec 00). 조건부 UPDATE 한 문장이라 경합에도 원자적이다.
     // 비교는 뺄셈 형태다 — 좌변 합산이 크기와 섞이지 않아 overflow가 없다
