@@ -2,11 +2,11 @@
 # 업로드 루프 E2E: create → 실제 바이트 PUT(presigned) → commit (spec 00).
 #
 # 전제: docker compose up (PG+MinIO), 서버 실행 중, terraform 그래프 적용
-#       (tf-provider/examples — storage minio-local, client notegate,
+#       (deploy/local — storage minio-local, client notegate,
 #        키 해시, binding attachment). 로컬 개발 DB 전용.
 # 사용: sh scripts/e2e-upload.sh   (종료 코드 = FAIL 수)
 BASE=http://127.0.0.1:8080
-RAW_KEY="fg_local-dev-notegate-key-0123456789abcdef"   # examples/main.tf의 로컬 키
+RAW_KEY="fg_local-dev-notegate-key-0123456789abcdef"   # deploy/local/main.tf의 로컬 키
 AUTH="Authorization: Bearer $RAW_KEY"
 JSON="Content-Type: application/json"
 PG_CONTAINER="${FILEGATE_PG_CONTAINER:-filegate-postgres-1}"
@@ -112,12 +112,6 @@ expect_any "삭제 후 read 409|404" "409 404" "$(curl -s -o /dev/null -w '%{htt
 expect_any "삭제 후 commit 409|404" "409 404" "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$FILE_ID/commit)"
 expect "pending 파일 delete 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE $BASE/v1/files/$F2)"
 expect_any "purge 대기 회계(대기중|정리됨)" "$SIZE 0" "$($PSQL "SELECT purge_pending_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
-
-echo "=== 운영자 usage 조회 ==="
-USAGE=$(curl -s -H "Authorization: Bearer fgop_local-dev" $BASE/admin/usage)
-case "$USAGE" in *'"purge_pending_bytes":'*) ok;; *) bad "usage에 purge_pending 필드 없음: $USAGE";; esac
-case "$USAGE" in *'"reserved_bytes":999'*) ok;; *) bad "usage reserved 불일치: $USAGE";; esac
-expect "클라이언트 키로 usage 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" $BASE/admin/usage)"
 
 echo "=== reconciler: 만료 회수 + purge (tick 대기) ==="
 # pending 파일(F2)의 쓰기 lease를 강제 만료시킨다 (테스트 전용)

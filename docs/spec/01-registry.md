@@ -31,7 +31,7 @@
 
 - binding은 storage **하나**를 가리킨다. create는 (client, intent) → binding → storage를 해석해 그곳에만 저장한다.
 - 자동 선택 없음, 자동 이동 없음. binding을 바꾸면 새 파일만 새 곳으로 간다. 후보 풀·선택 전략은 자동 배치가 올 때 확장한다 (ADR 001의 방향).
-- 일괄 배치 변경은 Terraform 참조가 담당한다 — 여러 binding이 같은 storage 참조(`filegate_storage.x.id`)를 공유하면, 선언 한 줄이 바뀔 때 전부 따라간다.
+- 일괄 배치 변경은 Terraform 참조가 담당한다 — 여러 binding이 같은 storage 참조(`filegate_storage_s3.x.id`)를 공유하면, 선언 한 줄이 바뀔 때 전부 따라간다.
 
 ## 자동화 단계 (방향)
 
