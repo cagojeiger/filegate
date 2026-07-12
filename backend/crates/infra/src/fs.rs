@@ -10,14 +10,11 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
-#[derive(Debug, Clone)]
-pub struct FsStorage {
-    pub root: PathBuf,
-}
-
 /// 접근 검증 — s3의 head_bucket 등가물. 디렉토리 존재 + 쓰기 가능을
-/// 프로브 파일로 확인한다 (등록 거부 또는 부팅 중단, ADR 001).
-pub async fn connect(root_path: &str) -> anyhow::Result<FsStorage> {
+/// 프로브 파일로 확인한다 (등록 거부 또는 부팅 중단, ADR 001). fs는
+/// 캐시할 커넥션이 없어 핸들을 돌려주지 않는다 — 실제 작업은 root 경로를
+/// 직접 받는다 (s3의 connect가 client를 돌려주는 것과 다른 점).
+pub async fn connect(root_path: &str) -> anyhow::Result<()> {
     let root = PathBuf::from(root_path);
     let meta = fs::metadata(&root)
         .await
@@ -30,7 +27,7 @@ pub async fn connect(root_path: &str) -> anyhow::Result<FsStorage> {
         .await
         .map_err(|e| anyhow::anyhow!("root_path '{root_path}' not writable: {e}"))?;
     fs::remove_file(&probe).await.ok();
-    Ok(FsStorage { root })
+    Ok(())
 }
 
 fn object_path(root: &Path, object_key: &str) -> PathBuf {

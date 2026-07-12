@@ -93,7 +93,7 @@ impl Config {
     }
 
     /// env 조회 함수로 로드한다 (테스트에서 env를 주입한다).
-    pub fn load_from(env: &dyn Fn(&str) -> Option<String>) -> Result<Self> {
+    pub(crate) fn load_from(env: &dyn Fn(&str) -> Option<String>) -> Result<Self> {
         let server = ServerConfig {
             bind_addr: env("FILEGATE_BIND")
                 .unwrap_or_else(|| "127.0.0.1:8080".to_owned())
