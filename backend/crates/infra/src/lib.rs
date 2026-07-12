@@ -14,6 +14,6 @@ pub use s3::{
     head_object as s3_head_object, list_parts as s3_list_parts, open_read as s3_open_read,
     presign_get as s3_presign_get, presign_put as s3_presign_put,
     presign_upload_part as s3_presign_upload_part, put_object_from_path as s3_put_object_from_path,
-    rfc5987_encode, upload_part_from_path as s3_upload_part_from_path, Address, S3Storage,
-    S3StorageSpec,
+    rfc5987_encode, upload_part_from_path as s3_upload_part_from_path, Address, S3ClientCache,
+    S3Storage, S3StorageSpec,
 };
