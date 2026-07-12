@@ -68,8 +68,9 @@
 
 ### usage — 운영자 용량 조회
 
-- 운영자 표면이다. 클라이언트 자격증명으로는 호출할 수 없다.
-- 출력: storage별 capacity 한도, 예약량(pending 합), 확정량(active 합), purge 대기 점유(deleted·미purge), 남은 여유(= 한도 − 앞의 셋).
+- 운영자 표면이다. 클라이언트 자격증명으로는 호출할 수 없다. 읽기 전용 — 쓰기 표면은 Terraform 단독이다.
+- storage별: capacity 한도, 예약량(pending 합), 확정량(active 합), purge 대기 점유(deleted·미purge), 남은 여유(= 한도 − 앞의 셋), 그리고 각 버킷과 짝을 이루는 파일 수(pending·active·purge 대기).
+- (client × storage)별: 활성 점유(파일 수·바이트). storage_usage는 client_id가 없어 못 가르는 것을 보완한다 — 여러 client가 한 storage를 공유할 때 각자의 몫을 준다.
 - 이 총량이 배치 거부와 tiering 판단의 입력이다.
 
 ## 흐름: 업로드

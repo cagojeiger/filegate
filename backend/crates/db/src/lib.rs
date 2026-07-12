@@ -2,6 +2,7 @@
 
 pub mod files;
 pub mod registry;
+pub mod usage;
 
 use sqlx::postgres::PgPoolOptions;
 pub use sqlx::Error as DbError;
