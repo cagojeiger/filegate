@@ -21,7 +21,7 @@ use axum::routing::put;
 use axum::Router;
 use filegate_db::files::{self, ByteLease};
 use filegate_infra::{
-    fs as fs_backend, rfc5987_encode, s3_client, s3_open_read, s3_put_object_from_path, Address,
+    fs as fs_backend, rfc5987_encode, s3_open_read, s3_put_object_from_path, Address,
 };
 use futures_util::StreamExt;
 use md5::{Digest, Md5};
@@ -101,6 +101,7 @@ async fn upload(
             part_size,
             query.part,
             content_length,
+            &storage_row.id,
             object_key,
             &backend,
             body,
@@ -152,7 +153,9 @@ async fn upload(
         }
         StorageBackend::S3 { spec, .. } => {
             drop(file);
-            let storage = s3_client(spec, Address::Internal);
+            let storage = state
+                .s3_clients
+                .get(&storage_row.id, spec, Address::Internal);
             let uploaded = s3_put_object_from_path(
                 &storage,
                 object_key,
@@ -185,6 +188,7 @@ async fn upload_part(
     part_size: i64,
     part: Option<i32>,
     content_length: i64,
+    storage_id: &str,
     object_key: &str,
     backend: &StorageBackend,
     body: Body,
@@ -275,7 +279,7 @@ async fn upload_part(
             // 내내 붙잡지 않는다 (files.rs 모듈 불변식). 벤더가 part 번호로
             // last-write-wins 하므로 승격 직렬화 락도 불필요하고, 기록은
             // 전송이 끝난 뒤 짧은 upsert 하나다.
-            let storage = s3_client(spec, Address::Internal);
+            let storage = state.s3_clients.get(storage_id, spec, Address::Internal);
             let uploaded = filegate_infra::s3_upload_part_from_path(
                 &storage, object_key, upload_id, part_no, &temp_path,
             )
@@ -368,7 +372,9 @@ async fn download(
             Err(error) => return Err(ApiError::Storage(error)),
         },
         StorageBackend::S3 { spec, .. } => {
-            let storage = s3_client(spec, Address::Internal);
+            let storage = state
+                .s3_clients
+                .get(&storage_row.id, spec, Address::Internal);
             match s3_open_read(&storage, object_key).await {
                 Ok(Some((reader, size))) => (Box::new(reader), size),
                 Ok(None) => return Err(not_found("object not found")),

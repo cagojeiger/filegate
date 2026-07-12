@@ -17,7 +17,7 @@ use std::time::Duration;
 use filegate_core::Crypto;
 use filegate_db::files::{self, SweepCandidate};
 use filegate_db::{registry, PgPool};
-use filegate_infra::{fs as fs_backend, s3_client, s3_delete_object, Address};
+use filegate_infra::{fs as fs_backend, s3_delete_object, Address, S3ClientCache};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
@@ -36,6 +36,7 @@ const LEASE_RETENTION: Duration = Duration::from_secs(24 * 3600);
 pub fn spawn(
     pool: PgPool,
     crypto: Arc<Crypto>,
+    s3_clients: Arc<S3ClientCache>,
     tick: Duration,
     shutdown: CancellationToken,
 ) -> JoinHandle<()> {
@@ -57,7 +58,7 @@ pub fn spawn(
                     // 락을 못 이긴 pod의 잔여물이 밀린다.
                     sweep_local_temps().await;
                     let result = filegate_db::with_reconciler_lock(&pool, || async {
-                        run_jobs(&pool, &crypto).await;
+                        run_jobs(&pool, &crypto, &s3_clients).await;
                     })
                     .await;
                     match result {
@@ -74,7 +75,7 @@ pub fn spawn(
     })
 }
 
-async fn run_jobs(pool: &PgPool, crypto: &Crypto) {
+async fn run_jobs(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
     // 잡 1: 만료 회수 (spec 00 — pending의 capacity 해제 지점).
     // 전이가 먼저다: reclaimed로 잠근 뒤에만 실물을 지운다. 늦은 commit이
     // 전이를 이겼으면(false) 실물을 건드리지 않는다. 전이 후 물리 삭제가
@@ -85,7 +86,8 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto) {
             for candidate in candidates {
                 match files::finalize_reclaim(pool, &candidate).await {
                     Ok(true) => {
-                        if let Err(error) = sweep_object(pool, crypto, &candidate).await {
+                        if let Err(error) = sweep_object(pool, crypto, s3_clients, &candidate).await
+                        {
                             tracing::warn!(
                                 event = "reconciler.orphan_object",
                                 file = %candidate.file_id,
@@ -111,7 +113,7 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto) {
     match files::purgeable(pool, BATCH_LIMIT).await {
         Ok(candidates) => {
             for candidate in candidates {
-                match sweep_object(pool, crypto, &candidate).await {
+                match sweep_object(pool, crypto, s3_clients, &candidate).await {
                     Ok(()) => match files::finalize_purge(pool, &candidate).await {
                         Ok(true) => tracing::info!(
                             event = "file.purged",
@@ -219,6 +221,7 @@ async fn sweep_local_temps() {
 async fn sweep_object(
     pool: &PgPool,
     crypto: &Crypto,
+    s3_clients: &S3ClientCache,
     candidate: &SweepCandidate,
 ) -> anyhow::Result<()> {
     let row = registry::get_storage(pool, &candidate.storage_id)
@@ -226,7 +229,7 @@ async fn sweep_object(
         .ok_or_else(|| anyhow::anyhow!("storage '{}' not registered", candidate.storage_id))?;
     match crate::storage_access::backend_from_row(crypto, &row)? {
         crate::storage_access::StorageBackend::S3 { spec, .. } => {
-            let storage = s3_client(&spec, Address::Internal);
+            let storage = s3_clients.get(&candidate.storage_id, &spec, Address::Internal);
             if let Some(upload_id) = &candidate.upload_id {
                 filegate_infra::s3_abort_multipart(&storage, &candidate.object_key, upload_id)
                     .await?;

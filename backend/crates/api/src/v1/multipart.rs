@@ -8,7 +8,7 @@ use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use filegate_db::files;
-use filegate_infra::{s3_client, Address};
+use filegate_infra::Address;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -47,7 +47,9 @@ pub(super) async fn commit(
             // 직결: 실물은 벤더에 있다 — ListParts가 대조 재료다.
             let upload_id =
                 upload_id.ok_or_else(|| internal("direct multipart lease has no upload id"))?;
-            let storage = s3_client(spec, Address::Internal);
+            let storage = state
+                .s3_clients
+                .get(&file.storage.id, spec, Address::Internal);
             let vendor = filegate_infra::s3_list_parts(&storage, &file.object_key, &upload_id)
                 .await
                 .map_err(ApiError::Storage)?;
@@ -67,7 +69,9 @@ pub(super) async fn commit(
                     // 중계 s3: part는 도착 즉시 벤더에 올라가 있다 — 완성 선언만.
                     let upload_id = upload_id
                         .ok_or_else(|| internal("relay multipart lease has no upload id"))?;
-                    let storage = s3_client(spec, Address::Internal);
+                    let storage = state
+                        .s3_clients
+                        .get(&file.storage.id, spec, Address::Internal);
                     let ledger: Vec<(i32, String)> =
                         parts.into_iter().map(|(n, _, md5)| (n, md5)).collect();
                     filegate_infra::s3_complete_multipart(
@@ -201,7 +205,9 @@ pub(super) async fn parts(
         } => {
             let upload_id =
                 upload_id.ok_or_else(|| internal("direct multipart lease has no upload id"))?;
-            let storage = s3_client(spec, Address::Public);
+            let storage = state
+                .s3_clients
+                .get(&file.storage.id, spec, Address::Public);
             for &n in &body.parts {
                 let url = filegate_infra::s3_presign_upload_part(
                     &storage,

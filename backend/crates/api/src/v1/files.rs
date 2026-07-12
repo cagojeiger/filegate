@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use filegate_db::files::{self, CreateOutcome, CreateSpec, DeleteOutcome};
-use filegate_infra::{s3_client, s3_head_object, s3_presign_get, s3_presign_put, Address};
+use filegate_infra::{s3_head_object, s3_presign_get, s3_presign_put, Address};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -145,7 +145,9 @@ pub(super) async fn create(
         // 이후 parts() 발급이 매번 같은 secret으로 URL을 조립해 회전이 없다.
         match &backend {
             StorageBackend::S3 { spec, force_relay } => {
-                let storage = s3_client(spec, Address::Internal);
+                let storage = state
+                    .s3_clients
+                    .get(&created.storage.id, spec, Address::Internal);
                 let upload_id = filegate_infra::s3_create_multipart(
                     &storage,
                     &created.object_key,
@@ -215,7 +217,9 @@ pub(super) async fn create(
             spec,
             force_relay: false,
         } => {
-            let storage = s3_client(spec, Address::Public);
+            let storage = state
+                .s3_clients
+                .get(&created.storage.id, spec, Address::Public);
             s3_presign_put(
                 &storage,
                 &created.object_key,
@@ -284,7 +288,9 @@ pub(super) async fn commit(
         let StorageBackend::S3 { spec, .. } = &backend else {
             return Err(internal("direct access requires an s3 storage"));
         };
-        let storage = s3_client(spec, Address::Internal);
+        let storage = state
+            .s3_clients
+            .get(&file.storage.id, spec, Address::Internal);
         match s3_head_object(&storage, &file.object_key)
             .await
             .map_err(ApiError::Storage)?
@@ -374,7 +380,9 @@ pub(super) async fn read(
             spec,
             force_relay: false,
         } => {
-            let storage = s3_client(spec, Address::Public);
+            let storage = state
+                .s3_clients
+                .get(&file.storage.id, spec, Address::Public);
             let url = s3_presign_get(
                 &storage,
                 &file.object_key,

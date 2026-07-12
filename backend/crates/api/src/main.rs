@@ -46,9 +46,12 @@ async fn main() -> anyhow::Result<()> {
     info!(event = "server.listening", addr = %config.server.bind_addr);
 
     let shutdown = CancellationToken::new();
+    // 요청 경로와 reconciler가 같은 캐시를 공유한다 — 같은 storage의 웜 풀.
+    let s3_clients = std::sync::Arc::new(filegate_infra::S3ClientCache::default());
     let worker = reconciler::spawn(
         pool.clone(),
         crypto.clone(),
+        s3_clients.clone(),
         std::time::Duration::from_secs(config.server.reconciler_interval_secs),
         shutdown.clone(),
     );
@@ -60,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
         public_url: config.server.public_url.clone(),
         multipart_threshold: config.server.multipart_threshold_bytes,
         part_size: config.server.part_size_bytes,
+        s3_clients,
     };
     let http_shutdown = shutdown.clone().cancelled_owned();
     let server = async move {

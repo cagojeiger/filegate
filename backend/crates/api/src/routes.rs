@@ -40,6 +40,8 @@ pub struct AppState {
     pub multipart_threshold: i64,
     /// multipart part 크기 — create 시점 값이 업로드별로 동결된다 (spec 02).
     pub part_size: i64,
+    /// storage당 S3 클라이언트 재사용 — 커넥션 풀을 웜 상태로 유지한다.
+    pub s3_clients: Arc<filegate_infra::S3ClientCache>,
 }
 
 /// `Authorization: Bearer <token>`에서 토큰을 꺼낸다 — 두 인증 미들웨어

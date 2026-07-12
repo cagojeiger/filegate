@@ -4,6 +4,8 @@
 //! 등록 시점과 부팅 재검증이 connect를, 도메인 오퍼레이션이
 //! presign_put(발급)과 head_object(commit의 사후 검증)를 호출한다.
 
+use std::collections::HashMap;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
@@ -32,12 +34,56 @@ pub struct S3Storage {
 
 /// 어느 주소로 클라이언트를 만들 것인가. SigV4는 호스트를 서명에 묶으므로,
 /// presign은 전송 주체가 실제 접속할 공개 주소로 서명해야 한다 (spec 01).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Address {
     /// filegate 프로세스가 직접 부르는 경로 (검증, head_object).
     Internal,
     /// 전송 주체에게 건네질 URL의 서명 (presign).
     Public,
+}
+
+/// 캐시 유효성 대조용 — 시크릿까지 값으로 비교한다 (양쪽 다 프로세스
+/// 메모리의 우리 값이고 결과는 재구성 여부뿐이라 타이밍 채널이 없다).
+impl PartialEq for S3StorageSpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.endpoint == other.endpoint
+            && self.public_endpoint == other.public_endpoint
+            && self.region == other.region
+            && self.bucket == other.bucket
+            && self.force_path_style == other.force_path_style
+            && self.access_key == other.access_key
+            && self.secret_key.expose_secret() == other.secret_key.expose_secret()
+    }
+}
+
+/// storage당 클라이언트 캐시 — 클라이언트가 자기 HTTP 커넥션 풀을 소유하므로,
+/// 요청마다 새로 만들면 모든 S3 네트워크 op가 콜드 TCP+TLS 핸드셰이크로
+/// 시작한다. 재사용이 풀을 웜 상태로 유지한다.
+///
+/// 무효화는 내용 대조다: storage 행은 요청마다 DB에서 새로 읽히므로, 캐시된
+/// spec과 이번 spec이 다르면(등록 갱신) 그 자리에서 재구성한다 — 멀티 pod에도
+/// 별도 무효화 훅이 필요 없다. 락 poison이면 캐시만 건너뛴다 (기능 동일).
+#[derive(Debug, Default)]
+pub struct S3ClientCache {
+    inner: RwLock<HashMap<(String, Address), (S3StorageSpec, S3Storage)>>,
+}
+
+impl S3ClientCache {
+    /// id는 등록부 storage id — 갱신 시 옛 항목이 제자리 교체되게 하는 키.
+    pub fn get(&self, id: &str, spec: &S3StorageSpec, address: Address) -> S3Storage {
+        if let Ok(cache) = self.inner.read() {
+            if let Some((cached_spec, storage)) = cache.get(&(id.to_owned(), address)) {
+                if cached_spec == spec {
+                    return storage.clone();
+                }
+            }
+        }
+        let storage = client(spec, address);
+        if let Ok(mut cache) = self.inner.write() {
+            cache.insert((id.to_owned(), address), (spec.clone(), storage.clone()));
+        }
+        storage
+    }
 }
 
 /// 접근 확인 없이 클라이언트만 구성한다. 요청 경로(presign·head_object)용 —
