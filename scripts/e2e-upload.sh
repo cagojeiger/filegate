@@ -2,11 +2,11 @@
 # 업로드 루프 E2E: create → 실제 바이트 PUT(presigned) → commit (spec 00).
 #
 # 전제: docker compose up (PG+MinIO), 서버 실행 중, terraform 그래프 적용
-#       (tf-provider/examples — storage minio-local, client notegate,
+#       (deploy/local — storage minio-local, client notegate,
 #        키 해시, binding attachment). 로컬 개발 DB 전용.
 # 사용: sh scripts/e2e-upload.sh   (종료 코드 = FAIL 수)
 BASE=http://127.0.0.1:8080
-RAW_KEY="fg_local-dev-notegate-key-0123456789abcdef"   # examples/main.tf의 로컬 키
+RAW_KEY="fg_local-dev-notegate-key-0123456789abcdef"   # deploy/local/main.tf의 로컬 키
 AUTH="Authorization: Bearer $RAW_KEY"
 JSON="Content-Type: application/json"
 PG_CONTAINER="${FILEGATE_PG_CONTAINER:-filegate-postgres-1}"

@@ -4,7 +4,7 @@
 # 중계 전용 강화 케이스(secret·CL·CORS·kind 교차)를 추가로 찌른다.
 #
 # 전제: docker compose up, 서버 실행 중(FILEGATE_PUBLIC_URL 필수, tick 짧게),
-#       terraform 그래프 적용(tf-provider/examples — 3 storage + 3 binding),
+#       terraform 그래프 적용(deploy/local — 3 storage + 3 binding),
 #       /tmp/filegate-fs-demo 존재. 로컬 개발 DB 전용.
 # 사용: sh scripts/e2e-relay.sh   (종료 코드 = FAIL 수)
 BASE=http://127.0.0.1:8080
