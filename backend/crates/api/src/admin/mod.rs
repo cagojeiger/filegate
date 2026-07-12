@@ -10,6 +10,7 @@
 mod bindings;
 mod clients;
 mod storages;
+mod usage;
 
 pub use storages::verify_registered;
 
@@ -23,6 +24,8 @@ use crate::routes::AppState;
 
 pub fn admin_routes() -> Router<AppState> {
     Router::new()
+        .route("/usage", get(usage::report))
+        .route("/usage/clients", get(usage::by_client))
         .route("/storages", get(storages::list).post(storages::create))
         .route(
             "/storages/{id}",
