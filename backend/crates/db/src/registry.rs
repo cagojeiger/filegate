@@ -44,10 +44,7 @@ pub(crate) const STORAGE_COLUMNS: &str =
      force_path_style, access_key, secret_key_ciphertext, secret_key_nonce, enc_key_id, \
      capacity_bytes";
 
-/// 등록과 동시에 회계 0행을 시드한다 (같은 트랜잭션) — 예약(files::create)이
-/// 항상 조건부 UPDATE 한 문장으로 끝나게 (INSERT 경합 없음).
 pub async fn insert_storage(pool: &PgPool, row: &StorageRow) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO storages (id, kind, force_relay, root_path, endpoint, public_endpoint, \
          region, bucket, force_path_style, access_key, secret_key_ciphertext, secret_key_nonce, \
@@ -68,13 +65,9 @@ pub async fn insert_storage(pool: &PgPool, row: &StorageRow) -> Result<(), sqlx:
     .bind(&row.secret_key_nonce)
     .bind(&row.enc_key_id)
     .bind(row.capacity_bytes)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query("INSERT INTO storage_usage (storage_id) VALUES ($1)")
-        .bind(&row.id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await
+    .execute(pool)
+    .await
+    .map(|_| ())
 }
 
 /// 전체 치환 갱신 (id 제외). 갱신은 쓰기라 새 암호문이 온다 — 회전 런북 2단계의
@@ -124,22 +117,14 @@ pub async fn list_storages(pool: &PgPool) -> Result<Vec<StorageRow>, sqlx::Error
 }
 
 /// 멱등 삭제 — 없는 행도 성공이다 (spec 01: TF-친화). binding이 남아 있으면
-/// FK가 거부한다 — 연결을 먼저 지워야 노드를 지운다. 회계 행은 세 버킷이
-/// 전부 0일 때만 함께 진다 — 점유가 남았으면 FK가 storage 삭제를 거부한다.
+/// FK가 거부한다 — 연결을 먼저 지워야 노드를 지운다. 실물(location)이 남은
+/// storage도 FK가 거부한다 — 점유가 있는 한 등록부에서 사라질 수 없다.
 pub async fn delete_storage(pool: &PgPool, id: &str) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    sqlx::query(
-        "DELETE FROM storage_usage WHERE storage_id = $1 \
-         AND reserved_bytes = 0 AND active_bytes = 0 AND purge_pending_bytes = 0",
-    )
-    .bind(id)
-    .execute(&mut *tx)
-    .await?;
     sqlx::query("DELETE FROM storages WHERE id = $1")
         .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await
+        .execute(pool)
+        .await
+        .map(|_| ())
 }
 
 // ---- clients ----

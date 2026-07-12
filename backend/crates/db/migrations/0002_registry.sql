@@ -92,10 +92,8 @@ CREATE TABLE bindings (
 CREATE INDEX bindings_storage_idx ON bindings (storage_id);
 
 -- 도메인 테이블(0001)의 느슨한 text id를 등록부에 묶는다.
--- 파일을 가진 client, 위치·회계가 남은 storage는 삭제가 거부된다 (ADR 004).
+-- 파일을 가진 client, 위치(실물)가 남은 storage는 삭제가 거부된다 (ADR 004).
 ALTER TABLE files
     ADD CONSTRAINT files_client_fk FOREIGN KEY (client_id) REFERENCES clients (id);
 ALTER TABLE locations
     ADD CONSTRAINT locations_storage_fk FOREIGN KEY (storage_id) REFERENCES storages (id);
-ALTER TABLE storage_usage
-    ADD CONSTRAINT storage_usage_storage_fk FOREIGN KEY (storage_id) REFERENCES storages (id);

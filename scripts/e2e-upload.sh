@@ -25,7 +25,6 @@ expect_any() { # $1 label, $2 want(공백 구분 후보), $3 got — purge 타�
 $PSQL "DELETE FROM leases;" >/dev/null 2>&1
 $PSQL "DELETE FROM locations;" >/dev/null 2>&1
 $PSQL "DELETE FROM files;" >/dev/null 2>&1
-$PSQL "UPDATE storage_usage SET reserved_bytes=0, active_bytes=0, purge_pending_bytes=0;" >/dev/null 2>&1
 
 PAYLOAD="hello filegate upload loop"
 SIZE=$(printf '%s' "$PAYLOAD" | wc -c | tr -d ' ')
@@ -43,7 +42,6 @@ expect "제어문자 content_type 400" 400 "$(curl -s -o /dev/null -w '%{http_co
 # 임계값 초과 선언은 multipart로 간다 (spec 02) — 크기 상한은 part×10,000.
 # 1PB는 어떤 합리적 part 설정에서도 상한 밖이라 400.
 expect "multipart 한계 초과 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":1000000000000000}')"
-expect "capacity 초과 507" 507 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":2147483648}')"
 
 CREATE=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files \
   -d "{\"intent\":\"attachment\",\"declared_size\":$SIZE,\"content_type\":\"text/plain\",\"declared_md5\":\"$MD5\"}")
@@ -98,8 +96,8 @@ expect "read lease 원장 기록" "1" "$($PSQL "SELECT count(*) FROM leases WHER
 
 echo "=== 회계 검증 ==="
 # 파일1 확정(active=SIZE), 파일2 예약(reserved=999)
-expect "active_bytes" "$SIZE" "$($PSQL "SELECT active_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
-expect "reserved_bytes" "999" "$($PSQL "SELECT reserved_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
+expect "active_bytes" "$SIZE" "$($PSQL "SELECT coalesce(sum(f.declared_size),0) FROM files f JOIN locations l ON l.file_id=f.id WHERE l.storage_id='minio-local' AND f.state='active';" | tr -d ' ')"
+expect "reserved_bytes" "999" "$($PSQL "SELECT coalesce(sum(f.declared_size),0) FROM files f JOIN locations l ON l.file_id=f.id WHERE l.storage_id='minio-local' AND f.state='pending';" | tr -d ' ')"
 expect "파일1 active" "active" "$($PSQL "SELECT state FROM files WHERE id='$FILE_ID';" | tr -d ' ')"
 expect "쓰기 lease 정산" "committed" "$($PSQL "SELECT state FROM leases WHERE file_id='$FILE_ID' AND kind='write';" | tr -d ' ')"
 
@@ -111,7 +109,7 @@ expect "delete 멱등 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AU
 expect_any "삭제 후 read 409|404" "409 404" "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$FILE_ID/read)"
 expect_any "삭제 후 commit 409|404" "409 404" "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$FILE_ID/commit)"
 expect "pending 파일 delete 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE $BASE/v1/files/$F2)"
-expect_any "purge 대기 회계(대기중|정리됨)" "$SIZE 0" "$($PSQL "SELECT purge_pending_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
+expect_any "purge 대기 회계(대기중|정리됨)" "$SIZE 0" "$($PSQL "SELECT coalesce(sum(f.declared_size),0) FROM files f JOIN locations l ON l.file_id=f.id WHERE l.storage_id='minio-local' AND f.state='deleted';" | tr -d ' ')"
 
 echo "=== reconciler: 만료 회수 + purge (tick 대기) ==="
 # pending 파일(F2)의 쓰기 lease를 강제 만료시킨다 (테스트 전용)
@@ -120,8 +118,8 @@ sleep 7   # FILEGATE_RECONCILER_INTERVAL_SECS=2 기준 tick 3회 이상
 expect "pending → reclaimed" "reclaimed" "$($PSQL "SELECT state FROM files WHERE id='$F2';" | tr -d ' ')"
 expect "회수된 파일 stat 404 (내부 상태 비노출)" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" $BASE/v1/files/$F2)"
 expect "회수된 파일 delete 404 (일관성)" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE $BASE/v1/files/$F2)"
-expect "회수 후 reserved 0" "0" "$($PSQL "SELECT reserved_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
-expect "purge 후 대기 0" "0" "$($PSQL "SELECT purge_pending_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
+expect "회수 후 reserved 0" "0" "$($PSQL "SELECT coalesce(sum(f.declared_size),0) FROM files f JOIN locations l ON l.file_id=f.id WHERE l.storage_id='minio-local' AND f.state='pending';" | tr -d ' ')"
+expect "purge 후 대기 0" "0" "$($PSQL "SELECT coalesce(sum(f.declared_size),0) FROM files f JOIN locations l ON l.file_id=f.id WHERE l.storage_id='minio-local' AND f.state='deleted';" | tr -d ' ')"
 expect "purge 후에도 stat은 답한다(deleted)" "deleted" "$($PSQL "SELECT state FROM files WHERE id='$FILE_ID';" | tr -d ' ')"
 expect "location 제거됨" "0" "$($PSQL "SELECT count(*) FROM locations;" | tr -d ' ')"
 DL=$(curl -s -o /dev/null -w '%{http_code}' "$GET_URL")
@@ -131,7 +129,6 @@ expect "purge 후 기존 GET URL 404" 404 "$DL"
 $PSQL "DELETE FROM leases;" >/dev/null 2>&1
 $PSQL "DELETE FROM locations;" >/dev/null 2>&1
 $PSQL "DELETE FROM files;" >/dev/null 2>&1
-$PSQL "UPDATE storage_usage SET reserved_bytes=0, active_bytes=0, purge_pending_bytes=0;" >/dev/null 2>&1
 
 echo ""
 echo "결과: PASS=$PASS FAIL=$FAIL"

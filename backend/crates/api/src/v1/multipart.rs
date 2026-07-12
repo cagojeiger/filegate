@@ -96,15 +96,7 @@ pub(super) async fn commit(
         }
     };
 
-    if files::finalize_commit(
-        &state.pool,
-        file_id,
-        &file.storage.id,
-        file.declared_size,
-        &etag,
-    )
-    .await?
-    {
+    if files::finalize_commit(&state.pool, file_id, &etag).await? {
         tracing::info!(event = "file.committed", file = %file_id, client = %client.0, multipart = true);
         return Ok(committed_response(file_id, etag));
     }

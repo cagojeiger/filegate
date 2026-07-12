@@ -124,13 +124,6 @@ pub(super) async fn create(
         CreateOutcome::Created(created) => created,
         // 선언되지 않은 어휘 — binding이 없다. 어느 쪽이 없는지는 말하지 않는다.
         CreateOutcome::NoBinding => return Err(not_found("unknown intent")),
-        // 용량 상세 없는 거부 (spec 00).
-        CreateOutcome::CapacityExceeded => {
-            return Err(ApiError::Status(
-                StatusCode::INSUFFICIENT_STORAGE,
-                "insufficient storage".to_owned(),
-            ))
-        }
     };
 
     // 접근 모드는 storage 선언이 정한다 (ADR 001). 직결이면 공개 주소로
@@ -295,15 +288,7 @@ pub(super) async fn commit(
         }
     }
 
-    if files::finalize_commit(
-        &state.pool,
-        file_id,
-        &file.storage.id,
-        file.declared_size,
-        &etag,
-    )
-    .await?
-    {
+    if files::finalize_commit(&state.pool, file_id, &etag).await? {
         tracing::info!(event = "file.committed", file = %file_id, client = %client.0);
         return Ok(committed_response(file_id, etag));
     }
