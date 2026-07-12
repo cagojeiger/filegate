@@ -33,6 +33,10 @@ const TEMP_MAX_AGE: Duration = Duration::from_secs(48 * 3600);
 /// CASCADE로 lease_parts가 함께 사라진다. 어떤 진행 중 업로드보다 넉넉하다.
 const LEASE_RETENTION: Duration = Duration::from_secs(24 * 3600);
 
+/// 대여 이력(lease_history)의 보존 기간 — 관찰·통계용 durable 로그는
+/// 최근 3개월만 유지한다 (설계 결정). lease GC와 독립이다.
+const HISTORY_RETENTION: Duration = Duration::from_secs(90 * 24 * 3600);
+
 pub fn spawn(
     pool: PgPool,
     crypto: Arc<Crypto>,
@@ -153,6 +157,16 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
         Ok(count) => tracing::info!(event = "reconciler.leases_pruned", count),
         Err(error) => {
             tracing::error!(event = "reconciler.scan_failed", job = "prune_leases", %error)
+        }
+    }
+
+    // 잡 6: 대여 이력 보존 정리 — 3개월 지난 lease_history를 배치 삭제한다.
+    // 회계·운영과 무관한 관찰 로그의 성장 상한이다.
+    match files::prune_history(pool, HISTORY_RETENTION.as_secs() as i64, BATCH_LIMIT).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(event = "reconciler.history_pruned", count),
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", job = "prune_history", %error)
         }
     }
 

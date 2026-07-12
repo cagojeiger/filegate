@@ -34,6 +34,6 @@ pub use multipart::{
 };
 pub use sweep::{
     active_multipart_lease_ids, expire_read_leases, expired_pending, finalize_purge,
-    finalize_reclaim, mark_deleted, prune_terminal_leases, purgeable, DeleteOutcome,
+    finalize_reclaim, mark_deleted, prune_history, prune_terminal_leases, purgeable, DeleteOutcome,
     SweepCandidate,
 };

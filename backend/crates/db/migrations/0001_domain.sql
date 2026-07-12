@@ -89,6 +89,25 @@ CREATE TABLE lease_parts (
     PRIMARY KEY (lease_id, part_no)
 );
 
+-- 대여 이력 — 관찰용 durable 로그 (통계 분포·파일별 개별 이력·idle 판단).
+-- leases는 인증·수명 원장이라 짧게 살고 GC되지만, 이력은 여기 남는다.
+-- 발급과 같은 트랜잭션에 기록되므로 lease와 항상 짝이다. FK는 걸지
+-- 않는다 — 이력은 등록부·파일 삭제와 독립적으로 생존해야 하는 로그고,
+-- 로그가 등록부 삭제를 막아서도 안 된다. 보존은 reconciler가 다스린다.
+CREATE TABLE lease_history (
+    at         timestamptz NOT NULL DEFAULT now(),
+    file_id    uuid NOT NULL,
+    storage_id text NOT NULL,
+    client_id  text NOT NULL,
+    kind       text NOT NULL CHECK (kind IN ('write', 'read')),
+    size       bigint NOT NULL CHECK (size >= 0)
+);
+
+-- 보존 prune과 시계열 조회.
+CREATE INDEX lease_history_at_idx ON lease_history (at);
+-- 파일별 개별 이력과 idle 판단 (마지막 대여 시각).
+CREATE INDEX lease_history_file_idx ON lease_history (file_id, at);
+
 -- storage별 capacity 회계 — usage의 세 버킷 (spec 00). 상한은 등록부에 산다.
 -- 예약은 create, 정산은 commit, 해제는 만료 회수·purge (단일 트랜잭션 안에서).
 -- 이 행은 파생값이 아니라 원자적 조건부 예약의 락 지점이다 — 집계로

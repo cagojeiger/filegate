@@ -67,21 +67,38 @@ pub async fn access(
 /// 읽기 lease 기록 — 모든 바이트 접근은 lease다 (ADR 002, 원장이 감사 기록).
 /// 읽기는 용량을 소비하지 않는다 (spec 00). 중계면 secret 해시가 실린다.
 /// 표현 파일명은 저장하지 않는다 — URL 쿼리로 나가는 표현일 뿐이다 (spec 00).
+/// 대여 이력도 같은 트랜잭션에 남긴다 — lease는 GC되지만 이력은 durable하다.
 pub async fn issue_read_lease(
     pool: &PgPool,
     file_id: Uuid,
     ttl_secs: i64,
     secret_hash: Option<&str>,
+    storage_id: &str,
+    client_id: &str,
+    size: i64,
 ) -> Result<Uuid, sqlx::Error> {
-    sqlx::query_scalar(
+    let mut tx = pool.begin().await?;
+    let lease_id: Uuid = sqlx::query_scalar(
         "INSERT INTO leases (file_id, kind, expires_at, secret_hash) \
          VALUES ($1, 'read', now() + $2 * interval '1 second', $3) RETURNING id",
     )
     .bind(file_id)
     .bind(ttl_secs)
     .bind(secret_hash)
-    .fetch_one(pool)
-    .await
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO lease_history (file_id, storage_id, client_id, kind, size) \
+         VALUES ($1, $2, $3, 'read', $4)",
+    )
+    .bind(file_id)
+    .bind(storage_id)
+    .bind(client_id)
+    .bind(size)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(lease_id)
 }
 
 // ---- 중계 바이트 엔드포인트의 lease 접근 (ADR 003: lease별 secret) ----

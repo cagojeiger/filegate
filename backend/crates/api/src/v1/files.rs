@@ -379,9 +379,16 @@ pub(super) async fn read(
             // 감사 lease 기록은 부수 효과다 — 직결 read lease는 감사용이고
             // S3가 검사하는 게 아니라, 이미 완성된 유효 URL을 DB 실패로 버리지
             // 않는다. 실패해도 URL은 반환하고 경고만 남긴다 (best-effort).
-            if let Err(error) =
-                files::issue_read_lease(&state.pool, file_id, READ_LEASE_TTL.as_secs() as i64, None)
-                    .await
+            if let Err(error) = files::issue_read_lease(
+                &state.pool,
+                file_id,
+                READ_LEASE_TTL.as_secs() as i64,
+                None,
+                &file.storage.id,
+                &client.0,
+                file.declared_size,
+            )
+            .await
             {
                 tracing::warn!(event = "file.read_audit_failed", file = %file_id, %error);
             }
@@ -395,6 +402,9 @@ pub(super) async fn read(
                 file_id,
                 READ_LEASE_TTL.as_secs() as i64,
                 Some(&relay.hash),
+                &file.storage.id,
+                &client.0,
+                file.declared_size,
             )
             .await?;
             relay_url(base, lease_id, &relay.secret, body.filename.as_deref())
