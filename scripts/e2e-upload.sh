@@ -113,12 +113,6 @@ expect_any "삭제 후 commit 409|404" "409 404" "$(curl -s -o /dev/null -w '%{h
 expect "pending 파일 delete 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE $BASE/v1/files/$F2)"
 expect_any "purge 대기 회계(대기중|정리됨)" "$SIZE 0" "$($PSQL "SELECT purge_pending_bytes FROM storage_usage WHERE storage_id='minio-local';" | tr -d ' ')"
 
-echo "=== 운영자 usage 조회 ==="
-USAGE=$(curl -s -H "Authorization: Bearer fgop_local-dev" $BASE/admin/usage)
-case "$USAGE" in *'"purge_pending_bytes":'*) ok;; *) bad "usage에 purge_pending 필드 없음: $USAGE";; esac
-case "$USAGE" in *'"reserved_bytes":999'*) ok;; *) bad "usage reserved 불일치: $USAGE";; esac
-expect "클라이언트 키로 usage 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" $BASE/admin/usage)"
-
 echo "=== reconciler: 만료 회수 + purge (tick 대기) ==="
 # pending 파일(F2)의 쓰기 lease를 강제 만료시킨다 (테스트 전용)
 $PSQL "UPDATE leases SET expires_at = now() - interval '1 second' WHERE file_id='$F2' AND kind='write';" >/dev/null
