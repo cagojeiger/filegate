@@ -98,7 +98,7 @@ async fn create_records_a_write_rental(pool: PgPool) {
 async fn read_lease_records_a_read_rental(pool: PgPool) {
     wire(&pool).await;
     let created = create_ok(&pool, 100).await;
-    files::finalize_commit(&pool, created.file_id, "s", 100, "etag")
+    files::finalize_commit(&pool, created.file_id, "etag")
         .await
         .unwrap();
 
@@ -115,7 +115,7 @@ async fn read_lease_records_a_read_rental(pool: PgPool) {
 async fn history_survives_lease_gc(pool: PgPool) {
     wire(&pool).await;
     let created = create_ok(&pool, 100).await;
-    files::finalize_commit(&pool, created.file_id, "s", 100, "etag")
+    files::finalize_commit(&pool, created.file_id, "etag")
         .await
         .unwrap();
     files::issue_read_lease(&pool, created.file_id, 900, None, "s", "c", 100)

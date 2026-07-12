@@ -1,13 +1,14 @@
 //! 삭제 결정과 reconciler의 스캔·정리 — detach, 만료 회수, purge, lease GC.
 //!
 //! 물리 집행은 요청 경로 밖의 reconciler 몫이다 (결정·집행 분리). 여기는
-//! 상태 전이와 회계 정산만 하고, 실물 삭제에 필요한 위치 정보를 함께 낸다.
+//! 상태 전이만 하고, 실물 삭제에 필요한 위치 정보를 함께 낸다. 사용량은
+//! 상태·location에서 조회 시점에 집계되므로 여기서 정산할 카운터가 없다.
 
 use sqlx::PgPool;
 use uuid::Uuid;
 
 pub enum DeleteOutcome {
-    /// active → deleted 전이 완료, 회계는 purge 대기로 이동.
+    /// active → deleted 전이 완료 — 물리 purge를 기다린다.
     Deleted,
     /// 이미 deleted — 멱등.
     AlreadyDeleted,
@@ -16,52 +17,38 @@ pub enum DeleteOutcome {
     NotFound,
 }
 
-/// detach 결정 기록 (spec 00): active → deleted + 회계를 purge 대기 버킷으로.
-/// 물리 purge는 reconciler가 요청 경로 밖에서 집행한다 (결정·집행 분리).
+/// detach 결정 기록 (spec 00): active → deleted. 물리 purge는 reconciler가
+/// 요청 경로 밖에서 집행한다 (결정·집행 분리).
 pub async fn mark_deleted(
     pool: &PgPool,
     client_id: &str,
     file_id: Uuid,
 ) -> Result<DeleteOutcome, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-
-    let deleted: Option<i64> = sqlx::query_scalar(
+    let transitioned = sqlx::query(
         "UPDATE files SET state = 'deleted', deleted_at = now() \
-         WHERE id = $1 AND client_id = $2 AND state = 'active' RETURNING declared_size",
+         WHERE id = $1 AND client_id = $2 AND state = 'active'",
     )
     .bind(file_id)
     .bind(client_id)
-    .fetch_optional(&mut *tx)
+    .execute(pool)
     .await?;
+    if transitioned.rows_affected() > 0 {
+        return Ok(DeleteOutcome::Deleted);
+    }
 
-    let Some(declared_size) = deleted else {
-        // 전이 실패 — 현재 상태로 원인을 가른다.
-        let state: Option<String> =
-            sqlx::query_scalar("SELECT state FROM files WHERE id = $1 AND client_id = $2")
-                .bind(file_id)
-                .bind(client_id)
-                .fetch_optional(&mut *tx)
-                .await?;
-        return Ok(match state.as_deref() {
-            // reclaimed는 내부 상태 — 클라이언트에겐 파일이 된 적이 없다 (404).
-            None | Some("reclaimed") => DeleteOutcome::NotFound,
-            Some("deleted") => DeleteOutcome::AlreadyDeleted,
-            Some(_) => DeleteOutcome::NotCommitted,
-        });
-    };
-
-    sqlx::query(
-        "UPDATE storage_usage SET active_bytes = active_bytes - $2, \
-         purge_pending_bytes = purge_pending_bytes + $2, updated_at = now() \
-         WHERE storage_id = (SELECT storage_id FROM locations WHERE file_id = $1)",
-    )
-    .bind(file_id)
-    .bind(declared_size)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-    Ok(DeleteOutcome::Deleted)
+    // 전이 실패 — 현재 상태로 원인을 가른다.
+    let state: Option<String> =
+        sqlx::query_scalar("SELECT state FROM files WHERE id = $1 AND client_id = $2")
+            .bind(file_id)
+            .bind(client_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(match state.as_deref() {
+        // reclaimed는 내부 상태 — 클라이언트에겐 파일이 된 적이 없다 (404).
+        None | Some("reclaimed") => DeleteOutcome::NotFound,
+        Some("deleted") => DeleteOutcome::AlreadyDeleted,
+        Some(_) => DeleteOutcome::NotCommitted,
+    })
 }
 
 // ---- reconciler 잡의 스캔·정리 (유계 배치, docs/stack) ----
@@ -70,7 +57,6 @@ pub async fn mark_deleted(
 #[derive(Debug)]
 pub struct SweepCandidate {
     pub file_id: Uuid,
-    pub declared_size: i64,
     pub storage_id: String,
     pub object_key: String,
     /// multipart 회수 재료 (spec 02) — 벤더 Abort용 세션 핸들.
@@ -84,8 +70,8 @@ pub async fn expired_pending(
     pool: &PgPool,
     limit: i64,
 ) -> Result<Vec<SweepCandidate>, sqlx::Error> {
-    let rows: Vec<(Uuid, i64, String, String, Option<String>, Uuid)> = sqlx::query_as(
-        "SELECT f.id, f.declared_size, l.storage_id, l.object_key, le.upload_id, le.id \
+    let rows: Vec<(Uuid, String, String, Option<String>, Uuid)> = sqlx::query_as(
+        "SELECT f.id, l.storage_id, l.object_key, le.upload_id, le.id \
          FROM files f \
          JOIN leases le ON le.file_id = f.id AND le.kind = 'write' \
          JOIN locations l ON l.file_id = f.id \
@@ -99,18 +85,16 @@ pub async fn expired_pending(
         .into_iter()
         .map(|row| SweepCandidate {
             file_id: row.0,
-            declared_size: row.1,
-            storage_id: row.2,
-            object_key: row.3,
-            upload_id: row.4,
-            write_lease_id: Some(row.5),
+            storage_id: row.1,
+            object_key: row.2,
+            upload_id: row.3,
+            write_lease_id: Some(row.4),
         })
         .collect())
 }
 
-/// 만료 회수 확정: pending → reclaimed 전이가 이기면 예약 해제 + lease
-/// 만료 + location 제거. 늦은 commit과의 경합은 이 조건부 전이 하나로
-/// 끊긴다 — 진 쪽은 아무것도 정산하지 않는다.
+/// 만료 회수 확정: pending → reclaimed 전이가 이기면 lease 만료 +
+/// location 제거. 늦은 commit과의 경합은 이 조건부 전이 하나로 끊긴다.
 pub async fn finalize_reclaim(
     pool: &PgPool,
     candidate: &SweepCandidate,
@@ -139,14 +123,6 @@ pub async fn finalize_reclaim(
     .bind(candidate.file_id)
     .execute(&mut *tx)
     .await?;
-    sqlx::query(
-        "UPDATE storage_usage SET reserved_bytes = reserved_bytes - $2, updated_at = now() \
-         WHERE storage_id = $1",
-    )
-    .bind(&candidate.storage_id)
-    .bind(candidate.declared_size)
-    .execute(&mut *tx)
-    .await?;
     sqlx::query("DELETE FROM locations WHERE file_id = $1")
         .bind(candidate.file_id)
         .execute(&mut *tx)
@@ -158,8 +134,8 @@ pub async fn finalize_reclaim(
 /// purge 대상 — deleted인데 location이 남은 파일들. purge가 끝난 deleted는
 /// location이 없어 자연히 스캔에서 빠진다.
 pub async fn purgeable(pool: &PgPool, limit: i64) -> Result<Vec<SweepCandidate>, sqlx::Error> {
-    let rows: Vec<(Uuid, i64, String, String)> = sqlx::query_as(
-        "SELECT f.id, f.declared_size, l.storage_id, l.object_key \
+    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT f.id, l.storage_id, l.object_key \
          FROM files f JOIN locations l ON l.file_id = f.id \
          WHERE f.state = 'deleted' LIMIT $1",
     )
@@ -169,39 +145,25 @@ pub async fn purgeable(pool: &PgPool, limit: i64) -> Result<Vec<SweepCandidate>,
     Ok(rows.into_iter().map(candidate_from).collect())
 }
 
-/// purge 확정: location 제거가 이기면 purge 대기 점유를 해제한다.
-/// location이 이미 없으면(이중 purge) 아무것도 정산하지 않는다 — 멱등.
+/// purge 확정: location을 제거한다 — "남은 행 = 현재 점유"의 그 행이
+/// 사라지는 지점이다. 이미 없으면(이중 purge) false — 멱등.
 pub async fn finalize_purge(
     pool: &PgPool,
     candidate: &SweepCandidate,
 ) -> Result<bool, sqlx::Error> {
-    let mut tx = pool.begin().await?;
     let removed = sqlx::query("DELETE FROM locations WHERE file_id = $1")
         .bind(candidate.file_id)
-        .execute(&mut *tx)
+        .execute(pool)
         .await?;
-    if removed.rows_affected() == 0 {
-        return Ok(false);
-    }
-    sqlx::query(
-        "UPDATE storage_usage SET purge_pending_bytes = purge_pending_bytes - $2, \
-         updated_at = now() WHERE storage_id = $1",
-    )
-    .bind(&candidate.storage_id)
-    .bind(candidate.declared_size)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(true)
+    Ok(removed.rows_affected() > 0)
 }
 
 /// purge 후보는 확정을 지난 파일이라 multipart 잔여물이 없다 — 회수 재료는 None.
-fn candidate_from(row: (Uuid, i64, String, String)) -> SweepCandidate {
+fn candidate_from(row: (Uuid, String, String)) -> SweepCandidate {
     SweepCandidate {
         file_id: row.0,
-        declared_size: row.1,
-        storage_id: row.2,
-        object_key: row.3,
+        storage_id: row.1,
+        object_key: row.2,
         upload_id: None,
         write_lease_id: None,
     }

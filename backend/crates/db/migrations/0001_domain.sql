@@ -108,14 +108,7 @@ CREATE INDEX lease_history_at_idx ON lease_history (at);
 -- 파일별 개별 이력과 idle 판단 (마지막 대여 시각).
 CREATE INDEX lease_history_file_idx ON lease_history (file_id, at);
 
--- storage별 capacity 회계 — usage의 세 버킷 (spec 00). 상한은 등록부에 산다.
--- 예약은 create, 정산은 commit, 해제는 만료 회수·purge (단일 트랜잭션 안에서).
--- 이 행은 파생값이 아니라 원자적 조건부 예약의 락 지점이다 — 집계로
--- 대체하면 멀티 pod 초과예약 방어가 사라진다 (spec 00 기각 기록).
-CREATE TABLE storage_usage (
-    storage_id          text PRIMARY KEY,
-    reserved_bytes      bigint NOT NULL DEFAULT 0 CHECK (reserved_bytes >= 0),
-    active_bytes        bigint NOT NULL DEFAULT 0 CHECK (active_bytes >= 0),
-    purge_pending_bytes bigint NOT NULL DEFAULT 0 CHECK (purge_pending_bytes >= 0),
-    updated_at          timestamptz NOT NULL DEFAULT now()
-);
+-- 회계 카운터는 두지 않는다 (spec 00) — capacity는 집행이 아니라 관찰이다.
+-- 사용량은 조회 시점에 files·locations에서 집계한다: purge가 location을
+-- 실제로 지우므로 "남은 행 = 현재 점유"고, 파생값을 저장하지 않으니
+-- 어긋날 것도 없다. 시계열 관찰은 lease_history가 담당한다.

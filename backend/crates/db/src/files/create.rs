@@ -1,8 +1,8 @@
-//! create의 예약과 pending 파일 기록 — 선언 해석 → 기록 → capacity 예약.
+//! create의 pending 파일 기록 — 선언 해석 → 기록. 전부 한 트랜잭션.
 //!
-//! 회계 원자성이 이 경로의 핵심이다: 예약은 단일 트랜잭션이고, capacity
-//! 상한은 원자적 조건부 UPDATE가 집행한다 — 파드 수와 무관하게 초과 예약이
-//! 불가능하다 (ADR 004). 저장소 네트워크 호출은 여기 없다.
+//! capacity는 집행하지 않는다 (spec 00) — 관찰이 목적이다. object storage는
+//! 탄력적이고 fs는 디스크가 스스로 실패를 내므로, 용량으로 발급을 거부하지
+//! 않는다. 사용량은 조회 시점에 집계된다. 저장소 네트워크 호출은 여기 없다.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -34,16 +34,10 @@ pub enum CreateOutcome {
     Created(Box<CreatedFile>),
     /// (client, intent)에 binding이 없다 — 선언되지 않은 어휘.
     NoBinding,
-    /// capacity 경성 상한 초과 — 용량 상세는 응답에 노출하지 않는다 (spec 00).
-    CapacityExceeded,
 }
 
-/// 선언 해석 → pending 파일 기록 → capacity 예약. 전부 한 트랜잭션.
-///
-/// 예약이 마지막인 이유: 조건부 UPDATE가 잡는 storage_usage 행 락이
-/// UPDATE→commit 구간에만 걸리게 — INSERT들까지 락 안에 두면 같은 storage로
-/// 향하는 동시 create가 fsync 포함 전 구간에서 직렬화된다. 거부 시 롤백이
-/// INSERT들을 되돌리므로 정합성은 순서와 무관하다.
+/// 선언 해석 → pending 파일 기록. 전부 한 트랜잭션 — 새 행 INSERT만이라
+/// 공유 락 지점이 없고, 동시 create는 서로를 기다리지 않는다.
 pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
@@ -106,25 +100,6 @@ pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome
     .bind(spec.declared_size)
     .execute(&mut *tx)
     .await?;
-
-    // capacity는 경성 상한이다: 예약 + 확정 + purge 대기 + 선언 크기가 상한을
-    // 넘으면 발급 거부 (spec 00). 조건부 UPDATE 한 문장이라 경합에도 원자적이다.
-    // 비교는 뺄셈 형태다 — 좌변 합산이 크기와 섞이지 않아 overflow가 없다
-    // (크기는 핸들러가 5GiB로 상한, capacity·버킷은 등록 검증이 상한).
-    let reserved = sqlx::query(
-        "UPDATE storage_usage SET reserved_bytes = reserved_bytes + $2, updated_at = now() \
-         WHERE storage_id = $1 \
-         AND reserved_bytes + active_bytes + purge_pending_bytes <= $3 - $2",
-    )
-    .bind(&storage.id)
-    .bind(spec.declared_size)
-    .bind(storage.capacity_bytes)
-    .execute(&mut *tx)
-    .await?;
-    if reserved.rows_affected() == 0 {
-        // 트랜잭션 drop이 롤백이다 — 위 INSERT들이 전부 되돌아간다.
-        return Ok(CreateOutcome::CapacityExceeded);
-    }
 
     tx.commit().await?;
     Ok(CreateOutcome::Created(Box::new(CreatedFile {

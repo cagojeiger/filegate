@@ -27,7 +27,7 @@
 - 바이트는 전송 주체와 저장소가 직접 주고받고, filegate는 발급·기록·검증을 한다 (공리 2). 직결이 불가능한 storage는 filegate가 중계하며, 계약은 같다.
 - 서비스는 filegate 산출물 중 file_id만 영속화한다 (ADR 003).
 - 모든 표면은 인증 뒤에 있다: 클라이언트 API는 클라이언트 인증, usage는 운영자 인증, 중계 바이트 엔드포인트는 lease별 secret (ADR 003).
-- 용량은 운영자의 세계다. 클라이언트는 어떤 오퍼레이션에서도 용량 정보를 받지 않고, 자기 사용량은 스스로 관리한다 (공리 1). 이번 범위 회계는 capacity(storage별 물리 총량) 한 축이다.
+- 용량은 운영자의 세계다. 클라이언트는 어떤 오퍼레이션에서도 용량 정보를 받지 않고, 자기 사용량은 스스로 관리한다 (공리 1). capacity는 집행이 아니라 **관찰**이다 — object storage는 탄력적이고 fs는 디스크가 스스로 실패를 내므로, filegate가 용량으로 발급을 거부하지 않는다. 사용량은 조회 시점에 files·locations에서 집계하고(저장 카운터 없음), 시계열은 대여 이력(lease_history, 3개월 보존)이 담당한다.
 
 ## 오퍼레이션
 
@@ -36,9 +36,9 @@
 - 입력: intent, 선언 크기. 선택: content_type, 선언 MD5. 0바이트도 유효한 선언이다.
   - content_type은 서명에 포함해야 강제된다 (실측).
   - 선언 MD5는 commit이 ETag와 대조한다. 단일 PUT의 ETag = MD5다 (실측).
-- 처리: 선언 해석 ((client, intent) → binding → storage — [spec 01](01-registry.md), v0는 명시 선언 단일 대상), capacity 예약, file_id 발급.
+- 처리: 선언 해석 ((client, intent) → binding → storage — [spec 01](01-registry.md), v0는 명시 선언 단일 대상), file_id 발급, 대여 이력 기록.
 - 출력: file_id, 만료가 있는 PUT URL. URL 구조는 계약이 아니다 (직결이면 저장소 presigned, 중계면 filegate 엔드포인트).
-- capacity는 경성 상한이다: `예약량 + 확정량 + purge 대기 점유 + 선언 크기`가 상한을 넘으면 발급을 거부한다. 대상 storage가 상한에 걸리면 create는 실패하고, 거부 이유의 용량 상세는 클라이언트에 노출하지 않는다.
+- capacity로 발급을 거부하지 않는다 — capacity는 usage 조회의 관찰 기준선일 뿐이다. 물리 한계는 저장소가 낸다 (fs는 디스크 풀, object storage는 사실상 무한). 배치·정리 판단은 관찰을 본 운영자의 몫이다.
 - 상태: `pending`. commit 전까지 파일이 아니다.
 
 ### commit — 업로드 확정
@@ -70,8 +70,8 @@
 
 - 운영자 표면이다. 클라이언트 자격증명으로는 호출할 수 없다. 읽기 전용 — 쓰기 표면은 Terraform 단독이다.
 - storage별: capacity 한도, 예약량(pending 합), 확정량(active 합), purge 대기 점유(deleted·미purge), 남은 여유(= 한도 − 앞의 셋), 그리고 각 버킷과 짝을 이루는 파일 수(pending·active·purge 대기).
-- (client × storage)별: 활성 점유(파일 수·바이트). storage_usage는 client_id가 없어 못 가르는 것을 보완한다 — 여러 client가 한 storage를 공유할 때 각자의 몫을 준다.
-- 이 총량이 배치 거부와 tiering 판단의 입력이다.
+- (client × storage)별: 활성 점유(파일 수·바이트) — 여러 client가 한 storage를 공유할 때 각자의 몫을 가른다.
+- 전부 조회 시점 집계다 (저장 카운터 없음). 이 관찰이 배치·tiering 판단의 입력이다.
 
 ## 흐름: 업로드
 
@@ -88,7 +88,7 @@ sequenceDiagram
     U->>S: 업로드 요청
     S->>S: 유저 권한 확인 (서비스 몫)
     S->>F: create(intent, 크기)
-    F->>F: 선언 해석 + capacity 예약
+    F->>F: 선언 해석 + 기록
     F-->>S: file_id + PUT URL
     S-->>U: PUT URL 위임
     U->>O: 바이트 직접 PUT
@@ -127,10 +127,10 @@ create ──▶ pending ──commit──▶ active ──delete──▶ dele
              └── lease 만료 ──▶ 회수
 ```
 
-- `pending`: 발급됨·미확정, capacity 예약. 검증 실패한 commit도 여기 남아 만료 회수로 정리한다.
+- `pending`: 발급됨·미확정. 검증 실패한 commit도 여기 남아 만료 회수로 정리한다.
 - `active`: 확정됨, read 가능.
-- `deleted`: detach 결정됨, purge 전까지 capacity를 점유한다.
-- capacity 해제는 두 지점이다: pending의 만료 회수, deleted의 purge. commit은 예약을 확정으로 정산한다.
+- `deleted`: detach 결정됨, purge 전까지 실물이 남는다.
+- 관찰량에서 빠지는 지점은 location 제거다: pending의 만료 회수, deleted의 purge — "남은 location = 현재 점유"라 별도 정산이 없다.
 
 ## 물리 배치와 이름 규약
 
@@ -175,7 +175,7 @@ fs:       fg/{client}/{yyyy}/{mm}/{zz}/{file_id}[.ext]
 | 등록부 전체 | 완전 | Terraform apply (정본은 TF다 — ADR 004) |
 | file_id·소유 client·시기 | 완전 | 경로와 이름 |
 | 실제 크기·체크섬 | 완전 | 실물 stat/HEAD/재해싱 (선언값보다 우월한 실측) |
-| 회계 3버킷 | 완전 | 재구축된 행에서 합산 (카운터는 정지 상태에선 파생값) |
+| 사용량 관찰 | 완전 | 항상 조회 시점 파생 — 저장 카운터가 없어 재구축할 것도 없다 |
 | 파일의 의미(어느 노트의 첨부인지) | 완전 | 서비스 DB의 file_id (ADR 003 — 서비스가 두 번째 장부) |
 | intent | 소실 | 키에 없음 — 배치에만 쓰이므로 사후엔 정보성 |
 | deleted(미purge) 결정 | 소실 | detach는 DB에만 있는 결정 — 전부 active로 과잉 복구되고, 서비스가 재삭제하면 끝 |
@@ -187,7 +187,10 @@ pg_dump 백업은 여전히 권장하지만, 잃는 것이 "전부"가 아니라
 
 **기각 기록** (같은 고민의 반복 방지): UUIDv7 등 시간 내장 ID — 경로 날짜와
 벤더 mtime이 같은 정보를 이미 가지므로 철회. object_key를 저장하지 않고
-파생 — 규칙 진화·이동성 상실로 기각. 회계 카운터 파생 — 락 지점이라 기각.
+파생 — 규칙 진화·이동성 상실로 기각. 회계 카운터 파생 — 경성 상한 집행
+시절엔 "락 지점이라 기각"했으나, capacity를 관찰로 재정의하며(2026-07-13)
+반전: 집행이 없으면 락 지점이 필요 없고, 파생을 저장하지 않으면 어긋날
+것도 없다 — 카운터(storage_usage)를 제거하고 조회 시점 집계로 전환.
 lease의 서명 토큰화 — 폐기·관측 상실로 기각. 내용 주소화 — 바이트 전
 발급이라 구조적 불가.
 

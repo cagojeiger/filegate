@@ -66,26 +66,16 @@ async fn create_ok(pool: &PgPool, client: &str, intent: &str, size: i64) -> Crea
         .unwrap()
     {
         CreateOutcome::Created(created) => *created,
-        other => panic!("expected Created, got {}", outcome_name(&other)),
-    }
-}
-
-fn outcome_name(o: &CreateOutcome) -> &'static str {
-    match o {
-        CreateOutcome::Created(_) => "Created",
-        CreateOutcome::NoBinding => "NoBinding",
-        CreateOutcome::CapacityExceeded => "CapacityExceeded",
+        CreateOutcome::NoBinding => panic!("expected Created, got NoBinding"),
     }
 }
 
 /// create → commit 으로 active 파일을 만든다.
-async fn commit_one(pool: &PgPool, client: &str, intent: &str, storage: &str, size: i64) {
+async fn commit_one(pool: &PgPool, client: &str, intent: &str, size: i64) {
     let file = create_ok(pool, client, intent, size).await;
-    assert!(
-        files::finalize_commit(pool, file.file_id, storage, size, "etag")
-            .await
-            .unwrap()
-    );
+    assert!(files::finalize_commit(pool, file.file_id, "etag")
+        .await
+        .unwrap());
 }
 
 // ── by_storage ──────────────────────────────────────────────
@@ -121,11 +111,11 @@ async fn by_storage_pairs_bucket_bytes_with_file_counts(pool: PgPool) {
     bind(&pool, "c", "att", "s").await;
 
     // active 둘(100, 200), pending 하나(50), deleted 하나(300).
-    commit_one(&pool, "c", "att", "s", 100).await;
-    commit_one(&pool, "c", "att", "s", 200).await;
+    commit_one(&pool, "c", "att", 100).await;
+    commit_one(&pool, "c", "att", 200).await;
     create_ok(&pool, "c", "att", 50).await; // 예약만 (pending)
     let to_delete = create_ok(&pool, "c", "att", 300).await;
-    files::finalize_commit(&pool, to_delete.file_id, "s", 300, "etag")
+    files::finalize_commit(&pool, to_delete.file_id, "etag")
         .await
         .unwrap();
     files::mark_deleted(&pool, "c", to_delete.file_id)
@@ -158,10 +148,10 @@ async fn by_client_splits_a_shared_storage_between_clients(pool: PgPool) {
     bind(&pool, "a", "att", "s").await;
     bind(&pool, "b", "att", "s").await;
 
-    commit_one(&pool, "a", "att", "s", 100).await;
-    commit_one(&pool, "a", "att", "s", 200).await; // a: 2파일 300
-    commit_one(&pool, "b", "att", "s", 500).await; // b: 1파일 500
-                                                   // b의 pending 하나는 active가 아니라 리포트에 안 잡힌다.
+    commit_one(&pool, "a", "att", 100).await;
+    commit_one(&pool, "a", "att", 200).await; // a: 2파일 300
+    commit_one(&pool, "b", "att", 500).await; // b: 1파일 500
+                                              // b의 pending 하나는 active가 아니라 리포트에 안 잡힌다.
     create_ok(&pool, "b", "att", 999).await;
 
     let rows = usage::by_client(&pool).await.unwrap();

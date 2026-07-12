@@ -55,16 +55,11 @@ fn s3_row(id: &str, capacity: i64) -> StorageRow {
 // ── 인프라 검증용 최소 테스트 ────────────────────────────────
 
 #[sqlx::test(migrations = "./migrations")]
-async fn insert_storage_seeds_usage(pool: PgPool) {
+async fn insert_storage_registers_the_row(pool: PgPool) {
     registry::insert_storage(&pool, &s3_row("st1", 1000))
         .await
         .unwrap();
     assert!(registry::get_storage(&pool, "st1").await.unwrap().is_some());
-    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM storage_usage WHERE storage_id = 'st1'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(n, 1, "등록과 같은 트랜잭션에서 usage 행이 시드된다");
 }
 
 #[sqlx::test(migrations = "./migrations")]

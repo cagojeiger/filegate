@@ -22,7 +22,6 @@ expect() { if [ "$3" = "$2" ]; then ok; else bad "$1 (want $2, got $3)"; fi }
 $PSQL "DELETE FROM leases;" >/dev/null 2>&1
 $PSQL "DELETE FROM locations;" >/dev/null 2>&1
 $PSQL "DELETE FROM files;" >/dev/null 2>&1
-$PSQL "UPDATE storage_usage SET reserved_bytes=0, active_bytes=0, purge_pending_bytes=0;" >/dev/null 2>&1
 mkdir -p /tmp/filegate-fs-demo
 rm -rf /tmp/filegate-fs-demo/fg /tmp/filegate-fs-demo/.fg-tmp-* 2>/dev/null
 
@@ -60,7 +59,7 @@ run_mode() {
   case "$DISPO" in *"filename*=UTF-8''"*) ok;; *) bad "[$INTENT] RFC5987 없음: $DISPO";; esac
   # 파일명 URL 왕복 무결: &(절단)·+(공백 변질)·#(fragment 소실)이 살아남아야 한다.
   case "$DISPO" in *"v1+2&3#final.txt"*) ok;; *) bad "[$INTENT] 파일명 악문자 왕복 실패: $DISPO";; esac
-  expect "[$INTENT] 회계 active" "$SIZE" "$($PSQL "SELECT active_bytes FROM storage_usage WHERE storage_id='$SID';" | tr -d ' ')"
+  expect "[$INTENT] 회계 active" "$SIZE" "$($PSQL "SELECT coalesce(sum(f.declared_size),0) FROM files f JOIN locations l ON l.file_id=f.id WHERE l.storage_id='$SID' AND f.state='active';" | tr -d ' ')"
   ST=$(curl -s -H "$AUTH" $BASE/v1/files/$FID)
   case "$ST" in *'"state":"active"'*) ok;; *) bad "[$INTENT] stat: $ST";; esac
   eval "FID_$(printf '%s' "$INTENT" | tr - _)=$FID"
@@ -122,7 +121,7 @@ for I in attachment relay_att fs_att; do
   expect "[$I] delete 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE $BASE/v1/files/$FID)"
 done
 sleep 8
-expect "회계 전부 0" "0" "$($PSQL "SELECT coalesce(sum(reserved_bytes+active_bytes+purge_pending_bytes),0) FROM storage_usage WHERE storage_id IN ('minio-relay','fs-local');" | tr -d ' ')"
+expect "회계 전부 0" "0" "$($PSQL "SELECT coalesce(sum(f.declared_size),0) FROM files f JOIN locations l ON l.file_id=f.id WHERE l.storage_id IN ('minio-relay','fs-local');" | tr -d ' ')"
 GURL_R=$(eval echo "\$GURL_relay_att")
 expect "purge 후 중계 GET 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' "$GURL_R")"
 expect "fs 실물 전부 소멸" 0 "$(fs_count)"
@@ -131,7 +130,6 @@ expect "fs 실물 전부 소멸" 0 "$(fs_count)"
 $PSQL "DELETE FROM leases;" >/dev/null 2>&1
 $PSQL "DELETE FROM locations;" >/dev/null 2>&1
 $PSQL "DELETE FROM files;" >/dev/null 2>&1
-$PSQL "UPDATE storage_usage SET reserved_bytes=0, active_bytes=0, purge_pending_bytes=0;" >/dev/null 2>&1
 
 echo ""
 echo "결과: PASS=$PASS FAIL=$FAIL"
