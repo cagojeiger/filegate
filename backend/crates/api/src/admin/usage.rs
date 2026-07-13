@@ -5,11 +5,11 @@
 //! storage별 3버킷 장부 + 버킷과 짝을 이루는 파일 수, 그리고 (client×storage)
 //! 활성 점유(한 storage를 여러 client가 공유할 때 몫을 가른다)를 돌려준다.
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use filegate_db::usage;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::routes::AppState;
@@ -70,6 +70,41 @@ pub(super) async fn by_client(State(state): State<AppState>) -> Result<Response,
             storage_id: row.storage_id,
             active_files: row.active_files,
             active_bytes: row.active_bytes,
+        })
+        .collect();
+    Ok(Json(out).into_response())
+}
+
+#[derive(Deserialize)]
+pub(super) struct HistoryParams {
+    days: Option<i32>,
+}
+
+#[derive(Serialize)]
+struct SnapshotOut {
+    day: String,
+    storage_id: String,
+    client_id: String,
+    active_bytes: i64,
+    active_files: i64,
+}
+
+/// 일별 점유 추이 — usage_snapshot 그대로 (조회 시점 파생이 아닌, 매일
+/// 박제된 stock 시계열). storage·전체 합계는 소비자가 행 SUM으로 가른다.
+pub(super) async fn history(
+    State(state): State<AppState>,
+    Query(params): Query<HistoryParams>,
+) -> Result<Response, ApiError> {
+    let days = params.days.unwrap_or(90).clamp(1, 3650);
+    let rows = usage::snapshot_history(&state.pool, days).await?;
+    let out: Vec<SnapshotOut> = rows
+        .into_iter()
+        .map(|row| SnapshotOut {
+            day: row.day.to_string(),
+            storage_id: row.storage_id,
+            client_id: row.client_id,
+            active_bytes: row.active_bytes,
+            active_files: row.active_files,
         })
         .collect();
     Ok(Json(out).into_response())

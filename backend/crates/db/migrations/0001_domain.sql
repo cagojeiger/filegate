@@ -108,7 +108,23 @@ CREATE INDEX lease_history_at_idx ON lease_history (at);
 -- 파일별 개별 이력과 idle 판단 (마지막 대여 시각).
 CREATE INDEX lease_history_file_idx ON lease_history (file_id, at);
 
+-- 일별 사용량 스냅샷 — stock(점유)의 시계열 박제 (spec 00). flow와 달리
+-- 점유의 과거는 소급 계산이 불가하므로(purge가 행을 지운다) reconciler가
+-- 매일 UTC 자정 이후 첫 tick에 어제 종점을 기록한다. lease_history처럼
+-- FK는 걸지 않는다 — 지워진 storage·client의 과거 점유도 이력으로 남고,
+-- 이력이 등록부 삭제를 막아서도 안 된다. 보존은 무기한 — 조합당 하루
+-- 1행이라 성장이 유계다.
+CREATE TABLE usage_snapshot (
+    day          date   NOT NULL,
+    storage_id   text   NOT NULL,
+    client_id    text   NOT NULL,
+    active_bytes bigint NOT NULL CHECK (active_bytes >= 0),
+    active_files bigint NOT NULL CHECK (active_files >= 0),
+    PRIMARY KEY (day, storage_id, client_id)
+);
+
 -- 회계 카운터는 두지 않는다 (spec 00) — capacity는 집행이 아니라 관찰이다.
 -- 사용량은 조회 시점에 files·locations에서 집계한다: purge가 location을
 -- 실제로 지우므로 "남은 행 = 현재 점유"고, 파생값을 저장하지 않으니
--- 어긋날 것도 없다. 시계열 관찰은 lease_history가 담당한다.
+-- 어긋날 것도 없다. 시계열 관찰은 lease_history(flow)와
+-- usage_snapshot(stock)이 담당한다.

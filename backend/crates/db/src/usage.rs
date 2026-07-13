@@ -72,3 +72,60 @@ pub async fn by_client(pool: &PgPool) -> Result<Vec<ClientUsage>, sqlx::Error> {
     .fetch_all(pool)
     .await
 }
+
+/// day의 종점(UTC 다음날 자정) 스냅샷을 기록한다 — 그 이전에 생성돼 지금
+/// active인 파일의 (storage, client) 집계를 박제 (spec 00). 멱등: 이미
+/// 찍힌 날은 가드가 걸러 0을 돌려주고, 경합은 PK 충돌 무시가 흡수한다.
+/// 종점과 실행 사이의 상태 변화(늦은 commit·삭제)는 근사로 수용한다 —
+/// 점유의 과거는 소급 계산이 불가하므로 이 근사가 얻을 수 있는 전부다.
+pub async fn record_snapshot(pool: &PgPool, day: chrono::NaiveDate) -> Result<u64, sqlx::Error> {
+    // 매 tick 무거운 집계를 반복하지 않기 위한 가드 — PK 인덱스 한 번.
+    // 활성 파일이 0이었던 날은 행이 없어 재시도되지만, 빈 집계는 싸다.
+    let recorded: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM usage_snapshot WHERE day = $1)")
+            .bind(day)
+            .fetch_one(pool)
+            .await?;
+    if recorded {
+        return Ok(0);
+    }
+    let result = sqlx::query(
+        "INSERT INTO usage_snapshot (day, storage_id, client_id, active_bytes, active_files) \
+         SELECT $1, l.storage_id, f.client_id, \
+         coalesce(sum(f.declared_size), 0)::bigint, count(*) \
+         FROM files f \
+         JOIN locations l ON l.file_id = f.id \
+         WHERE f.state = 'active' \
+         AND f.created_at < (($1::date + 1)::timestamp AT TIME ZONE 'UTC') \
+         GROUP BY l.storage_id, f.client_id \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(day)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// 일별 스냅샷 한 행 — (day, storage, client)의 활성 점유.
+#[derive(sqlx::FromRow)]
+pub struct SnapshotRow {
+    pub day: chrono::NaiveDate,
+    pub storage_id: String,
+    pub client_id: String,
+    pub active_bytes: i64,
+    pub active_files: i64,
+}
+
+/// 최근 days일의 스냅샷 — 오래된 날부터. storage 합계·전체 합계 등
+/// 상위 축은 호출자가 행 SUM으로 파생한다.
+pub async fn snapshot_history(pool: &PgPool, days: i32) -> Result<Vec<SnapshotRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT day, storage_id, client_id, active_bytes, active_files \
+         FROM usage_snapshot \
+         WHERE day >= current_date - $1 \
+         ORDER BY day, storage_id, client_id",
+    )
+    .bind(days)
+    .fetch_all(pool)
+    .await
+}
