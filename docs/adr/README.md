@@ -16,7 +16,7 @@ ADR은 방향, 구조, 원칙만 담는다. 범위별 오퍼레이션 계약은 
 | **lease** | 시간제한·단일목적 접근 권한. 모든 바이트 접근의 단위다. 취소는 원장 기준이다 — 발급된 직결 URL은 만료로만 소멸한다 |
 | **직결 / 중계** | 전송 주체가 바이트에 닿는 두 모드. 직결은 저장소가 서명한 URL, 중계는 filegate의 바이트 엔드포인트. storage capability가 결정한다 |
 | **quota** | 운영자가 클라이언트별로 정한 용량 몫. 운영자 내부 가드레일이며 클라이언트에게 노출되지 않는다 |
-| **capacity** | storage의 물리 한도 (무료 구간, 디스크) |
+| **capacity** | storage 등록에 적힌 용량 기준선. 집행하지 않는다 — usage 관찰의 비교선일 뿐 ([spec 00](../spec/00-operations.md)) |
 | **reconciler** | 요청 경로 밖에서 물리 상태를 정리하는 작업 |
 | **detach / purge** | 삭제의 두 단계. detach는 서비스의 결정, purge는 reconciler의 물리 집행 |
 | **tiering** | capacity 압박 시 파일 location을 옮기는 재배치. reconciler가 집행한다 |
@@ -30,3 +30,4 @@ ADR은 방향, 구조, 원칙만 담는다. 범위별 오퍼레이션 계약은 
 | [002](002-lease-model.md) | 모든 바이트 접근은 lease다 | 공리 2 |
 | [003](003-url-ownership.md) | 안정 URL은 서비스가 소유하고, filegate URL은 저장하지 않는다 | 공리 1+2 |
 | [004](004-config-layers.md) | 어휘는 서비스, 카탈로그는 운영자, 정본은 DB다 (컨트롤 플레인) | 공유 전제 + 공리 1+3 |
+| [005](005-presigned-byte-plane.md) | 바이트 평면은 presigned URL 발급이다 (S3 호환 표면 기각 — 실측) | 공리 2 |

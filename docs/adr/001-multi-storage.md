@@ -1,6 +1,6 @@
 # ADR 001: storage는 코드가 아니라 데이터다
 
-- Status: Draft
+- Status: Accepted
 - Date: 2026-07-03 (개정 2026-07-10: 용어 provider→storage, profile 제거)
 - 부모: [000](000-identity.md) 공리 1 (물리는 filegate가 소유한다)
 
