@@ -43,6 +43,12 @@ const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// 기본 4KiB로 두면 GiB급 전송이 수십만 번의 블로킹 풀 왕복이 된다.
 const STREAM_BUF_SIZE: usize = 256 * 1024;
 
+/// 파드당 동시 fs part 승격 상한. 승격은 claim(DB 행 락 + 풀 커넥션)을 쥔 채
+/// 디스크 복사를 하므로, 상한 없이 몰리면 커넥션 풀이 승격에 잠식돼 요청
+/// 경로의 DB 작업이 굶는다. 네트워크 수신은 claim 밖(스풀)에서 끝난 뒤라
+/// 복사 시간만 점유한다 — 상한은 그 점유를 풀 크기(기본 20)보다 한참 아래로 묶는다.
+pub const PART_PROMOTION_LIMIT: usize = 4;
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/{lease_id}", put(upload).get(download).options(preflight))
@@ -229,6 +235,13 @@ async fn upload_part(
             // 같은 part 동시 승격을 직렬화한다 — 인터리브 손상 방지 (spec 02).
             // 락은 로컬 디스크 쓰기에만 걸린다 (네트워크 없음). claim이 drop되면
             // 롤백이라 실패한 승격은 재시도가 덮어쓴다.
+            // 승격 동시성 상한 — claim이 쥐는 풀 커넥션 수를 묶는다. 세마포어는
+            // close하지 않으므로 acquire는 실패하지 않는다.
+            let _promotion = state
+                .part_promotions
+                .acquire()
+                .await
+                .map_err(|error| internal(format!("promotion semaphore closed: {error}")))?;
             let claim = match files::claim_part(&state.pool, lease_id, part_no).await {
                 Ok(claim) => claim,
                 Err(error) => {

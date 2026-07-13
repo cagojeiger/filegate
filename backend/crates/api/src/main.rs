@@ -64,6 +64,9 @@ async fn main() -> anyhow::Result<()> {
         multipart_threshold: config.server.multipart_threshold_bytes,
         part_size: config.server.part_size_bytes,
         s3_clients,
+        part_promotions: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            blobs::PART_PROMOTION_LIMIT,
+        )),
     };
     let http_shutdown = shutdown.clone().cancelled_owned();
     let server = async move {
