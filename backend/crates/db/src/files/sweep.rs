@@ -100,29 +100,33 @@ pub async fn finalize_reclaim(
     candidate: &SweepCandidate,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    // 전이는 파일이 pending이고 그 write lease가 "지금도" 만료 상태일 때만
-    // 성립한다. expired_pending 스냅샷은 락 없이 찍혔으므로, 스냅샷 이후
-    // 실행까지의 창에서 클라이언트가 parts()로 갱신했다면(extend_write_lease가
-    // expires_at을 미래로 밀었다면) 여기서 0행이 되어 회수를 취소한다 —
-    // "갱신이 이어지는 한 회수되지 않는다"는 불변식을 경합에서도 지킨다 (spec 02).
-    let transitioned = sqlx::query(
-        "UPDATE files SET state = 'reclaimed' WHERE id = $1 AND state = 'pending' \
-         AND EXISTS (SELECT 1 FROM leases WHERE file_id = $1 AND kind = 'write' \
-         AND state = 'issued' AND expires_at < now())",
-    )
-    .bind(candidate.file_id)
-    .execute(&mut *tx)
-    .await?;
+    // files 행을 먼저 잠근다 — finalize_commit과 같은 잠금 순서(files→leases)라
+    // 교착이 없다. 늦은 commit이 이겼다면 여기서 0행이다.
+    let transitioned =
+        sqlx::query("UPDATE files SET state = 'reclaimed' WHERE id = $1 AND state = 'pending'")
+            .bind(candidate.file_id)
+            .execute(&mut *tx)
+            .await?;
     if transitioned.rows_affected() == 0 {
         return Ok(false);
     }
-    sqlx::query(
+    // lease 행을 잠그며 "지금도" 만료인지 재확인한다. expired_pending 스냅샷은
+    // 락 없이 찍혔으므로, 진행 중인 extend_write_lease가 있으면 이 UPDATE가
+    // 그 커밋을 기다렸다가 갱신된 expires_at으로 재평가한다 — EXISTS 서브쿼리와
+    // 달리 행 잠금이라 갱신-회수 동시 성공의 창이 없다. 갱신됐으면 0행 →
+    // 롤백으로 files 전이까지 되돌려 회수를 취소한다 — "갱신이 이어지는 한
+    // 회수되지 않는다"는 불변식을 경합에서도 지킨다 (spec 02).
+    let expired = sqlx::query(
         "UPDATE leases SET state = 'expired', write_secret = NULL \
-         WHERE file_id = $1 AND kind = 'write' AND state = 'issued'",
+         WHERE file_id = $1 AND kind = 'write' AND state = 'issued' \
+         AND expires_at < now()",
     )
     .bind(candidate.file_id)
     .execute(&mut *tx)
     .await?;
+    if expired.rows_affected() == 0 {
+        return Ok(false);
+    }
     sqlx::query("DELETE FROM locations WHERE file_id = $1")
         .bind(candidate.file_id)
         .execute(&mut *tx)

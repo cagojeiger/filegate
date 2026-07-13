@@ -91,6 +91,8 @@ pub async fn write_lease(pool: &PgPool, file_id: Uuid) -> Result<Option<WriteLea
 
 /// part 발급이 곧 갱신이다 (ADR 002, spec 02) — 만료를 앞으로만 민다.
 /// issued가 아니면(회수·확정 후) 0행 — 갱신은 살아 있는 lease에만 성립한다.
+/// 이미 만료된 lease도 0행이다 — 만료 후 갱신은 소생이지 연장이 아니고,
+/// byte 접근(`byte_lease`)이 이미 거부하는 lease를 되살리면 회수와 경합한다.
 pub async fn extend_write_lease(
     pool: &PgPool,
     lease_id: Uuid,
@@ -98,7 +100,7 @@ pub async fn extend_write_lease(
 ) -> Result<bool, sqlx::Error> {
     let updated = sqlx::query(
         "UPDATE leases SET expires_at = GREATEST(expires_at, now() + $2 * interval '1 second') \
-         WHERE id = $1 AND state = 'issued'",
+         WHERE id = $1 AND state = 'issued' AND expires_at > now()",
     )
     .bind(lease_id)
     .bind(ttl_secs)
