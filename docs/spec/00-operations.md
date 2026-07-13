@@ -72,6 +72,7 @@
 - storage별: capacity 한도, 예약량(pending 합), 확정량(active 합), purge 대기 점유(deleted·미purge), 남은 여유(= 한도 − 앞의 셋), 그리고 각 버킷과 짝을 이루는 파일 수(pending·active·purge 대기).
 - (client × storage)별: 활성 점유(파일 수·바이트) — 여러 client가 한 storage를 공유할 때 각자의 몫을 가른다.
 - 전부 조회 시점 집계다 (저장 카운터 없음). 이 관찰이 배치·tiering 판단의 입력이다.
+- 일별 스냅샷(usage_snapshot): 점유(stock)의 과거는 소급 계산이 불가하므로(purge가 행을 지운다) reconciler가 매일 UTC 자정 이후 첫 tick에 어제 종점의 (storage×client) 활성 점유를 박제한다. 멱등이고, 이미 찍힌 날은 불변이다. 자정에 서버가 없었으면 첫 tick에 늦게 찍히는 근사치며, 통째로 놓친 날은 소급하지 않는다 — 지어낼 수 없는 값이다. flow(대여) 시계열은 lease_history 몫. 조회는 `/admin/usage/history?days=N`.
 
 ## 흐름: 업로드
 
@@ -176,6 +177,7 @@ fs:       fg/{client}/{yyyy}/{mm}/{zz}/{file_id}[.ext]
 | file_id·소유 client·시기 | 완전 | 경로와 이름 |
 | 실제 크기·체크섬 | 완전 | 실물 stat/HEAD/재해싱 (선언값보다 우월한 실측) |
 | 사용량 관찰 | 완전 | 항상 조회 시점 파생 — 저장 카운터가 없어 재구축할 것도 없다 |
+| 점유 시계열(usage_snapshot)·대여 이력(lease_history) | 소실 | 박제·기록된 관찰은 재계산 불가 — pg_dump가 유일한 보호 |
 | 파일의 의미(어느 노트의 첨부인지) | 완전 | 서비스 DB의 file_id (ADR 003 — 서비스가 두 번째 장부) |
 | intent | 소실 | 키에 없음 — 배치에만 쓰이므로 사후엔 정보성 |
 | deleted(미purge) 결정 | 소실 | detach는 DB에만 있는 결정 — 전부 active로 과잉 복구되고, 서비스가 재삭제하면 끝 |

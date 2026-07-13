@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use filegate_core::Crypto;
 use filegate_db::files::{self, SweepCandidate};
-use filegate_db::{registry, PgPool};
+use filegate_db::{registry, usage, PgPool};
 use filegate_infra::{fs as fs_backend, s3_delete_object, Address, S3ClientCache};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
@@ -167,6 +167,21 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
         Ok(count) => tracing::info!(event = "reconciler.history_pruned", count),
         Err(error) => {
             tracing::error!(event = "reconciler.scan_failed", job = "prune_history", %error)
+        }
+    }
+
+    // 잡 7: 일별 사용량 스냅샷 — 어제(UTC)의 종점 점유를 박제한다 (spec 00).
+    // stock의 과거는 소급 계산이 불가하므로 매일 남긴다. 이미 찍힌 날은 0.
+    // 자정에 서버가 없었으면 첫 tick에 늦게 찍히는 근사치고, 그제 이전의
+    // 빈 날은 소급하지 않는다 — 지어낼 수 없는 값이다.
+    let yesterday = chrono::Utc::now().date_naive() - chrono::Days::new(1);
+    match usage::record_snapshot(pool, yesterday).await {
+        Ok(0) => {}
+        Ok(rows) => {
+            tracing::info!(event = "reconciler.usage_snapshot", day = %yesterday, rows)
+        }
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", job = "usage_snapshot", %error)
         }
     }
 

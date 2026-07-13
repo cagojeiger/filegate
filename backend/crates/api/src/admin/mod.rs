@@ -26,6 +26,7 @@ pub fn admin_routes() -> Router<AppState> {
     Router::new()
         .route("/usage", get(usage::report))
         .route("/usage/clients", get(usage::by_client))
+        .route("/usage/history", get(usage::history))
         .route("/storages", get(storages::list).post(storages::create))
         .route(
             "/storages/{id}",
