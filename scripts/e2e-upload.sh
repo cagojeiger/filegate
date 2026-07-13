@@ -31,19 +31,19 @@ SIZE=$(printf '%s' "$PAYLOAD" | wc -c | tr -d ' ')
 MD5=$(printf '%s' "$PAYLOAD" | md5 -q 2>/dev/null || printf '%s' "$PAYLOAD" | md5sum | cut -d' ' -f1)
 
 echo "=== 인증 ==="
-expect "인증 없음 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/v1/files -H "$JSON" -d '{}')"
-expect "틀린 키 401"   401 "$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/v1/files -H 'Authorization: Bearer fg_wrong' -H "$JSON" -d '{}')"
+expect "인증 없음 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/api/v1/files -H "$JSON" -d '{}')"
+expect "틀린 키 401"   401 "$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/api/v1/files -H 'Authorization: Bearer fg_wrong' -H "$JSON" -d '{}')"
 
 echo "=== create ==="
-expect "없는 intent 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"ghost","declared_size":1}')"
-expect "음수 크기 400"   400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":-1}')"
-expect "NUL(\\u0000) intent 404(500 아님)" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"att\u0000ack","declared_size":1}')"
-expect "제어문자 content_type 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":1,"content_type":"a\u0000b"}')"
+expect "없는 intent 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d '{"intent":"ghost","declared_size":1}')"
+expect "음수 크기 400"   400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d '{"intent":"attachment","declared_size":-1}')"
+expect "NUL(\\u0000) intent 404(500 아님)" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d '{"intent":"att\u0000ack","declared_size":1}')"
+expect "제어문자 content_type 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d '{"intent":"attachment","declared_size":1,"content_type":"a\u0000b"}')"
 # 임계값 초과 선언은 multipart로 간다 (spec 02) — 크기 상한은 part×10,000.
 # 1PB는 어떤 합리적 part 설정에서도 상한 밖이라 400.
-expect "multipart 한계 초과 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":1000000000000000}')"
+expect "multipart 한계 초과 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d '{"intent":"attachment","declared_size":1000000000000000}')"
 
-CREATE=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files \
+CREATE=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files \
   -d "{\"intent\":\"attachment\",\"declared_size\":$SIZE,\"content_type\":\"text/plain\",\"declared_md5\":\"$MD5\"}")
 FILE_ID=$(printf '%s' "$CREATE" | sed -n 's/.*"file_id":"\([^"]*\)".*/\1/p')
 PUT_URL=$(printf '%s' "$CREATE" | sed -n 's/.*"put_url":"\([^"]*\)".*/\1/p')
@@ -55,40 +55,40 @@ case "$PUT_URL" in
 esac
 
 echo "=== 업로드 전 commit → 400 ==="
-expect "실물 없음 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$FILE_ID/commit)"
+expect "실물 없음 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/api/v1/files/$FILE_ID/commit)"
 
 echo "=== 실제 바이트 PUT (presigned) ==="
 expect "PUT 200" 200 "$(printf '%s' "$PAYLOAD" | curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'Content-Type: text/plain' --data-binary @- "$PUT_URL")"
 
 echo "=== commit ==="
-COMMIT=$(curl -s -w '\n%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$FILE_ID/commit)
+COMMIT=$(curl -s -w '\n%{http_code}' -H "$AUTH" -X POST $BASE/api/v1/files/$FILE_ID/commit)
 expect "commit 200" 200 "$(printf '%s' "$COMMIT" | tail -1)"
 case "$COMMIT" in *"\"state\":\"active\""*) ok;; *) bad "commit 응답에 active 없음: $COMMIT";; esac
 case "$COMMIT" in *"$MD5"*) ok;; *) bad "commit ETag가 MD5와 다름: $COMMIT";; esac
-expect "commit 멱등 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$FILE_ID/commit)"
-expect "남의/없는 file commit 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/00000000-0000-0000-0000-000000000000/commit)"
+expect "commit 멱등 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/api/v1/files/$FILE_ID/commit)"
+expect "남의/없는 file commit 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/api/v1/files/00000000-0000-0000-0000-000000000000/commit)"
 
 echo "=== 크기 불일치: pending에 남는다 ==="
-C2=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files -d '{"intent":"attachment","declared_size":999}')
+C2=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d '{"intent":"attachment","declared_size":999}')
 F2=$(printf '%s' "$C2" | sed -n 's/.*"file_id":"\([^"]*\)".*/\1/p')
 U2=$(printf '%s' "$C2" | sed -n 's/.*"put_url":"\([^"]*\)".*/\1/p')
 printf '%s' "$PAYLOAD" | curl -s -o /dev/null -X PUT --data-binary @- "$U2"
-expect "크기 불일치 commit 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$F2/commit)"
+expect "크기 불일치 commit 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/api/v1/files/$F2/commit)"
 expect "여전히 pending" "pending" "$($PSQL "SELECT state FROM files WHERE id='$F2';" | tr -d ' ')"
 
 echo "=== read: 올린 바이트를 도로 받는다 ==="
-READ=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/v1/files/$FILE_ID/read -d '{"filename":"한글 파일.txt"}')
+READ=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files/$FILE_ID/read -d '{"filename":"한글 파일.txt"}')
 GET_URL=$(printf '%s' "$READ" | sed -n 's/.*"get_url":"\([^"]*\)".*/\1/p')
 if [ -n "$GET_URL" ]; then ok; else bad "read 응답에 get_url 없음: $READ"; fi
 BODY=$(curl -s "$GET_URL")
 expect "다운로드 내용 일치" "$PAYLOAD" "$BODY"
 DISPO=$(curl -s -o /dev/null -D - "$GET_URL" | grep -i '^content-disposition' | tr -d '\r')
 case "$DISPO" in *"filename*=UTF-8''"*) ok;; *) bad "Content-Disposition RFC5987 없음: $DISPO";; esac
-expect "pending 파일 read 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$F2/read)"
-expect "없는 파일 read 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/00000000-0000-0000-0000-000000000000/read)"
+expect "pending 파일 read 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/api/v1/files/$F2/read)"
+expect "없는 파일 read 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/api/v1/files/00000000-0000-0000-0000-000000000000/read)"
 
 echo "=== stat ==="
-STAT=$(curl -s -H "$AUTH" $BASE/v1/files/$FILE_ID)
+STAT=$(curl -s -H "$AUTH" $BASE/api/v1/files/$FILE_ID)
 case "$STAT" in *'"state":"active"'*) ok;; *) bad "stat active 아님: $STAT";; esac
 case "$STAT" in *"\"declared_size\":$SIZE"*) ok;; *) bad "stat 크기 불일치: $STAT";; esac
 case "$STAT" in *'"intent":"attachment"'*) ok;; *) bad "stat intent 불일치: $STAT";; esac
@@ -102,13 +102,13 @@ expect "파일1 active" "active" "$($PSQL "SELECT state FROM files WHERE id='$FI
 expect "쓰기 lease 정산" "committed" "$($PSQL "SELECT state FROM leases WHERE file_id='$FILE_ID' AND kind='write';" | tr -d ' ')"
 
 echo "=== delete(detach) → reconciler purge ==="
-DEL=$(curl -s -w '\n%{http_code}' -H "$AUTH" -X DELETE $BASE/v1/files/$FILE_ID)
+DEL=$(curl -s -w '\n%{http_code}' -H "$AUTH" -X DELETE $BASE/api/v1/files/$FILE_ID)
 expect "delete 200" 200 "$(printf '%s' "$DEL" | tail -1)"
-expect "delete 멱등 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE $BASE/v1/files/$FILE_ID)"
+expect "delete 멱등 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE $BASE/api/v1/files/$FILE_ID)"
 # purge(tick 2초)가 검사보다 먼저 돌 수 있다 — 계약상 purge 전 409, 후 404.
-expect_any "삭제 후 read 409|404" "409 404" "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$FILE_ID/read)"
-expect_any "삭제 후 commit 409|404" "409 404" "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/v1/files/$FILE_ID/commit)"
-expect "pending 파일 delete 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE $BASE/v1/files/$F2)"
+expect_any "삭제 후 read 409|404" "409 404" "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/api/v1/files/$FILE_ID/read)"
+expect_any "삭제 후 commit 409|404" "409 404" "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/api/v1/files/$FILE_ID/commit)"
+expect "pending 파일 delete 409" 409 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE $BASE/api/v1/files/$F2)"
 expect_any "purge 대기 회계(대기중|정리됨)" "$SIZE 0" "$($PSQL "SELECT coalesce(sum(f.declared_size),0) FROM files f JOIN locations l ON l.file_id=f.id WHERE l.storage_id='minio-local' AND f.state='deleted';" | tr -d ' ')"
 
 echo "=== reconciler: 만료 회수 + purge (tick 대기) ==="
@@ -116,8 +116,8 @@ echo "=== reconciler: 만료 회수 + purge (tick 대기) ==="
 $PSQL "UPDATE leases SET expires_at = now() - interval '1 second' WHERE file_id='$F2' AND kind='write';" >/dev/null
 sleep 7   # FILEGATE_RECONCILER_INTERVAL_SECS=2 기준 tick 3회 이상
 expect "pending → reclaimed" "reclaimed" "$($PSQL "SELECT state FROM files WHERE id='$F2';" | tr -d ' ')"
-expect "회수된 파일 stat 404 (내부 상태 비노출)" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" $BASE/v1/files/$F2)"
-expect "회수된 파일 delete 404 (일관성)" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE $BASE/v1/files/$F2)"
+expect "회수된 파일 stat 404 (내부 상태 비노출)" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" $BASE/api/v1/files/$F2)"
+expect "회수된 파일 delete 404 (일관성)" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE $BASE/api/v1/files/$F2)"
 expect "회수 후 reserved 0" "0" "$($PSQL "SELECT coalesce(sum(f.declared_size),0) FROM files f JOIN locations l ON l.file_id=f.id WHERE l.storage_id='minio-local' AND f.state='pending';" | tr -d ' ')"
 expect "purge 후 대기 0" "0" "$($PSQL "SELECT coalesce(sum(f.declared_size),0) FROM files f JOIN locations l ON l.file_id=f.id WHERE l.storage_id='minio-local' AND f.state='deleted';" | tr -d ' ')"
 expect "purge 후에도 stat은 답한다(deleted)" "deleted" "$($PSQL "SELECT state FROM files WHERE id='$FILE_ID';" | tr -d ' ')"

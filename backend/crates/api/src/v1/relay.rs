@@ -1,6 +1,6 @@
 //! 중계 접근 URL 조립 — presigned 직결 URL의 filegate 등가물 (ADR 003).
 //!
-//! 중계는 `/b/{lease_id}` 바이트 엔드포인트로 접근하고, 인증은 URL 쿼리의
+//! 중계는 `/blobs/{lease_id}` 바이트 엔드포인트로 접근하고, 인증은 URL 쿼리의
 //! lease secret이다 — 원문은 URL로만 나가고 서버엔 해시만 남는다.
 
 use uuid::Uuid;
@@ -35,8 +35,11 @@ pub(super) fn relay_url(
     filename: Option<&str>,
 ) -> String {
     match filename {
-        Some(name) => format!("{base}/b/{lease_id}?s={secret}&f={}", query_encode(name)),
-        None => format!("{base}/b/{lease_id}?s={secret}"),
+        Some(name) => format!(
+            "{base}/blobs/{lease_id}?s={secret}&f={}",
+            query_encode(name)
+        ),
+        None => format!("{base}/blobs/{lease_id}?s={secret}"),
     }
 }
 
@@ -84,11 +87,11 @@ mod tests {
         let id = Uuid::nil();
         assert_eq!(
             relay_url("https://fg.example.com", id, "sec", None),
-            format!("https://fg.example.com/b/{id}?s=sec")
+            format!("https://fg.example.com/blobs/{id}?s=sec")
         );
         assert_eq!(
             relay_url("https://fg.example.com", id, "sec", Some("a b.txt")),
-            format!("https://fg.example.com/b/{id}?s=sec&f=a%20b.txt")
+            format!("https://fg.example.com/blobs/{id}?s=sec&f=a%20b.txt")
         );
     }
 }

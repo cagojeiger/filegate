@@ -69,7 +69,7 @@ filegate의 reconciler 잡(7종): pending 만료 회수, deleted purge, read lea
 | **warn** | 이상 징후 (치명적 아님) | `reconciler.join_failed` |
 | **error** | 실패 | `ready.failed`, `reconciler.failed` |
 
-프로브(/health, /ready)의 성공 요청은 로그에서 제외한다. 실패한 프로브는 남긴다.
+프로브(/healthz, /readyz)의 성공 요청은 로그에서 제외한다. 실패한 프로브는 남긴다.
 
 ## 빌드 규율 (형제 공통)
 

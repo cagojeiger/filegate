@@ -1,4 +1,4 @@
-//! 중계 바이트 엔드포인트 `/b/{lease_id}` — presigned URL의 filegate 등가물.
+//! 중계 바이트 엔드포인트 `/blobs/{lease_id}` — presigned URL의 filegate 등가물.
 //!
 //! 인증은 lease별 secret (ADR 003): URL 쿼리의 raw를 해시해 lease 행과
 //! 대조한다 — 서버는 해시만 안다 (클라이언트 키와 같은 원칙). 유효하지
