@@ -7,7 +7,7 @@
 ## 결정
 
 - **언어: Rust.** 컨트롤 플레인(발급·확정·회계)과 중계 데이터 플레인(바이트 스트리밍 패스스루)을 한 프로세스에 담는다. 정적 링크 단일 바이너리가 배포 산출물이다 — 런타임·인터프리터 의존 0 (공리 3).
-- **메타데이터 저장소: PostgreSQL (sqlx).** 회계의 예약·정산·해제를 단일 트랜잭션으로 원자화한다(ADR 004). lease 원장이 곧 감사 기록이고(ADR 002), reconciler도 같은 DB를 본다 — 별도 큐 없음. 바이트는 DB에 넣지 않는다.
+- **메타데이터 저장소: PostgreSQL (sqlx).** 파일·위치·lease·대여 이력의 기록을 단일 트랜잭션으로 원자화한다(ADR 004). lease 원장이 접근 기록이고(ADR 002) durable 이력은 lease_history가 담당하며, reconciler도 같은 DB를 본다 — 별도 큐 없음. 바이트는 DB에 넣지 않는다.
 - **저장소 접근: aws-sdk-s3.** storage adapter(ADR 001)의 1차 계약이 S3 호환이고, presigned URL 발급이 직결 모드의 핵심 요구다. 같은 SDK로 MinIO·R2·OCI를 endpoint 교체만으로 다룬다. `object_store`(fs+s3 단일 trait)는 fs adapter와의 통합 관점에서 검토 후보.
 - **fs adapter·중계 스트리밍: tokio::fs + axum body.** presigned 개념이 없는 로컬/NFS는 항상 중계이며, 선언 크기에서 스트림을 끊는 요구(ADR 002)를 상수 메모리로 처리한다.
 
