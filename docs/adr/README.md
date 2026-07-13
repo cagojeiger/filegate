@@ -30,4 +30,4 @@ ADR은 방향, 구조, 원칙만 담는다. 범위별 오퍼레이션 계약은 
 | [002](002-lease-model.md) | 모든 바이트 접근은 lease다 | 공리 2 |
 | [003](003-url-ownership.md) | 안정 URL은 서비스가 소유하고, filegate URL은 저장하지 않는다 | 공리 1+2 |
 | [004](004-config-layers.md) | 어휘는 서비스, 카탈로그는 운영자, 정본은 DB다 (컨트롤 플레인) | 공유 전제 + 공리 1+3 |
-| [005](005-presigned-byte-plane.md) | 바이트 평면은 presigned URL 발급이다 (S3 호환 표면 기각 — 실측) | 공리 2 |
+| [005](005-presigned-byte-plane.md) | 바이트 인터페이스는 서명 URL 발급 단 하나다 (S3 호환 표면 없음 — 실측 근거) | 공리 2 |
