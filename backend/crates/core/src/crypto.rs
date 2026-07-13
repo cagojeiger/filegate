@@ -1,10 +1,15 @@
-//! storage 시크릿의 암호화 보관 (spec 01 "키와 비밀").
+//! 마스터 키의 두 용도 — storage 시크릿의 암호화 보관 (spec 01 "키와
+//! 비밀")과 중계 multipart secret의 결정적 파생 (spec 02).
 //!
-//! filegate가 서명에 원문을 써야 하는 유일한 저장 비밀이 storage 시크릿이라,
-//! 이 모듈은 그 한 용도만 다룬다 — opsgate의 credential 보관 방식을 참조했다.
-//! 마스터 키(`FILEGATE_ENC_ROOT_SECRET`)에서 HKDF로 용도 키를 파생하고(루트를
-//! 직접 쓰지 않는다), AES-256-GCM에 storage id를 AAD로 바인딩한다 — 한
-//! storage의 암호문을 다른 행에 옮겨 붙이면 복호가 실패한다.
+//! 마스터 키(`FILEGATE_ENC_ROOT_SECRET`)에서 HKDF로 용도별 키를 파생하고
+//! (루트를 직접 쓰지 않는다), 암호화는 AES-256-GCM에 storage id를 AAD로
+//! 바인딩한다 — 한 storage의 암호문을 다른 행에 옮겨 붙이면 복호가 실패한다.
+//! opsgate의 credential 보관 방식을 참조했다.
+//!
+//! 중계 multipart secret은 lease id에서 파생한다 — parts() 발급이 매번
+//! 같은 값을 재파생하므로 원문을 저장할 이유가 없다 (인증은 해시 대조
+//! 그대로). 파생 불가능한 값만 저장한다는 spec 02의 원칙이 secret에도
+//! 성립하게 된다.
 //!
 //! 마스터 키 회전은 이중 루트로 한다: 활성 키(암호화·복호)와 선택적 PREV
 //! 키(복호 전용 — 코드가 encrypt에 안 쓰는 정책일 뿐, 키 자체는 대칭키다).
@@ -23,6 +28,7 @@ const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 const MIN_ROOT_LEN: usize = 32;
 const STORAGE_SECRET_LABEL: &[u8] = b"filegate/enc/storage-secret/v1";
+const RELAY_SECRET_LABEL: &[u8] = b"filegate/mac/relay-secret/v1";
 
 /// 암호화된 필드 — DB의 ciphertext·nonce 컬럼 한 쌍.
 #[derive(Clone, PartialEq, Eq)]
@@ -39,6 +45,7 @@ impl std::fmt::Debug for EncryptedSecret {
 
 struct KeyEntry {
     key: [u8; KEY_LEN],
+    relay_key: [u8; KEY_LEN],
     key_id: String,
 }
 
@@ -76,10 +83,28 @@ fn derive(key_id: &str, root: &SecretString) -> Result<KeyEntry> {
     // 같은 루트에 다른 key_id를 주면(회전 실수) 키도 달라져 복호가 실패한다.
     hk.expand_multi_info(&[STORAGE_SECRET_LABEL, b"/", key_id.as_bytes()], &mut key)
         .map_err(|_e| Error::internal("hkdf expand failed"))?;
+    // 용도별 키 분리 — 암호화 키와 secret 파생 키는 라벨이 갈라 독립이다.
+    let mut relay_key = [0_u8; KEY_LEN];
+    hk.expand_multi_info(
+        &[RELAY_SECRET_LABEL, b"/", key_id.as_bytes()],
+        &mut relay_key,
+    )
+    .map_err(|_e| Error::internal("hkdf expand failed"))?;
     Ok(KeyEntry {
         key,
+        relay_key,
         key_id: key_id.to_owned(),
     })
+}
+
+/// lease id에서 중계 multipart secret을 파생한다 — 같은 입력은 언제나
+/// 같은 64 hex를 낸다 (URL 재조립의 전제).
+fn relay_secret_with(entry: &KeyEntry, lease_id: &str) -> Result<String> {
+    let hk = Hkdf::<Sha256>::new(None, &entry.relay_key);
+    let mut out = [0_u8; KEY_LEN];
+    hk.expand(lease_id.as_bytes(), &mut out)
+        .map_err(|_e| Error::internal("hkdf expand failed"))?;
+    Ok(crate::hash::to_hex(&out))
 }
 
 impl Crypto {
@@ -105,6 +130,22 @@ impl Crypto {
     /// 새 암호문에 기록할 라벨 — 항상 활성 키의 id다.
     pub fn active_key_id(&self) -> &str {
         &self.active.key_id
+    }
+
+    /// 중계 multipart secret — 활성 키로 lease id에서 파생한다.
+    /// 발급(create)과 재발급(parts)이 같은 값을 얻는다.
+    pub fn relay_secret(&self, lease_id: &str) -> Result<String> {
+        relay_secret_with(&self.active, lease_id)
+    }
+
+    /// PREV 키 파생 — 회전 전환기에 회전 이전 발급된 업로드의 재개용.
+    /// PREV가 소거된 뒤에는 그 업로드의 secret을 아무도 재현할 수 없다 —
+    /// 재개 불가, 업로드 재시작이 계약이다 (spec 02).
+    pub fn relay_secret_prev(&self, lease_id: &str) -> Result<Option<String>> {
+        self.prev
+            .as_ref()
+            .map(|entry| relay_secret_with(entry, lease_id))
+            .transpose()
     }
 
     fn key_for(&self, key_id: &str) -> Result<&KeyEntry> {
@@ -187,6 +228,37 @@ mod tests {
 
     fn crypto_v1() -> Crypto {
         Crypto::new("v1", &root("one")).unwrap()
+    }
+
+    #[test]
+    fn relay_secret_is_deterministic_and_input_bound() {
+        let c = crypto_v1();
+        let a = c.relay_secret("lease-1").unwrap();
+        // 재파생이 발급이다 — 같은 입력은 언제나 같은 64 hex.
+        assert_eq!(a, c.relay_secret("lease-1").unwrap());
+        assert_eq!(a.len(), 64);
+        assert!(a.bytes().all(|b| b.is_ascii_hexdigit()));
+        // lease와 키 어느 쪽이 달라져도 secret이 달라진다.
+        assert_ne!(a, c.relay_secret("lease-2").unwrap());
+        let rotated = Crypto::new("v2", &root("one")).unwrap();
+        assert_ne!(a, rotated.relay_secret("lease-1").unwrap());
+    }
+
+    #[test]
+    fn relay_secret_prev_recovers_pre_rotation_value() {
+        let before = crypto_v1().relay_secret("lease-1").unwrap();
+        // 회전 전환기: 활성 v2 + PREV v1 — PREV 파생이 회전 이전 값을 재현한다.
+        let rotated = Crypto::new("v2", &root("one"))
+            .unwrap()
+            .with_prev("v1", &root("one"))
+            .unwrap();
+        assert_eq!(
+            rotated.relay_secret_prev("lease-1").unwrap().unwrap(),
+            before
+        );
+        assert_ne!(rotated.relay_secret("lease-1").unwrap(), before);
+        // PREV가 없으면 재현 불가 — None.
+        assert!(crypto_v1().relay_secret_prev("lease-1").unwrap().is_none());
     }
 
     #[test]

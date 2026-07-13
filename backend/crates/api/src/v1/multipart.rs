@@ -178,7 +178,7 @@ pub(super) async fn parts(
     let Some(files::WriteLease {
         lease_id,
         upload_id,
-        write_secret,
+        secret_hash,
     }) = files::write_lease(&state.pool, file_id).await?
     else {
         return Err(internal("multipart file has no write lease"));
@@ -214,11 +214,28 @@ pub(super) async fn parts(
             }
         }
         _ => {
-            // 중계: create 때 동결한 secret으로 URL을 조립한다 — 발급마다
-            // 회전하지 않으므로 다배치·재개에서 앞 배치 URL이 살아 있다 (spec 02).
+            // 중계: secret을 lease id에서 재파생한다 — 발급마다 같은 값이라
+            // 다배치·재개에서 앞 배치 URL이 살아 있다 (spec 02). 저장된
+            // 해시가 파생 키를 고른다: 활성 키가 아니면 회전 전환기의 PREV를
+            // 시도하고, 둘 다 아니면 완전 회전 이전의 업로드다 — 아무도
+            // 재현할 수 없으니 재시작이 계약이다.
             let base = relay_base(&state)?;
-            let secret =
-                write_secret.ok_or_else(|| internal("relay multipart lease has no secret"))?;
+            let stored =
+                secret_hash.ok_or_else(|| internal("relay multipart lease has no secret hash"))?;
+            let id = lease_id.to_string();
+            let active = state.crypto.relay_secret(&id).map_err(internal)?;
+            let secret = if filegate_core::client_key_hash(&active) == stored {
+                active
+            } else {
+                match state.crypto.relay_secret_prev(&id).map_err(internal)? {
+                    Some(prev) if filegate_core::client_key_hash(&prev) == stored => prev,
+                    _ => {
+                        return Err(conflict(
+                            "upload predates a key rotation; restart the upload",
+                        ))
+                    }
+                }
+            };
             for &n in &body.parts {
                 out.push(PartOut {
                     part: n,

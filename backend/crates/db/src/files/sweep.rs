@@ -117,7 +117,7 @@ pub async fn finalize_reclaim(
     // 롤백으로 files 전이까지 되돌려 회수를 취소한다 — "갱신이 이어지는 한
     // 회수되지 않는다"는 불변식을 경합에서도 지킨다 (spec 02).
     let expired = sqlx::query(
-        "UPDATE leases SET state = 'expired', write_secret = NULL \
+        "UPDATE leases SET state = 'expired' \
          WHERE file_id = $1 AND kind = 'write' AND state = 'issued' \
          AND expires_at < now()",
     )

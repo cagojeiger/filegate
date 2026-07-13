@@ -21,7 +21,7 @@ pub fn generate_url_secret() -> String {
     to_hex(&bytes)
 }
 
-fn to_hex(bytes: &[u8]) -> String {
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         use std::fmt::Write;

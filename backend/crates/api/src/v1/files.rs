@@ -134,8 +134,8 @@ pub(super) async fn create(
     if multipart {
         // multipart는 PUT URL 대신 서술자를 준다 — part 접근은 parts 발급으로
         // (spec 02). s3 계열은 지금 벤더 세션을 열어 핸들을 lease에 기록하고,
-        // 중계(fs 또는 force_relay)는 write secret을 지금 한 번 생성해 둔다 —
-        // 이후 parts() 발급이 매번 같은 secret으로 URL을 조립해 회전이 없다.
+        // 중계(fs 또는 force_relay)는 lease id에서 파생한 secret의 해시를
+        // 남긴다 — 이후 parts() 발급이 매번 같은 secret을 재파생해 회전이 없다.
         if let StorageBackend::S3 { spec, .. } = &backend {
             let storage = state
                 .s3_clients
@@ -160,12 +160,14 @@ pub(super) async fn create(
             }
         }
         if backend.is_relay() {
-            let relay = RelaySecret::generate();
-            files::attach_multipart_secret(
+            let secret = state
+                .crypto
+                .relay_secret(&created.lease_id.to_string())
+                .map_err(internal)?;
+            files::attach_write_secret(
                 &state.pool,
                 created.lease_id,
-                &relay.secret,
-                &relay.hash,
+                &filegate_core::client_key_hash(&secret),
             )
             .await?;
         }
