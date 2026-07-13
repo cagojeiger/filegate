@@ -1,6 +1,6 @@
 # spec 02: multipart 오퍼레이션
 
-- Status: Draft
+- Status: Accepted
 - Date: 2026-07-11
 - 근거: ADR [002](../adr/002-lease-model.md) (multipart는 lease의 확장, 검증 단위는 part), [001](../adr/001-multi-storage.md) (모드는 storage 선언이 결정)
 - 참고: MinIO 소스 분석 (2026-07-11) — 세션은 durable 객체, part는 불변

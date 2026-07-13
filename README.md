@@ -4,6 +4,7 @@
 
 - 방향·원칙: [docs/adr/](docs/adr/README.md)
 - 오퍼레이션 계약: [docs/spec/](docs/spec/00-operations.md)
+- 서비스 연동: [docs/guide/](docs/guide/service-integration.md)
 - 기술 선택: [docs/stack/](docs/stack/README.md) · 벤더 사실: [docs/vendors/](docs/vendors/README.md)
 
 ## 개발 환경

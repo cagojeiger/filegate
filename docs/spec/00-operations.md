@@ -1,11 +1,15 @@
 # spec 00: 단일 파일 오퍼레이션
 
-- Status: Draft
-- Date: 2026-07-07
-- 근거: ADR [000](../adr/000-identity.md), [001](../adr/001-multi-storage.md), [002](../adr/002-lease-model.md), [003](../adr/003-url-ownership.md), [004](../adr/004-config-layers.md)
+- Status: Accepted
+- Date: 2026-07-07 (개정 2026-07-13: 인터페이스 계약 명시 — ADR 005)
+- 근거: ADR [000](../adr/000-identity.md), [001](../adr/001-multi-storage.md), [002](../adr/002-lease-model.md), [003](../adr/003-url-ownership.md), [004](../adr/004-config-layers.md), [005](../adr/005-presigned-byte-plane.md)
 - 실측: 2026-07-08, MinIO 싱글노드. "(실측)"은 이 확인에서 나온 사실이다.
 
 단일 파일 업로드·다운로드, 그에 필요한 조회·삭제, 운영자 용량 조회를 정한다.
+
+> **인터페이스 계약** (ADR 005): 바이트 인터페이스는 서명·만료 URL의
+> 발급이다 — create(업로드), read(다운로드), parts(multipart part).
+> s3는 벤더 서명(직결), fs는 filegate 서명(중계). 이것이 전부다.
 
 ## 범위
 
