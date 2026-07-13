@@ -222,7 +222,7 @@ pub(super) async fn parts(
             for &n in &body.parts {
                 out.push(PartOut {
                     part: n,
-                    url: format!("{base}/b/{lease_id}?s={secret}&part={n}"),
+                    url: format!("{base}/blobs/{lease_id}?s={secret}&part={n}"),
                 });
             }
         }

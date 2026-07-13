@@ -1,13 +1,13 @@
 //! HTTP 표면 — 경로 배선과 공통 레이어만 안다.
 //!
-//! 경로 구조:
-//!   /            서비스 정보
-//!   /health      liveness (무의존)
-//!   /ready       readiness (DB 체크)
-//!   /metrics     Prometheus 스크레이프
-//!   /admin/*     운영자 API (정적 운영자 토큰 — admin 모듈)
-//!   /v1/*        클라이언트 API (클라이언트 키 — v1 모듈)
-//!   /b/*         중계 바이트 엔드포인트 (lease secret — bytes 모듈)
+//! 경로 구조 — 제어는 /api 밑에 표면별 버전, 바이트는 /blobs(버전 밖),
+//! 프로브는 k8s 관례 이름:
+//!   /                  서비스 정보
+//!   /healthz           liveness (무의존)
+//!   /readyz            readiness (DB 체크)
+//!   /api/v1/*          클라이언트 API (클라이언트 키 — v1 모듈)
+//!   /api/admin/v1/*    운영자 API (정적 운영자 토큰 — admin 모듈)
+//!   /blobs/*           중계 바이트 엔드포인트 (lease secret — bytes 모듈)
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,8 +64,8 @@ pub fn app(state: AppState) -> Router {
     let control = Router::new()
         .route("/", get(root))
         .merge(system_routes())
-        .nest("/admin", admin_guarded(state.clone()))
-        .nest("/v1", v1_guarded(state.clone()))
+        .nest("/api/admin/v1", admin_guarded(state.clone()))
+        .nest("/api/v1", v1_guarded(state.clone()))
         .layer(RequestBodyLimitLayer::new(CONTROL_BODY_LIMIT))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
@@ -73,7 +73,7 @@ pub fn app(state: AppState) -> Router {
         ));
     Router::new()
         .merge(control)
-        .nest("/b", crate::bytes::routes())
+        .nest("/blobs", crate::bytes::routes())
         .with_state(state)
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(
@@ -87,14 +87,14 @@ pub fn app(state: AppState) -> Router {
 /// 시스템 표면: 프로브. 인증 밖에 둔다.
 fn system_routes() -> Router<AppState> {
     Router::new()
-        .route("/health", get(health))
-        .route("/ready", get(ready))
+        .route("/healthz", get(health))
+        .route("/readyz", get(ready))
 }
 
 /// 시스템 경로 판정 — 성공 프로브의 스팬 로그를 제외한다.
 /// 위 system_routes 등록 목록과 같아야 한다.
 pub(crate) fn is_system_path(path: &str) -> bool {
-    matches!(path, "/health" | "/ready")
+    matches!(path, "/healthz" | "/readyz")
 }
 
 /// 클라이언트 API — 전 경로가 클라이언트 키 미들웨어 뒤에 있다 (spec 00).

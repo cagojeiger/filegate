@@ -66,51 +66,51 @@ sqlok   "정리: s1" "DELETE FROM storages WHERE id='s1';"
 echo "=== B. 운영자 API E2E ==="
 S='{"endpoint":"http://127.0.0.1:9000","region":"us-east-1","bucket":"filegate-std","force_path_style":true,"access_key":"filegate","secret_key":"filegate-secret","capacity_bytes":1073741824}'
 SBAD='{"endpoint":"http://127.0.0.1:9000","region":"us-east-1","bucket":"filegate-std","force_path_style":true,"access_key":"filegate","secret_key":"wrong","capacity_bytes":1}'
-http "인증 없음 401"        401 $BASE/admin/storages
-http "틀린 토큰 401"        401 -H "Authorization: Bearer nope" $BASE/admin/storages
-http "storage 틀린시크릿 400" 400 -H "$AUTH" -H "$JSON" -X POST $BASE/admin/storages -d "{\"id\":\"minio-a\",$(echo $SBAD | cut -c2-)"
-http "storage 생성 201"     201 -H "$AUTH" -H "$JSON" -X POST $BASE/admin/storages -d "{\"id\":\"minio-a\",$(echo $S | cut -c2-)"
-http "storage 중복 409"     409 -H "$AUTH" -H "$JSON" -X POST $BASE/admin/storages -d "{\"id\":\"minio-a\",$(echo $S | cut -c2-)"
-http "storage 나쁜슬러그 400" 400 -H "$AUTH" -H "$JSON" -X POST $BASE/admin/storages -d "{\"id\":\"Bad_ID\",$(echo $S | cut -c2-)"
-http "storage 둘째 생성 201" 201 -H "$AUTH" -H "$JSON" -X POST $BASE/admin/storages -d "{\"id\":\"minio-b\",$(echo $S | cut -c2-)"
-http "storage 조회 200"     200 -H "$AUTH" $BASE/admin/storages/minio-a
-http "storage 없는 조회 404" 404 -H "$AUTH" $BASE/admin/storages/ghost
-http "storage 갱신 200"     200 -H "$AUTH" -H "$JSON" -X PUT $BASE/admin/storages/minio-a -d "$S"
-http "storage 없는 갱신 404" 404 -H "$AUTH" -H "$JSON" -X PUT $BASE/admin/storages/ghost -d "$S"
-http "client 생성 201"      201 -H "$AUTH" -H "$JSON" -X POST $BASE/admin/clients -d '{"id":"notegate"}'
-http "client 중복 409"      409 -H "$AUTH" -H "$JSON" -X POST $BASE/admin/clients -d '{"id":"notegate"}'
-http "client 조회 200"      200 -H "$AUTH" $BASE/admin/clients/notegate
-http "client 없는 조회 404" 404 -H "$AUTH" $BASE/admin/clients/ghost
-http "key 등록 201"         201 -H "$AUTH" -H "$JSON" -X POST $BASE/admin/clients/notegate/keys -d "{\"key_hash\":\"$HASH_A\"}"
-http "key 중복 409"         409 -H "$AUTH" -H "$JSON" -X POST $BASE/admin/clients/notegate/keys -d "{\"key_hash\":\"$HASH_A\"}"
-http "key 형식위반 400"     400 -H "$AUTH" -H "$JSON" -X POST $BASE/admin/clients/notegate/keys -d '{"key_hash":"sha256:short"}'
-http "key 없는client 404"   404 -H "$AUTH" -H "$JSON" -X POST $BASE/admin/clients/ghost/keys -d "{\"key_hash\":\"$HASH_B\"}"
-http "key 회전: 둘째 201"   201 -H "$AUTH" -H "$JSON" -X POST $BASE/admin/clients/notegate/keys -d "{\"key_hash\":\"$HASH_B\"}"
-http "key 조회 200"         200 -H "$AUTH" $BASE/admin/clients/notegate/keys/$HASH_A
-http "key 첫째 삭제 204"    204 -H "$AUTH" -X DELETE $BASE/admin/clients/notegate/keys/$HASH_A
-http "key 삭제 멱등 204"    204 -H "$AUTH" -X DELETE $BASE/admin/clients/notegate/keys/$HASH_A
-http "key 삭제후 조회 404"  404 -H "$AUTH" $BASE/admin/clients/notegate/keys/$HASH_A
-http "binding 생성(POST) 201" 201 -H "$AUTH" -H "$JSON" -X POST $BASE/admin/clients/notegate/bindings/att -d '{"storage_id":"minio-a"}'
-http "binding 중복 생성 409" 409 -H "$AUTH" -H "$JSON" -X POST $BASE/admin/clients/notegate/bindings/att -d '{"storage_id":"minio-b"}'
-http "binding 조회 200"     200 -H "$AUTH" $BASE/admin/clients/notegate/bindings/att
-http "binding 없는조회 404" 404 -H "$AUTH" $BASE/admin/clients/notegate/bindings/ghost
-http "binding 재지정(PUT) 200" 200 -H "$AUTH" -H "$JSON" -X PUT $BASE/admin/clients/notegate/bindings/att -d '{"storage_id":"minio-b"}'
-http "binding 없는것 갱신 404" 404 -H "$AUTH" -H "$JSON" -X PUT $BASE/admin/clients/notegate/bindings/ghost -d '{"storage_id":"minio-a"}'
-MOVED=$(curl -s -H "$AUTH" $BASE/admin/clients/notegate/bindings/att | grep -c 'minio-b')
+http "인증 없음 401"        401 $BASE/api/admin/v1/storages
+http "틀린 토큰 401"        401 -H "Authorization: Bearer nope" $BASE/api/admin/v1/storages
+http "storage 틀린시크릿 400" 400 -H "$AUTH" -H "$JSON" -X POST $BASE/api/admin/v1/storages -d "{\"id\":\"minio-a\",$(echo $SBAD | cut -c2-)"
+http "storage 생성 201"     201 -H "$AUTH" -H "$JSON" -X POST $BASE/api/admin/v1/storages -d "{\"id\":\"minio-a\",$(echo $S | cut -c2-)"
+http "storage 중복 409"     409 -H "$AUTH" -H "$JSON" -X POST $BASE/api/admin/v1/storages -d "{\"id\":\"minio-a\",$(echo $S | cut -c2-)"
+http "storage 나쁜슬러그 400" 400 -H "$AUTH" -H "$JSON" -X POST $BASE/api/admin/v1/storages -d "{\"id\":\"Bad_ID\",$(echo $S | cut -c2-)"
+http "storage 둘째 생성 201" 201 -H "$AUTH" -H "$JSON" -X POST $BASE/api/admin/v1/storages -d "{\"id\":\"minio-b\",$(echo $S | cut -c2-)"
+http "storage 조회 200"     200 -H "$AUTH" $BASE/api/admin/v1/storages/minio-a
+http "storage 없는 조회 404" 404 -H "$AUTH" $BASE/api/admin/v1/storages/ghost
+http "storage 갱신 200"     200 -H "$AUTH" -H "$JSON" -X PUT $BASE/api/admin/v1/storages/minio-a -d "$S"
+http "storage 없는 갱신 404" 404 -H "$AUTH" -H "$JSON" -X PUT $BASE/api/admin/v1/storages/ghost -d "$S"
+http "client 생성 201"      201 -H "$AUTH" -H "$JSON" -X POST $BASE/api/admin/v1/clients -d '{"id":"notegate"}'
+http "client 중복 409"      409 -H "$AUTH" -H "$JSON" -X POST $BASE/api/admin/v1/clients -d '{"id":"notegate"}'
+http "client 조회 200"      200 -H "$AUTH" $BASE/api/admin/v1/clients/notegate
+http "client 없는 조회 404" 404 -H "$AUTH" $BASE/api/admin/v1/clients/ghost
+http "key 등록 201"         201 -H "$AUTH" -H "$JSON" -X POST $BASE/api/admin/v1/clients/notegate/keys -d "{\"key_hash\":\"$HASH_A\"}"
+http "key 중복 409"         409 -H "$AUTH" -H "$JSON" -X POST $BASE/api/admin/v1/clients/notegate/keys -d "{\"key_hash\":\"$HASH_A\"}"
+http "key 형식위반 400"     400 -H "$AUTH" -H "$JSON" -X POST $BASE/api/admin/v1/clients/notegate/keys -d '{"key_hash":"sha256:short"}'
+http "key 없는client 404"   404 -H "$AUTH" -H "$JSON" -X POST $BASE/api/admin/v1/clients/ghost/keys -d "{\"key_hash\":\"$HASH_B\"}"
+http "key 회전: 둘째 201"   201 -H "$AUTH" -H "$JSON" -X POST $BASE/api/admin/v1/clients/notegate/keys -d "{\"key_hash\":\"$HASH_B\"}"
+http "key 조회 200"         200 -H "$AUTH" $BASE/api/admin/v1/clients/notegate/keys/$HASH_A
+http "key 첫째 삭제 204"    204 -H "$AUTH" -X DELETE $BASE/api/admin/v1/clients/notegate/keys/$HASH_A
+http "key 삭제 멱등 204"    204 -H "$AUTH" -X DELETE $BASE/api/admin/v1/clients/notegate/keys/$HASH_A
+http "key 삭제후 조회 404"  404 -H "$AUTH" $BASE/api/admin/v1/clients/notegate/keys/$HASH_A
+http "binding 생성(POST) 201" 201 -H "$AUTH" -H "$JSON" -X POST $BASE/api/admin/v1/clients/notegate/bindings/att -d '{"storage_id":"minio-a"}'
+http "binding 중복 생성 409" 409 -H "$AUTH" -H "$JSON" -X POST $BASE/api/admin/v1/clients/notegate/bindings/att -d '{"storage_id":"minio-b"}'
+http "binding 조회 200"     200 -H "$AUTH" $BASE/api/admin/v1/clients/notegate/bindings/att
+http "binding 없는조회 404" 404 -H "$AUTH" $BASE/api/admin/v1/clients/notegate/bindings/ghost
+http "binding 재지정(PUT) 200" 200 -H "$AUTH" -H "$JSON" -X PUT $BASE/api/admin/v1/clients/notegate/bindings/att -d '{"storage_id":"minio-b"}'
+http "binding 없는것 갱신 404" 404 -H "$AUTH" -H "$JSON" -X PUT $BASE/api/admin/v1/clients/notegate/bindings/ghost -d '{"storage_id":"minio-a"}'
+MOVED=$(curl -s -H "$AUTH" $BASE/api/admin/v1/clients/notegate/bindings/att | grep -c 'minio-b')
 if [ "$MOVED" = "1" ]; then ok; else bad "binding 재지정 반영 안 됨"; fi
-http "binding 없는storage 404" 404 -H "$AUTH" -H "$JSON" -X POST $BASE/admin/clients/notegate/bindings/att2 -d '{"storage_id":"ghost"}'
-http "소문자 bearer 허용 200" 200 -H "authorization: bearer fgop_local-dev" $BASE/admin/storages
-http "capacity 음수 400(네트워크 검증 전)" 400 -H "$AUTH" -H "$JSON" -X POST $BASE/admin/storages -d '{"id":"neg","endpoint":"http://127.0.0.1:1","region":"r","bucket":"b","access_key":"a","secret_key":"s","capacity_bytes":-1}'
-http "없는 storage 갱신 404(네트워크 검증 전)" 404 -H "$AUTH" -H "$JSON" -X PUT $BASE/admin/storages/ghost2 -d '{"endpoint":"http://127.0.0.1:1","region":"r","bucket":"b","access_key":"a","secret_key":"s","capacity_bytes":1}'
-http "사용중 storage-b 삭제 409" 409 -H "$AUTH" -X DELETE $BASE/admin/storages/minio-b
-http "미사용 storage-a 삭제 204" 204 -H "$AUTH" -X DELETE $BASE/admin/storages/minio-a
-http "사용중 client 삭제 409" 409 -H "$AUTH" -X DELETE $BASE/admin/clients/notegate
-http "binding 삭제 204"     204 -H "$AUTH" -X DELETE $BASE/admin/clients/notegate/bindings/att
-http "binding 삭제 멱등 204" 204 -H "$AUTH" -X DELETE $BASE/admin/clients/notegate/bindings/att
-http "client 삭제(key cascade) 204" 204 -H "$AUTH" -X DELETE $BASE/admin/clients/notegate
-http "client 삭제 멱등 204" 204 -H "$AUTH" -X DELETE $BASE/admin/clients/notegate
-http "storage-b 삭제 204"   204 -H "$AUTH" -X DELETE $BASE/admin/storages/minio-b
-http "storage 삭제 멱등 204" 204 -H "$AUTH" -X DELETE $BASE/admin/storages/minio-b
+http "binding 없는storage 404" 404 -H "$AUTH" -H "$JSON" -X POST $BASE/api/admin/v1/clients/notegate/bindings/att2 -d '{"storage_id":"ghost"}'
+http "소문자 bearer 허용 200" 200 -H "authorization: bearer fgop_local-dev" $BASE/api/admin/v1/storages
+http "capacity 음수 400(네트워크 검증 전)" 400 -H "$AUTH" -H "$JSON" -X POST $BASE/api/admin/v1/storages -d '{"id":"neg","endpoint":"http://127.0.0.1:1","region":"r","bucket":"b","access_key":"a","secret_key":"s","capacity_bytes":-1}'
+http "없는 storage 갱신 404(네트워크 검증 전)" 404 -H "$AUTH" -H "$JSON" -X PUT $BASE/api/admin/v1/storages/ghost2 -d '{"endpoint":"http://127.0.0.1:1","region":"r","bucket":"b","access_key":"a","secret_key":"s","capacity_bytes":1}'
+http "사용중 storage-b 삭제 409" 409 -H "$AUTH" -X DELETE $BASE/api/admin/v1/storages/minio-b
+http "미사용 storage-a 삭제 204" 204 -H "$AUTH" -X DELETE $BASE/api/admin/v1/storages/minio-a
+http "사용중 client 삭제 409" 409 -H "$AUTH" -X DELETE $BASE/api/admin/v1/clients/notegate
+http "binding 삭제 204"     204 -H "$AUTH" -X DELETE $BASE/api/admin/v1/clients/notegate/bindings/att
+http "binding 삭제 멱등 204" 204 -H "$AUTH" -X DELETE $BASE/api/admin/v1/clients/notegate/bindings/att
+http "client 삭제(key cascade) 204" 204 -H "$AUTH" -X DELETE $BASE/api/admin/v1/clients/notegate
+http "client 삭제 멱등 204" 204 -H "$AUTH" -X DELETE $BASE/api/admin/v1/clients/notegate
+http "storage-b 삭제 204"   204 -H "$AUTH" -X DELETE $BASE/api/admin/v1/storages/minio-b
+http "storage 삭제 멱등 204" 204 -H "$AUTH" -X DELETE $BASE/api/admin/v1/storages/minio-b
 REMAIN=$($PSQL "SELECT (SELECT count(*) FROM storages)+(SELECT count(*) FROM clients)+(SELECT count(*) FROM client_keys)+(SELECT count(*) FROM bindings);" -t | tr -d ' \n')
 if [ "$REMAIN" = "0" ]; then ok; else bad "종료 후 잔여 행 $REMAIN"; fi
 

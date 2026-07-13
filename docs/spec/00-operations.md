@@ -76,7 +76,7 @@
 - storage별: capacity 한도, 예약량(pending 합), 확정량(active 합), purge 대기 점유(deleted·미purge), 남은 여유(= 한도 − 앞의 셋), 그리고 각 버킷과 짝을 이루는 파일 수(pending·active·purge 대기).
 - (client × storage)별: 활성 점유(파일 수·바이트) — 여러 client가 한 storage를 공유할 때 각자의 몫을 가른다.
 - 전부 조회 시점 집계다 (저장 카운터 없음). 이 관찰이 배치·tiering 판단의 입력이다.
-- 일별 스냅샷(usage_snapshot): 점유(stock)의 과거는 소급 계산이 불가하므로(purge가 행을 지운다) reconciler가 매일 UTC 자정 이후 첫 tick에 어제 종점의 (storage×client) 활성 점유를 박제한다. 멱등이고, 이미 찍힌 날은 불변이다. 자정에 서버가 없었으면 첫 tick에 늦게 찍히는 근사치며, 통째로 놓친 날은 소급하지 않는다 — 지어낼 수 없는 값이다. flow(대여) 시계열은 lease_history 몫. 조회는 `/admin/usage/history?days=N`.
+- 일별 스냅샷(usage_snapshot): 점유(stock)의 과거는 소급 계산이 불가하므로(purge가 행을 지운다) reconciler가 매일 UTC 자정 이후 첫 tick에 어제 종점의 (storage×client) 활성 점유를 박제한다. 멱등이고, 이미 찍힌 날은 불변이다. 자정에 서버가 없었으면 첫 tick에 늦게 찍히는 근사치며, 통째로 놓친 날은 소급하지 않는다 — 지어낼 수 없는 값이다. flow(대여) 시계열은 lease_history 몫. 조회는 `/api/admin/v1/usage/history?days=N`.
 
 ## 흐름: 업로드
 
@@ -205,4 +205,4 @@ lease의 서명 토큰화 — 폐기·관측 상실로 기각. 내용 주소화 
 - 업로드 한 번은 create·commit 두 호출이다.
 - 직결 PUT은 크기를 앞단에서 막지 못한다 (실측). commit이 사후 검증 게이트다. 상한을 넘는 실물은 파일이 되지 못하고 reconciler가 회수하며, 회수 전까지 초과 바이트가 잠시 존재한다. 중계 모드는 선언 크기에서 스트림을 끊는다.
 - 전송 주체는 Content-Length를 보낸다. 길이 미상(chunked) 전송은 저장소가 거부한다 (실측).
-- 중계 바이트 엔드포인트(`/b/{lease}`)의 확정 사항: 인증은 lease별 secret(URL에만, 서버는 해시), Content-Length 필수(411)·선언 크기와 일치(400)·초과 시 스트림 차단(413), CORS 응대, fs는 임시 경로 + rename 원자성. 중계 쓰기는 스트림 중 크기·MD5를 직접 계산해 기록하고 commit이 그것을 대조한다.
+- 중계 바이트 엔드포인트(`/blobs/{lease}`)의 확정 사항: 인증은 lease별 secret(URL에만, 서버는 해시), Content-Length 필수(411)·선언 크기와 일치(400)·초과 시 스트림 차단(413), CORS 응대, fs는 임시 경로 + rename 원자성. 중계 쓰기는 스트림 중 크기·MD5를 직접 계산해 기록하고 commit이 그것을 대조한다.

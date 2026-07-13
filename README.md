@@ -27,8 +27,8 @@ docker run --env-file .env filegate:dev
 
 ```sh
 curl http://127.0.0.1:8080/          # {"name":"filegate","version":...}
-curl http://127.0.0.1:8080/health    # {"status":"ok"}   — liveness (무의존)
-curl http://127.0.0.1:8080/ready     # {"status":"ready"} — readiness (DB 체크)
+curl http://127.0.0.1:8080/healthz    # {"status":"ok"}   — liveness (무의존)
+curl http://127.0.0.1:8080/readyz     # {"status":"ready"} — readiness (DB 체크)
 ```
 
 검사와 이미지 빌드:
