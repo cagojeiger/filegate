@@ -15,23 +15,22 @@
 
 | 역할 | 크레이트 | 비고 |
 |---|---|---|
-| async 런타임 | `tokio` (full), `tokio-util` | |
-| HTTP | `axum` 0.8, `tower`, `tower-http` | cors·limit·timeout·request-id·trace |
-| DB | `sqlx` 0.8 | `runtime-tokio, tls-rustls, postgres, macros, migrate, uuid, chrono, json` |
-| 저장소 | `aws-sdk-s3`, `aws-config` | **filegate 신규** — 형제엔 없음 |
+| async 런타임 | `tokio` (full), `tokio-util` (io) | |
+| HTTP | `axum` 0.8, `tower-http` | limit·timeout·request-id·trace — CORS는 중계 바이트 응답에서 수동 헤더 |
+| DB | `sqlx` 0.8 | `runtime-tokio, tls-rustls, postgres, macros, migrate, uuid, chrono` |
+| 저장소 | `aws-sdk-s3` | **filegate 신규** — 형제엔 없음. aws-config 없이 정적 Credentials + 명시 Config |
 | 설정 | env + `dotenvy` | YAML 설정 파일 없음 — 등록부는 DB (ADR 004) |
 | 에러 | `thiserror` 2, `anyhow` 1 | |
 | 관측 | `tracing`, `tracing-subscriber` (env-filter, json) | 구조화 로그만 — Prometheus 메트릭은 v0 범위에서 제외(필요 시 재도입). 성공 프로브는 로그에서 제외 |
-| 직렬화·타입 | `serde`, `serde_json`, `uuid` v4, `chrono`/`time`, `validator`, `schemars` | |
-| 비밀·암호 | `secrecy`, `aes-gcm`, `hkdf`, `sha2`, `subtle`, `rand` | storage 시크릿 암호화(opsgate 참조)·운영자 토큰 비교·클라이언트 키 해시 |
-| HTTP 클라이언트 | `reqwest` 0.12 (rustls-tls) | |
+| 직렬화·타입 | `serde`, `serde_json`, `uuid` v4, `chrono` | |
+| 비밀·암호 | `secrecy`, `aes-gcm`, `hkdf`, `sha2`, `md-5`, `subtle` | storage 시크릿 암호화(opsgate 참조)·운영자 토큰 비교·클라이언트 키 해시. md-5는 중계 스트림 실측 |
 
 ## 워크스페이스 레이아웃
 
-형제 표준을 따른다: `backend/crates/{core, model, db, service, api}`.
+실구현은 `backend/crates/{core, db, infra, api}` — 형제의 model·service는 별도 크레이트로 두지 않았다 (타입은 db·api가 각자, 오케스트레이션은 api의 reconciler가 담당).
 
-- **core** 도메인 로직·불변식, **model** 타입, **db** sqlx 접근, **service** 오케스트레이션, **api** axum 핸들러.
-- storage adapter(s3, fs)는 저장소 경계이므로 `infra` 크레이트 또는 `service` 하위에 둔다 — 구현 시 결정.
+- **core** 설정·암호·해시, **db** sqlx 접근·도메인 타입, **infra** storage adapter(s3, fs), **api** axum 핸들러·reconciler.
+- 조사 당시 "`infra` 크레이트 또는 `service` 하위" 선택지는 `infra` 크레이트로 결정됐다.
 
 ## 멀티 파드와 단일 워커 (notegate 검증 패턴)
 
