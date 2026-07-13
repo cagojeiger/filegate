@@ -138,7 +138,7 @@ async fn by_storage_pairs_bucket_bytes_with_file_counts(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn by_client_splits_a_shared_storage_between_clients(pool: PgPool) {
-    // 두 client가 같은 storage "s"를 공유 — storage_usage는 못 가르지만
+    // 두 client가 같은 storage "s"를 공유 — by_storage는 못 가르지만
     // by_client는 각자의 몫을 가른다.
     registry::insert_client(&pool, "a").await.unwrap();
     registry::insert_client(&pool, "b").await.unwrap();

@@ -151,8 +151,8 @@ struct PartOut {
 
 /// part 접근 발급 = 갱신 = 재개 (spec 02). 같은 part의 재요청이 재시도이고,
 /// 발급마다 write lease 만료가 연장된다 — 발급이 이어지는 한 회수되지 않는다.
-/// 중계는 발급마다 lease secret을 새로 민팅한다 (서버는 raw를 저장하지 않으므로,
-/// ADR 003) — 최신 발급 배치의 URL만 유효하다.
+/// 중계는 create 때 동결한 secret으로 매 발급 같은 URL을 조립한다 (회전
+/// 금지, spec 02) — 다배치·재개에서 앞 배치 URL도 계속 유효하다.
 pub(super) async fn parts(
     State(state): State<AppState>,
     Extension(client): Extension<ClientId>,

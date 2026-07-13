@@ -6,7 +6,7 @@
 use sqlx::PgPool;
 
 /// storages 행. 종류(kind)가 s3/fs를 가르고, 종류별 필수는 DB CHECK가
-/// 집행한다 (0005). s3 시크릿은 암호문 컬럼 셋으로만 존재 — 복호는
+/// 집행한다 (0002). s3 시크릿은 암호문 컬럼 셋으로만 존재 — 복호는
 /// core::Crypto가 행의 enc_key_id 라벨로 한다 (spec 01). fs는 시크릿이
 /// 없는 storage다 — root_path가 접근 계약의 전부.
 #[derive(Clone, sqlx::FromRow)]

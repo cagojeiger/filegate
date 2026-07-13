@@ -21,7 +21,7 @@ use crate::routes::AppState;
 use crate::storage_access::{backend_from_row, StorageBackend};
 
 /// 등록·갱신 본문. kind가 필드 요구를 가른다 — 종류별 필수는 여기서 400,
-/// 최종 집행은 DB CHECK(0005). secret_key는 여기서만 원문으로 존재한다.
+/// 최종 집행은 DB CHECK(0002). secret_key는 여기서만 원문으로 존재한다.
 #[derive(Deserialize)]
 pub(super) struct StorageSpecBody {
     #[serde(default = "default_kind")]
