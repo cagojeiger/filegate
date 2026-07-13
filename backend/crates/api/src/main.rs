@@ -2,7 +2,7 @@
 //! → HTTP + reconciler → graceful shutdown.
 
 mod admin;
-mod bytes;
+mod blobs;
 mod error;
 mod reconciler;
 mod routes;
