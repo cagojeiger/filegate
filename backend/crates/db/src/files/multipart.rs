@@ -1,9 +1,9 @@
-//! multipart part 원장 (spec 02) — 벤더 세션 핸들·중계 secret·part 실측·
-//! 승격 직렬화.
+//! multipart part 원장 (spec 02) — 벤더 세션 핸들·part 실측·승격 직렬화.
 //!
 //! 기하(개수·offset·part별 크기)는 저장하지 않는다 — geometry가 파생한다.
-//! 여기 남는 것은 파생 불가능한 외부 값(upload_id·write_secret)과 실측,
-//! 그리고 승격 직렬화 상태(claimed/done)뿐이다.
+//! 여기 남는 것은 파생 불가능한 외부 값(upload_id)과 실측, 그리고 승격
+//! 직렬화 상태(claimed/done)뿐이다. 중계 secret은 lease id에서 파생하므로
+//! 원문을 저장하지 않는다 — 인증용 해시만 남는다 (spec 02).
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -47,45 +47,27 @@ pub async fn record_part_done(
     .map(|_| ())
 }
 
-/// multipart relay의 write secret을 붙인다 (create 때 한 번). 원문과 해시를
-/// 함께 저장한다 — parts() 발급이 매번 같은 secret으로 URL을 조립해야
-/// 회전 없이 재개·다배치가 성립한다 (spec 02).
-pub async fn attach_multipart_secret(
-    pool: &PgPool,
-    lease_id: Uuid,
-    secret_raw: &str,
-    secret_hash: &str,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE leases SET secret_hash = $2, write_secret = $3 WHERE id = $1")
-        .bind(lease_id)
-        .bind(secret_hash)
-        .bind(secret_raw)
-        .execute(pool)
-        .await
-        .map(|_| ())
-}
-
 /// 파일의 write lease (파일당 하나 — create가 유일한 발급 지점).
 /// parts 발급과 multipart commit이 쓴다.
 pub struct WriteLease {
     pub lease_id: Uuid,
     /// 직결·중계 s3 multipart의 벤더 세션 핸들.
     pub upload_id: Option<String>,
-    /// multipart relay의 write secret raw — parts() URL 조립용.
-    pub write_secret: Option<String>,
+    /// 중계 인증 해시 — parts()가 재파생한 secret의 대조 기준 (키 회전 판별).
+    pub secret_hash: Option<String>,
 }
 
 pub async fn write_lease(pool: &PgPool, file_id: Uuid) -> Result<Option<WriteLease>, sqlx::Error> {
     let row: Option<(Uuid, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT id, upload_id, write_secret FROM leases WHERE file_id = $1 AND kind = 'write'",
+        "SELECT id, upload_id, secret_hash FROM leases WHERE file_id = $1 AND kind = 'write'",
     )
     .bind(file_id)
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(|(lease_id, upload_id, write_secret)| WriteLease {
+    Ok(row.map(|(lease_id, upload_id, secret_hash)| WriteLease {
         lease_id,
         upload_id,
-        write_secret,
+        secret_hash,
     }))
 }
 

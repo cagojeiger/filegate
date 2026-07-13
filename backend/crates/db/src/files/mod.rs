@@ -29,8 +29,8 @@ pub use commit::finalize_commit;
 pub use create::{create, CreateOutcome, CreateSpec, CreatedFile};
 pub use geometry::{part_count, part_expected_size, part_offset};
 pub use multipart::{
-    attach_multipart_secret, attach_upload_id, claim_part, done_parts, extend_write_lease,
-    has_done_parts, record_part_done, write_lease, PartClaim, WriteLease,
+    attach_upload_id, claim_part, done_parts, extend_write_lease, has_done_parts, record_part_done,
+    write_lease, PartClaim, WriteLease,
 };
 pub use sweep::{
     active_multipart_lease_ids, expire_read_leases, expired_pending, finalize_purge,

@@ -26,7 +26,7 @@ pub async fn finalize_commit(
     }
 
     sqlx::query(
-        "UPDATE leases SET state = 'committed', write_secret = NULL \
+        "UPDATE leases SET state = 'committed' \
          WHERE file_id = $1 AND kind = 'write' AND state = 'issued'",
     )
     .bind(file_id)
