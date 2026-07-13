@@ -171,7 +171,7 @@ async fn upload(
     }
 
     files::record_upload(&state.pool, lease_id, written, &md5_hex).await?;
-    tracing::info!(event = "bytes.uploaded", lease = %lease_id, file = %lease.file_id, size = written);
+    tracing::info!(event = "blobs.uploaded", lease = %lease_id, file = %lease.file_id, size = written);
 
     Ok(ok_with_etag(&md5_hex))
 }
@@ -296,7 +296,7 @@ async fn upload_part(
         }
     }
 
-    tracing::info!(event = "bytes.part_uploaded", lease = %lease_id, file = %lease.file_id, part = part_no, size = written);
+    tracing::info!(event = "blobs.part_uploaded", lease = %lease_id, file = %lease.file_id, part = part_no, size = written);
     Ok(ok_with_etag(&md5_hex))
 }
 
@@ -383,7 +383,7 @@ async fn download(
         }
     };
 
-    tracing::info!(event = "bytes.downloaded", lease = %lease_id, file = %lease.file_id);
+    tracing::info!(event = "blobs.downloaded", lease = %lease_id, file = %lease.file_id);
     let mut response =
         Body::from_stream(ReaderStream::with_capacity(reader, STREAM_BUF_SIZE)).into_response();
     let headers = response.headers_mut();
@@ -439,7 +439,7 @@ async fn authorize(
     }
 }
 
-/// 모든 `/b` 응답에 붙는 CORS 헤더 — 성공·에러·preflight 공통 (map_response).
+/// 모든 `/blobs` 응답에 붙는 CORS 헤더 — 성공·에러·preflight 공통 (map_response).
 async fn with_cors(mut response: Response) -> Response {
     let headers = response.headers_mut();
     headers.insert(
