@@ -1,8 +1,8 @@
 # 기술 스택
 
-구현 기술 결정을 모은다. ADR과의 역할 구분: ADR은 잘 변하지 않는 방향·구조·원칙을, 이 디렉토리는 **생태계와 함께 바뀌는 구현 선택**(언어, 프레임워크, 크레이트 버전)을 담는다. 크레이트 버전은 형제 프로젝트(`~/project/*gate`)와 맞춰 두고, 갱신 시 함께 올린다.
+현재 구현된 스택을 서술한다 — 아래 표가 실제 워크스페이스 Cargo.toml의 요약이다. ADR과의 역할 구분: ADR은 잘 변하지 않는 방향·구조·원칙을, 이 디렉토리는 **생태계와 함께 바뀌는 구현 선택**(언어, 프레임워크, 크레이트 버전)을 담는다. 크레이트 버전은 형제 프로젝트(`~/project/*gate`)와 맞춰 두고, 갱신 시 함께 올린다.
 
-조사일: 2026-07-08. 기준: notegate·opsgate의 워크스페이스(둘이 거의 동일).
+최초 조사 2026-07-08 (형제 notegate·opsgate 기준), 2026-07-13 구현 정합 갱신.
 
 ## 결정
 
@@ -43,7 +43,7 @@
 - **배치는 유계**: CTE + `LIMIT`으로 한 run에 조금씩. run 결과는 tracing 구조화 로그로.
 - **부팅 배선** (notegate main.rs 순서): config 로드 → PG 연결·마이그레이션 → 상태 구성 → HTTP listen + worker spawn → `tokio::select`로 종료 신호 대기 → HTTP부터 순차 shutdown.
 
-filegate의 reconciler 잡: pending 만료 회수(capacity 해제), deleted purge(물리 삭제 + 해제), 이후 tiering. 주의: fs/NFS storage를 멀티 파드로 쓰려면 모든 파드가 같은 마운트를 공유해야 한다 — 중계 요청이 어느 파드로 와도 같은 파일에 닿아야 하고, 임시 경로 + rename 원자성은 같은 마운트 안에서만 성립한다.
+filegate의 reconciler 잡(7종): pending 만료 회수, deleted purge, read lease 만료 정리, 종료 lease GC, lease_history 보존 prune, usage_snapshot 일별 기록, 임시 파일 청소. tiering은 이후 범위다. 주의: fs/NFS storage를 멀티 파드로 쓰려면 모든 파드가 같은 마운트를 공유해야 한다 — 중계 요청이 어느 파드로 와도 같은 파일에 닿아야 하고, 임시 경로 + rename 원자성은 같은 마운트 안에서만 성립한다.
 
 ## 비밀과 설정
 
@@ -55,7 +55,7 @@ filegate의 reconciler 잡: pending 만료 회수(capacity 해제), deleted purg
 - storage 시크릿(런타임 사용)은 AES-256-GCM으로 암호화해 DB에 저장한다 — AAD에 storage id 바인딩, 마스터 키는 env. opsgate의 credential 보관 방식을 참조한다.
 - 메모리의 비밀은 `secrecy::SecretString`으로 Debug 유출을 막는다. 토큰 비교는 상수 시간(`subtle`).
 
-구현 단계에서 형제(notegate/opsgate)에서 가져올 것: `core/error.rs`(thiserror 에러 체계), `validator` 기반 config 검증, 필요 시 `moka` 캐시.
+형제(notegate/opsgate)에서 가져온 패턴: thiserror 에러 체계, 멀티 파드 워커 락. config 검증은 자체 파서로 충분해 validator·moka는 도입하지 않았다.
 
 ## 로그 레벨 정책
 

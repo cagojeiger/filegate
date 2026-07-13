@@ -1,6 +1,6 @@
 # spec 01: 등록부와 운영자 제어
 
-- Status: Draft
+- Status: Accepted
 - Date: 2026-07-09 (선언형 파일 설정안을 대체 — 등록부는 DB로, ADR 004 개정판 기준. 2026-07-10 용어 개정: provider→storage, profile 제거·binding 도입)
 - 근거: ADR [000](../adr/000-identity.md), [001](../adr/001-multi-storage.md), [004](../adr/004-config-layers.md)
 
