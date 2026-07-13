@@ -206,6 +206,102 @@ async fn purge_removes_location_and_observation(pool: PgPool) {
     assert!(!files::finalize_purge(&pool, candidate).await.unwrap());
 }
 
+const RETENTION_90D: i64 = 90 * 24 * 3600;
+
+#[sqlx::test(migrations = "./migrations")]
+async fn prune_terminal_files_after_retention_frees_client(pool: PgPool) {
+    wire(&pool, 1000).await;
+    // purge까지 끝난 deleted 파일 — 보존 기간이 지나면 행이 정리되고,
+    // 마지막 행이 사라진 client는 등록 해제가 가능해진다 (RESTRICT FK).
+    let file = create_ok(&pool, 100).await;
+    files::finalize_commit(&pool, file.file_id, "etag")
+        .await
+        .unwrap();
+    files::mark_deleted(&pool, "c", file.file_id).await.unwrap();
+    let candidates = files::purgeable(&pool, 10).await.unwrap();
+    assert!(files::finalize_purge(&pool, &candidates[0]).await.unwrap());
+    // lease 원장 정리 (잡 5 등가) — 남은 lease는 prune을 막는다.
+    files::prune_terminal_leases(&pool, 0, 10).await.unwrap();
+    // 보존 기간 내 — stat 계약대로 행이 남는다.
+    assert_eq!(
+        files::prune_terminal_files(&pool, RETENTION_90D, 10)
+            .await
+            .unwrap(),
+        0
+    );
+    // 보존 기간 경과를 시뮬레이션한다.
+    sqlx::query("UPDATE files SET deleted_at = now() - interval '91 days' WHERE id = $1")
+        .bind(file.file_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        files::prune_terminal_files(&pool, RETENTION_90D, 10)
+            .await
+            .unwrap(),
+        1
+    );
+    // 행이 모두 정리됐으니 client 삭제가 성립한다.
+    registry::delete_binding(&pool, "c", INTENT).await.unwrap();
+    registry::delete_client(&pool, "c").await.unwrap();
+    assert!(!registry::client_exists(&pool, "c").await.unwrap());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn prune_terminal_files_keeps_occupied_and_leased_rows(pool: PgPool) {
+    wire(&pool, 1000).await;
+    // A: 미purge deleted — location(점유)이 남아 오래돼도 정리하지 않는다.
+    let occupied = create_ok(&pool, 100).await;
+    files::finalize_commit(&pool, occupied.file_id, "etag")
+        .await
+        .unwrap();
+    files::mark_deleted(&pool, "c", occupied.file_id)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE files SET deleted_at = now() - interval '91 days' WHERE id = $1")
+        .bind(occupied.file_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // B: 회수된 pending — lease 원장이 남아 있는 동안은 정리하지 않는다.
+    let reclaimed = create_ok(&pool, 100).await;
+    sqlx::query("UPDATE leases SET expires_at = now() - interval '1 hour' WHERE file_id = $1")
+        .bind(reclaimed.file_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let candidates = files::expired_pending(&pool, 10).await.unwrap();
+    assert!(files::finalize_reclaim(&pool, &candidates[0])
+        .await
+        .unwrap());
+    sqlx::query("UPDATE files SET created_at = now() - interval '91 days' WHERE id = $1")
+        .bind(reclaimed.file_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // 점유(A)와 원장(B) 둘 다 가드에 걸린다 — 0행.
+    assert_eq!(
+        files::prune_terminal_files(&pool, RETENTION_90D, 10)
+            .await
+            .unwrap(),
+        0
+    );
+    // lease GC 뒤에는 B만 정리된다 — A는 여전히 점유가 막는다.
+    files::prune_terminal_leases(&pool, 0, 10).await.unwrap();
+    assert_eq!(
+        files::prune_terminal_files(&pool, RETENTION_90D, 10)
+            .await
+            .unwrap(),
+        1
+    );
+    let state: String = sqlx::query_scalar("SELECT state FROM files WHERE id = $1")
+        .bind(occupied.file_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "deleted");
+}
+
 // ── 이음새: 점유가 storage 삭제를 막는다 ─────────────────────
 
 #[sqlx::test(migrations = "./migrations")]

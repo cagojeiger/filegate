@@ -37,6 +37,10 @@ const LEASE_RETENTION: Duration = Duration::from_secs(24 * 3600);
 /// 최근 3개월만 유지한다 (설계 결정). lease GC와 독립이다.
 const HISTORY_RETENTION: Duration = Duration::from_secs(90 * 24 * 3600);
 
+/// 종착 파일 행(reclaimed·purge 완료 deleted)의 보존 기간 — stat 계약의
+/// 유계다 (spec 00). 이력과 같은 3개월 — 관찰 보존의 단일 기준.
+const FILE_RETENTION: Duration = HISTORY_RETENTION;
+
 pub fn spawn(
     pool: PgPool,
     crypto: Arc<Crypto>,
@@ -150,8 +154,9 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
     }
 
     // 잡 5: 종료 lease GC — issued가 아닌 오래된 lease를 삭제해 lease·
-    // lease_parts(CASCADE)의 무한 누적을 막는다 (spec 02). files 행은 남긴다
-    // (stat 계약). 회계와 무관하다 — 이미 정산된 lease의 원장 정리일 뿐이다.
+    // lease_parts(CASCADE)의 무한 누적을 막는다 (spec 02). files 행은 보존
+    // 기간 동안 남긴다 (stat 계약 — 잡 8이 정리). 회계와 무관하다 — 이미
+    // 정산된 lease의 원장 정리일 뿐이다.
     match files::prune_terminal_leases(pool, LEASE_RETENTION.as_secs() as i64, BATCH_LIMIT).await {
         Ok(0) => {}
         Ok(count) => tracing::info!(event = "reconciler.leases_pruned", count),
@@ -167,6 +172,19 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
         Ok(count) => tracing::info!(event = "reconciler.history_pruned", count),
         Err(error) => {
             tracing::error!(event = "reconciler.scan_failed", job = "prune_history", %error)
+        }
+    }
+
+    // 잡 8: 종착 파일 행 보존 정리 — 보존 기간(90일)을 지난 reclaimed·
+    // purge 완료 deleted 행을 삭제한다 (spec 00: stat 계약은 보존 기간까지).
+    // location·lease가 남은 행은 조건이 걸러낸다 — purge(잡 2)와 lease
+    // GC(잡 5)가 자연히 먼저다. 행이 모두 정리된 client는 등록 해제가
+    // 가능해진다 (RESTRICT FK).
+    match files::prune_terminal_files(pool, FILE_RETENTION.as_secs() as i64, BATCH_LIMIT).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(event = "reconciler.files_pruned", count),
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", job = "prune_files", %error)
         }
     }
 
