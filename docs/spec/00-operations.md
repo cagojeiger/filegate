@@ -44,7 +44,7 @@
 ### commit — 업로드 확정
 
 - 입력: file_id.
-- 처리: 저장소 실물 크기를 선언 크기와 대조하고, 선언 MD5가 있으면 ETag와도 대조한다. 확정 시점 ETag를 기록하고 정산한다.
+- 처리: 저장소 실물 크기를 선언 크기와 대조하고, 선언 MD5가 있으면 ETag와도 대조한다. 확정 시점 ETag를 기록한다.
 - 상태: `pending` → `active`. 검증 실패면 `pending`에 남아 lease 만료까지 재시도할 수 있다.
 - 쓰기 URL은 확정 후에도 만료 전까지 유효하다 (실측). 쓰기 TTL을 짧게 두고, 변조 의심은 기록된 ETag로 판정한다.
 
@@ -95,7 +95,7 @@ sequenceDiagram
     U->>S: 업로드 완료 알림
     S->>F: commit(file_id)
     F->>O: 실물 검증 (크기 대조)
-    F-->>S: active 확정 + 정산
+    F-->>S: active 확정
     S->>S: 자기 DB에 file_id 연결
 ```
 
