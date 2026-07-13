@@ -62,6 +62,7 @@
 
 - 입력: file_id. 클라이언트는 자기 소유 file_id만 조회한다.
 - 출력: 상태(`pending`|`active`|`deleted`), 크기, intent. (location·URL은 제외.)
+- `deleted`의 stat은 **보존 기간(90일)까지** 답한다 — 종착 행 정리(아래 상태 절) 뒤에는 404와 구분되지 않는다.
 
 ### delete — 삭제 결정
 
@@ -136,6 +137,7 @@ create ──▶ pending ──commit──▶ active ──delete──▶ dele
 - `active`: 확정됨, read 가능.
 - `deleted`: detach 결정됨, purge 전까지 실물이 남는다.
 - 관찰량에서 빠지는 지점은 location 제거다: pending의 만료 회수, deleted의 purge — "남은 location = 현재 점유"라 별도 정산이 없다.
+- **종착 행 보존**: reclaimed와 purge가 끝난 deleted 행은 90일(대여 이력과 같은 보존 기준) 뒤 reconciler가 정리한다. 점유(location)나 원장(lease)이 남은 행은 정리하지 않는다 — purge와 lease GC가 자연히 먼저다. 행이 모두 정리된 client는 등록 해제가 가능하다.
 
 ## 물리 배치와 이름 규약
 

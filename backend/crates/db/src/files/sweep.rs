@@ -203,8 +203,9 @@ pub async fn expire_read_leases(pool: &PgPool, limit: i64) -> Result<u64, sqlx::
 }
 
 /// 종료 lease 정리 (GC) — issued가 아닌 lease를 오래된 것부터 배치 삭제한다.
-/// CASCADE로 lease_parts가 함께 사라진다. files 행은 남긴다 (stat 계약,
-/// spec 00). 이게 없으면 lease·lease_parts가 무한히 쌓인다.
+/// CASCADE로 lease_parts가 함께 사라진다. files 행은 보존 기간 동안 남긴다
+/// (stat 계약, spec 00) — 그 정리는 prune_terminal_files 몫이다. 이게
+/// 없으면 lease·lease_parts가 무한히 쌓인다.
 pub async fn prune_terminal_leases(
     pool: &PgPool,
     retention_secs: i64,
@@ -214,6 +215,32 @@ pub async fn prune_terminal_leases(
         "DELETE FROM leases WHERE id IN ( \
          SELECT id FROM leases \
          WHERE state <> 'issued' AND created_at < now() - $1 * interval '1 second' \
+         LIMIT $2)",
+    )
+    .bind(retention_secs)
+    .bind(limit)
+    .execute(pool)
+    .await?;
+    Ok(deleted.rows_affected())
+}
+
+/// 종착 파일 행 정리 — 보존 기간을 지난 reclaimed·purge 완료 deleted 행을
+/// 배치 삭제한다 (spec 00: stat 계약은 보존 기간까지). location(점유)이나
+/// lease(원장)가 남은 행은 건드리지 않는다 — purge와 lease GC가 먼저다.
+/// 이 정리가 있어야 files의 무한 누적이 멎고, 이력이 쌓인 client도 행이
+/// 모두 정리된 뒤에는 등록 해제(RESTRICT FK)가 가능해진다.
+pub async fn prune_terminal_files(
+    pool: &PgPool,
+    retention_secs: i64,
+    limit: i64,
+) -> Result<u64, sqlx::Error> {
+    let deleted = sqlx::query(
+        "DELETE FROM files WHERE id IN ( \
+         SELECT f.id FROM files f \
+         WHERE f.state IN ('deleted', 'reclaimed') \
+         AND COALESCE(f.deleted_at, f.created_at) < now() - $1 * interval '1 second' \
+         AND NOT EXISTS (SELECT 1 FROM locations l WHERE l.file_id = f.id) \
+         AND NOT EXISTS (SELECT 1 FROM leases le WHERE le.file_id = f.id) \
          LIMIT $2)",
     )
     .bind(retention_secs)
