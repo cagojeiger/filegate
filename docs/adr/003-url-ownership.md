@@ -1,6 +1,6 @@
 # ADR 003: 안정 URL은 서비스가 소유하고, filegate URL은 저장하지 않는다
 
-- Status: Draft
+- Status: Accepted
 - Date: 2026-07-03
 - 부모: [000](000-identity.md) 공리 1+2의 교차, [002](002-lease-model.md)
 
