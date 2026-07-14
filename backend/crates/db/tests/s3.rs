@@ -81,7 +81,7 @@ async fn create_ok(pool: &PgPool) -> CreatedFile {
 async fn credential_maps_access_key_to_client(pool: PgPool) {
     wire(&pool).await;
     add_cred(&pool, "fgak0123456789abcdef", "c").await.unwrap();
-    let found = s3::find_credential(&pool, "fgak0123456789abcdef")
+    let found = s3::get_credential(&pool, "fgak0123456789abcdef")
         .await
         .unwrap()
         .unwrap();
@@ -90,7 +90,7 @@ async fn credential_maps_access_key_to_client(pool: PgPool) {
     assert_eq!(found.secret_ciphertext, CT);
     assert_eq!(found.enc_key_id, "v1");
     // 모르는 access key는 None — 403의 재료.
-    assert!(s3::find_credential(&pool, "fgakffffffffffffffff")
+    assert!(s3::get_credential(&pool, "fgakffffffffffffffff")
         .await
         .unwrap()
         .is_none());
@@ -153,19 +153,17 @@ async fn key_overwrite_returns_displaced_file(pool: PgPool) {
         Some(first.file_id)
     );
     assert_eq!(
-        s3::lookup_key(&pool, "c", INTENT, "dir/a.bin")
-            .await
-            .unwrap(),
+        s3::get_key(&pool, "c", INTENT, "dir/a.bin").await.unwrap(),
         Some(second.file_id)
     );
     // 제거 — 지워진 file_id 반환, 멱등.
     assert_eq!(
-        s3::remove_key(&pool, "c", INTENT, "dir/a.bin")
+        s3::delete_key(&pool, "c", INTENT, "dir/a.bin")
             .await
             .unwrap(),
         Some(second.file_id)
     );
-    assert!(s3::remove_key(&pool, "c", INTENT, "dir/a.bin")
+    assert!(s3::delete_key(&pool, "c", INTENT, "dir/a.bin")
         .await
         .unwrap()
         .is_none());
@@ -202,7 +200,7 @@ async fn key_mapping_dies_with_the_file_row(pool: PgPool) {
             .unwrap(),
         1
     );
-    assert!(s3::lookup_key(&pool, "c", INTENT, "dir/b.bin")
+    assert!(s3::get_key(&pool, "c", INTENT, "dir/b.bin")
         .await
         .unwrap()
         .is_none());

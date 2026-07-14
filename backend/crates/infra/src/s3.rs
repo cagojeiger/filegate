@@ -250,7 +250,11 @@ pub async fn open_read(
         .await;
     match result {
         Ok(output) => {
-            let len = output.content_length().unwrap_or(0);
+            // 크기 누락은 하드 에러다 (head_object와 같은 규칙) — 0으로 폴백하면
+            // Content-Length: 0으로 비어 보이는 잘린 다운로드가 조용히 나간다.
+            let len = output
+                .content_length()
+                .ok_or_else(|| anyhow::anyhow!("get_object returned no content length"))?;
             Ok(Some((output.body.into_async_read(), len)))
         }
         Err(error) => {

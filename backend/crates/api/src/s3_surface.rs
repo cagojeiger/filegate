@@ -105,6 +105,18 @@ fn xml_internal(context: &'static str, error: impl std::fmt::Display) -> Respons
     )
 }
 
+/// 뒷단 저장소 실패 — 우리 버그(500)가 아니라 백엔드 장애다. 네이티브가
+/// 502로 답하는 것과 같은 계층 구분이며, S3 SDK가 재시도하는 503
+/// ServiceUnavailable 코드로 낸다 (SDK가 아는 재시도 신호).
+fn xml_storage_error(context: &'static str, error: impl std::fmt::Display) -> Response {
+    tracing::error!(event = "s3.storage_error", context, %error);
+    xml_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "ServiceUnavailable",
+        "the backend storage is unavailable; retry",
+    )
+}
+
 // ── SigV4 인증 ───────────────────────────────────────────────
 
 type HmacSha256 = Hmac<Sha256>;
@@ -254,7 +266,7 @@ async fn authenticate(
         ));
     }
 
-    let credential = s3reg::find_credential(&state.pool, &parsed.access_key)
+    let credential = s3reg::get_credential(&state.pool, &parsed.access_key)
         .await
         .map_err(|e| xml_internal("credential lookup", e))?
         .ok_or_else(|| {
@@ -425,7 +437,7 @@ async fn put_object(
                 fs_backend::commit_write(file, &temp_path, root, &created.object_key).await
             {
                 fs_backend::abort_write(&temp_path).await;
-                return Err(xml_internal("fs commit", error));
+                return Err(xml_storage_error("fs commit", error));
             }
         }
         StorageBackend::S3 { spec, .. } => {
@@ -438,7 +450,7 @@ async fn put_object(
                     .await;
             fs_backend::abort_write(&temp_path).await;
             if let Err(error) = uploaded {
-                return Err(xml_internal("s3 upload", error));
+                return Err(xml_storage_error("s3 upload", error));
             }
         }
     }
@@ -500,7 +512,7 @@ async fn resolve(
     bucket: &str,
     key: &str,
 ) -> Result<(Uuid, files::FileAccess), Response> {
-    let file_id = s3reg::lookup_key(&state.pool, client_id, bucket, key)
+    let file_id = s3reg::get_key(&state.pool, client_id, bucket, key)
         .await
         .map_err(|e| xml_internal("key lookup", e))?
         .ok_or_else(no_such_key)?;
@@ -605,7 +617,7 @@ async fn get_object(
     let (reader, len) = match opened {
         Ok(Some(found)) => found,
         Ok(None) => return Err(no_such_key()),
-        Err(error) => return Err(xml_internal("open read", error)),
+        Err(error) => return Err(xml_storage_error("open read", error)),
     };
 
     // 다운로드 관찰 — lease 원장 한 줄 (ADR 002, 네이티브와 한 장부).
@@ -661,7 +673,7 @@ fn object_headers(headers: &mut HeaderMap, file: &files::FileAccess, content_len
 
 /// DeleteObject — 매핑 제거 + detach 결정 (물리는 reconciler). 멱등 204.
 async fn delete_object(state: &AppState, client_id: &str, bucket: &str, key: &str) -> S3Result {
-    let removed = s3reg::remove_key(&state.pool, client_id, bucket, key)
+    let removed = s3reg::delete_key(&state.pool, client_id, bucket, key)
         .await
         .map_err(|e| xml_internal("key remove", e))?;
     if let Some(file_id) = removed {

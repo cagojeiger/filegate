@@ -457,6 +457,10 @@ struct DeleteOut {
     state: &'static str,
 }
 
+/// 클라이언트 delete는 200 + 상태 본문이다 — 운영자·S3 표면의 204와
+/// 다르다 (의도적). 이건 자원 제거가 아니라 detach 상태 전이라, 파일이
+/// `deleted`로 남아 stat이 계속 답한다 (spec 00). 전이 결과를 본문으로
+/// 돌려주는 게 계약이고, 멱등(AlreadyDeleted)도 같은 200을 받는다.
 fn deleted_response(file_id: Uuid) -> Response {
     Json(DeleteOut {
         file_id,

@@ -30,8 +30,20 @@ pub async fn connect(root_path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn object_path(root: &Path, object_key: &str) -> PathBuf {
-    root.join(object_key)
+/// object_key를 root 아래 경로로 잇는다 — 방어선: 절대 경로나 `..` 성분은
+/// root를 벗어난다(`Path::join`은 절대 경로를 주면 root를 버린다). 키는
+/// filegate 생성값이라 오늘은 안전하지만, s3 어댑터가 구조적으로 탈출
+/// 불가한 것과 대칭이 되도록 여기서도 봉인한다.
+fn object_path(root: &Path, object_key: &str) -> anyhow::Result<PathBuf> {
+    let key = Path::new(object_key);
+    let escapes = key.is_absolute()
+        || key
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir));
+    if escapes {
+        anyhow::bail!("object_key '{object_key}' escapes the storage root");
+    }
+    Ok(root.join(key))
 }
 
 /// 쓰기 시작 — 임시 파일을 연다. 완결은 rename(commit_write), 실패는
@@ -54,7 +66,7 @@ pub async fn commit_write(
     file.flush().await?;
     file.sync_all().await?;
     drop(file);
-    let target = object_path(root, object_key);
+    let target = object_path(root, object_key)?;
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).await?;
     }
@@ -68,7 +80,7 @@ pub async fn abort_write(temp: &Path) {
 
 /// 읽기 스트림 — 파일과 크기. 없으면 None (presigned GET 404 등가).
 pub async fn open_read(root: &Path, object_key: &str) -> anyhow::Result<Option<(fs::File, i64)>> {
-    let path = object_path(root, object_key);
+    let path = object_path(root, object_key)?;
     match fs::File::open(&path).await {
         Ok(file) => {
             let len = file.metadata().await?.len() as i64;
@@ -88,7 +100,7 @@ pub async fn open_read_range(
     end: i64,
 ) -> anyhow::Result<Option<(impl tokio::io::AsyncRead + Send + Unpin, i64)>> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
-    let path = object_path(root, object_key);
+    let path = object_path(root, object_key)?;
     match fs::File::open(&path).await {
         Ok(mut file) => {
             file.seek(std::io::SeekFrom::Start(start as u64)).await?;
@@ -144,7 +156,7 @@ pub async fn sweep_stale_temps(
 
 /// 물리 삭제 — 없는 파일도 성공 (purge는 멱등, spec 00).
 pub async fn delete(root: &Path, object_key: &str) -> anyhow::Result<()> {
-    match fs::remove_file(object_path(root, object_key)).await {
+    match fs::remove_file(object_path(root, object_key)?).await {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.into()),
@@ -183,7 +195,7 @@ pub async fn write_part_at(target: &Path, offset: u64, source: &Path) -> anyhow:
 /// 경로 기반 확정 — multipart 대상 임시 파일을 실체 경로로 rename.
 /// (단일 PUT의 commit_write와 같은 계약, 핸들 대신 경로를 받는 변형.)
 pub async fn commit_path(root: &Path, temp: &Path, object_key: &str) -> anyhow::Result<()> {
-    let target = object_path(root, object_key);
+    let target = object_path(root, object_key)?;
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).await?;
     }
