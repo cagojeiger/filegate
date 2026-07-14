@@ -352,7 +352,9 @@ async fn download(
         StorageBackend::Fs { root } => match fs_backend::open_read(root, object_key).await {
             Ok(Some((file, size))) => (Box::new(file), size),
             Ok(None) => return Err(not_found("object not found")),
-            Err(error) => return Err(ApiError::Storage(error)),
+            // fs 실패는 internal(500) — 원격 게이트웨이(s3=502)가 아니라
+            // 로컬/마운트 IO다. 쓰기 경로·v1/multipart와 같은 변종.
+            Err(error) => return Err(internal(error)),
         },
         StorageBackend::S3 { spec, .. } => {
             let storage = state

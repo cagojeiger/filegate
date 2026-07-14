@@ -81,6 +81,8 @@ pub async fn by_client(pool: &PgPool) -> Result<Vec<ClientUsage>, sqlx::Error> {
 pub async fn record_snapshot(pool: &PgPool, day: chrono::NaiveDate) -> Result<u64, sqlx::Error> {
     // 매 tick 무거운 집계를 반복하지 않기 위한 가드 — PK 인덱스 한 번.
     // 활성 파일이 0이었던 날은 행이 없어 재시도되지만, 빈 집계는 싸다.
+    // 이 가드는 최적화일 뿐이다 — 직렬화의 진짜 지점은 아래 INSERT의
+    // ON CONFLICT DO NOTHING이라, 다른 write 경로와 달리 트랜잭션이 필요 없다.
     let recorded: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM usage_snapshot WHERE day = $1)")
             .bind(day)
