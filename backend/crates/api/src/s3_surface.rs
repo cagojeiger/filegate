@@ -10,8 +10,6 @@
 //! 실측 관찰이다 — S3에 commit이 없으므로 이 표면에도 없다. 에러는 S3 XML
 //! 최소형 — SDK가 파싱하는 모양이다 (HEAD의 본문은 hyper가 떨군다).
 
-use std::time::Duration;
-
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
@@ -19,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
 use filegate_db::files::{self, CreateOutcome, CreateSpec};
-use filegate_db::s3_surface as s3reg;
+use filegate_db::s3_registry as s3reg;
 use filegate_infra::{
     fs as fs_backend, s3_open_read, s3_open_read_range, s3_put_object_from_path, Address,
 };
@@ -28,14 +26,13 @@ use sha2::{Digest, Sha256};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
+use crate::lease::{READ_LEASE_TTL, WRITE_LEASE_TTL};
 use crate::routes::AppState;
 use crate::spool::{self, spool_root, STREAM_BUF_SIZE};
 use crate::storage_access::{backend_from_row, StorageBackend};
 use crate::validation::{content_type_ok, MAX_SINGLE_PUT_BYTES};
 use filegate_core::ExposeSecret as _;
 
-const READ_TTL: Duration = Duration::from_secs(15 * 60);
-const WRITE_LEASE_TTL_SECS: i64 = 15 * 60;
 /// SigV4 요청 시각의 허용 스큐 (AWS 관례 ±15분).
 const MAX_CLOCK_SKEW_SECS: i64 = 15 * 60;
 
@@ -390,7 +387,7 @@ async fn put_object(
         declared_size: content_length,
         content_type,
         declared_md5: None,
-        lease_ttl_secs: WRITE_LEASE_TTL_SECS,
+        lease_ttl_secs: WRITE_LEASE_TTL.as_secs() as i64,
         part_size: None,
     };
     let created = match files::create(&state.pool, spec)
@@ -662,7 +659,7 @@ async fn get_object(
     if let Err(error) = files::issue_read_lease(
         &state.pool,
         file_id,
-        READ_TTL.as_secs() as i64,
+        READ_LEASE_TTL.as_secs() as i64,
         None,
         &file.storage.id,
         client_id,

@@ -5,8 +5,6 @@
 //! 않으며, 직결 PUT은 크기를 앞단에서 막지 못하므로 commit이 사후 검증
 //! 게이트다. 용량은 운영자의 세계다 — 클라이언트에 노출하지 않는다 (공리 1).
 
-use std::time::Duration;
-
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -19,15 +17,10 @@ use uuid::Uuid;
 use super::relay::{relay_base, relay_url, RelaySecret};
 use super::ClientId;
 use crate::error::{bad_request, conflict, internal, not_found, ApiError};
+use crate::lease::{READ_LEASE_TTL, WRITE_LEASE_TTL};
 use crate::routes::AppState;
 use crate::storage_access::{backend_from_row, StorageBackend};
 use crate::validation::{content_type_ok, MAX_SINGLE_PUT_BYTES};
-
-/// 쓰기 lease TTL — 짧게 둔다 (spec 00: 쓰기 URL은 확정 후에도 만료 전까지
-/// 유효하므로, 변조 창을 줄이는 건 TTL이다).
-pub(super) const WRITE_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
-/// 읽기 lease TTL. 발급된 직결 URL은 만료로만 소멸한다 (ADR 002).
-const READ_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Deserialize)]
 pub(super) struct CreateBody {
