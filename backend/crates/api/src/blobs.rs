@@ -312,7 +312,7 @@ async fn spool_measured(
     temp_path: &std::path::Path,
     declared_size: i64,
 ) -> Result<(i64, String), ApiError> {
-    let measured = spool::spool_to_temp(body, writer, temp_path, declared_size, false)
+    let measured = spool::spool_to_temp(body, writer, temp_path, declared_size)
         .await
         .map_err(|error| match error {
             spool::SpoolError::Idle => status(
