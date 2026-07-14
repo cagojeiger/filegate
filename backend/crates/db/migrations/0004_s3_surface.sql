@@ -1,13 +1,19 @@
 -- S3 호환 표면의 등록부 (spec 03, ADR 006).
 --
--- s3_credentials: access key id → client. secret은 저장하지 않는다 —
--- SigV4는 서버가 secret으로 HMAC을 재계산해야 해서 해시 보관이 불가능하고,
--- 마스터 키 + access key id에서 파생하면(core::Crypto::s3_secret) 저장
--- 자체가 없다. 발급과 검증이 같은 값을 재계산한다.
+-- s3_credentials: access key id → client + 암호화 secret. SigV4는 서버가
+-- raw secret으로 HMAC을 재계산해야 하므로 해시 보관이 불가능하다. 이 secret은
+-- 만료 없는 장수 신원이라, 마스터 키 + access key id에서 파생하면(찰나인
+-- relay식) 루트가 전 자격증명의 스켈레톤 키가 되고 개별 회전이 막힌다.
+-- 그래서 storage 벤더 시크릿과 같은 기계로 암호화 저장한다 (재현 필요 +
+-- 장수 → 암호화 저장): AAD=access_key_id로 재배치를 막고, enc_key_id 라벨로
+-- 복호 키를 고른다 (마스터 키 회전은 spec 01 런북이 storages와 함께 다스림).
 CREATE TABLE s3_credentials (
-    access_key_id text PRIMARY KEY CHECK (access_key_id ~ '^[a-z0-9]{8,64}$'),
-    client_id     text NOT NULL REFERENCES clients (id) ON DELETE CASCADE,
-    created_at    timestamptz NOT NULL DEFAULT now()
+    access_key_id         text PRIMARY KEY CHECK (access_key_id ~ '^[a-z0-9]{8,64}$'),
+    client_id             text NOT NULL REFERENCES clients (id) ON DELETE CASCADE,
+    secret_key_ciphertext bytea NOT NULL,
+    secret_key_nonce      bytea NOT NULL CHECK (octet_length(secret_key_nonce) = 12),
+    enc_key_id            text NOT NULL,
+    created_at            timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX s3_credentials_client_idx ON s3_credentials (client_id);
 

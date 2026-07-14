@@ -1,36 +1,66 @@
 //! S3 호환 표면의 등록부 접근 (spec 03) — 자격증명과 논리 키 매핑.
 //!
-//! secret은 여기 없다 — 파생이라 저장이 없다 (core::Crypto::s3_secret,
-//! 마이그레이션 0004 주석). 논리키는 서비스 소유 이름공간이고 물리 배치와
-//! 무관하다 (물리는 locations 소유).
+//! 자격증명 secret은 암호화 저장한다 — storage 벤더 시크릿과 같은 기계
+//! (재현 필요 + 장수 → 암호화 저장, 마이그레이션 0005). 논리키는 서비스
+//! 소유 이름공간이고 물리 배치와 무관하다 (물리는 locations 소유).
 
 use sqlx::PgPool;
 use uuid::Uuid;
 
-// ---- 자격증명 (access key id → client) ----
+// ---- 자격증명 (access key id → client + 암호화 secret) ----
+
+/// SigV4 검증이 복호할 자격증명 — client와 암호문 셋 (storages와 동형).
+pub struct S3Credential {
+    pub client_id: String,
+    pub secret_ciphertext: Vec<u8>,
+    pub secret_nonce: Vec<u8>,
+    pub enc_key_id: String,
+}
 
 pub async fn insert_credential(
     pool: &PgPool,
     access_key_id: &str,
     client_id: &str,
+    secret_ciphertext: &[u8],
+    secret_nonce: &[u8],
+    enc_key_id: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO s3_credentials (access_key_id, client_id) VALUES ($1, $2)")
-        .bind(access_key_id)
-        .bind(client_id)
-        .execute(pool)
-        .await
-        .map(|_| ())
+    sqlx::query(
+        "INSERT INTO s3_credentials \
+         (access_key_id, client_id, secret_key_ciphertext, secret_key_nonce, enc_key_id) \
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(access_key_id)
+    .bind(client_id)
+    .bind(secret_ciphertext)
+    .bind(secret_nonce)
+    .bind(enc_key_id)
+    .execute(pool)
+    .await
+    .map(|_| ())
 }
 
-/// SigV4 검증의 첫 단계 — access key id로 client를 찾는다. 모르면 None.
-pub async fn client_for_access_key(
+/// SigV4 검증의 첫 단계 — access key id로 자격증명을 찾는다. 모르면 None.
+/// 반환한 암호문을 core::Crypto가 access_key_id를 AAD로 복호한다.
+pub async fn find_credential(
     pool: &PgPool,
     access_key_id: &str,
-) -> Result<Option<String>, sqlx::Error> {
-    sqlx::query_scalar("SELECT client_id FROM s3_credentials WHERE access_key_id = $1")
-        .bind(access_key_id)
-        .fetch_optional(pool)
-        .await
+) -> Result<Option<S3Credential>, sqlx::Error> {
+    let row: Option<(String, Vec<u8>, Vec<u8>, String)> = sqlx::query_as(
+        "SELECT client_id, secret_key_ciphertext, secret_key_nonce, enc_key_id \
+         FROM s3_credentials WHERE access_key_id = $1",
+    )
+    .bind(access_key_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(
+        |(client_id, secret_ciphertext, secret_nonce, enc_key_id)| S3Credential {
+            client_id,
+            secret_ciphertext,
+            secret_nonce,
+            enc_key_id,
+        },
+    ))
 }
 
 pub async fn list_credentials(pool: &PgPool, client_id: &str) -> Result<Vec<String>, sqlx::Error> {

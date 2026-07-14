@@ -1,15 +1,17 @@
-//! 마스터 키의 두 용도 — storage 시크릿의 암호화 보관 (spec 01 "키와
-//! 비밀")과 중계 multipart secret의 결정적 파생 (spec 02).
+//! 마스터 키의 두 용도 — "재현이 필요한 시크릿"의 두 보관 방식.
+//!
+//! filegate가 원문을 재현해야 하는 시크릿은 수명으로 갈린다:
+//!   - **장수**(storage 벤더 시크릿, S3 표면 자격증명): AES-256-GCM으로
+//!     암호화 저장한다. 행마다 독립 암호문 + `enc_key_id` 라벨이라 개별
+//!     폐기·회전이 성립하고, 유출 반경이 저장된 암호문에 국한된다. AAD에
+//!     행 식별자를 넣어 암호문 재배치를 막는다 (storage=storage_id,
+//!     S3 자격증명=access_key_id).
+//!   - **찰나**(중계 multipart secret, lease 15분): lease_id에서 결정적
+//!     파생한다 — 재발급이 재파생이라 저장할 가치가 없다 (spec 02).
 //!
 //! 마스터 키(`FILEGATE_ENC_ROOT_SECRET`)에서 HKDF로 용도별 키를 파생하고
-//! (루트를 직접 쓰지 않는다), 암호화는 AES-256-GCM에 storage id를 AAD로
-//! 바인딩한다 — 한 storage의 암호문을 다른 행에 옮겨 붙이면 복호가 실패한다.
-//! opsgate의 credential 보관 방식을 참조했다.
-//!
-//! 중계 multipart secret은 lease id에서 파생한다 — parts() 발급이 매번
-//! 같은 값을 재파생하므로 원문을 저장할 이유가 없다 (인증은 해시 대조
-//! 그대로). 파생 불가능한 값만 저장한다는 spec 02의 원칙이 secret에도
-//! 성립하게 된다.
+//! (루트를 직접 쓰지 않는다) 위 두 방식이 그 위에 선다. opsgate의 credential
+//! 보관 방식을 참조했다.
 //!
 //! 마스터 키 회전은 이중 루트로 한다: 활성 키(암호화·복호)와 선택적 PREV
 //! 키(복호 전용 — 코드가 encrypt에 안 쓰는 정책일 뿐, 키 자체는 대칭키다).
@@ -29,7 +31,6 @@ const NONCE_LEN: usize = 12;
 const MIN_ROOT_LEN: usize = 32;
 const STORAGE_SECRET_LABEL: &[u8] = b"filegate/enc/storage-secret/v1";
 const RELAY_SECRET_LABEL: &[u8] = b"filegate/mac/relay-secret/v1";
-const S3_SECRET_LABEL: &[u8] = b"filegate/mac/s3-secret/v1";
 
 /// 암호화된 필드 — DB의 ciphertext·nonce 컬럼 한 쌍.
 #[derive(Clone, PartialEq, Eq)]
@@ -47,7 +48,6 @@ impl std::fmt::Debug for EncryptedSecret {
 struct KeyEntry {
     key: [u8; KEY_LEN],
     relay_key: [u8; KEY_LEN],
-    s3_key: [u8; KEY_LEN],
     key_id: String,
 }
 
@@ -92,26 +92,11 @@ fn derive(key_id: &str, root: &SecretString) -> Result<KeyEntry> {
         &mut relay_key,
     )
     .map_err(|_e| Error::internal("hkdf expand failed"))?;
-    let mut s3_key = [0_u8; KEY_LEN];
-    hk.expand_multi_info(&[S3_SECRET_LABEL, b"/", key_id.as_bytes()], &mut s3_key)
-        .map_err(|_e| Error::internal("hkdf expand failed"))?;
     Ok(KeyEntry {
         key,
         relay_key,
-        s3_key,
         key_id: key_id.to_owned(),
     })
-}
-
-/// access key id에서 S3 표면의 secret key를 파생한다 (spec 03). SigV4는
-/// 서버가 secret으로 HMAC을 재계산해야 해서 해시 보관이 불가능하다 —
-/// 파생이면 저장 자체가 없다. 발급과 검증이 같은 값을 재계산한다.
-fn s3_secret_with(entry: &KeyEntry, access_key_id: &str) -> Result<String> {
-    let hk = Hkdf::<Sha256>::new(None, &entry.s3_key);
-    let mut out = [0_u8; KEY_LEN];
-    hk.expand(access_key_id.as_bytes(), &mut out)
-        .map_err(|_e| Error::internal("hkdf expand failed"))?;
-    Ok(crate::hash::to_hex(&out))
 }
 
 /// lease id에서 중계 multipart secret을 파생한다 — 같은 입력은 언제나
@@ -162,20 +147,6 @@ impl Crypto {
         self.prev
             .as_ref()
             .map(|entry| relay_secret_with(entry, lease_id))
-            .transpose()
-    }
-
-    /// S3 표면 secret key — 활성 키로 access key id에서 파생한다 (spec 03).
-    pub fn s3_secret(&self, access_key_id: &str) -> Result<String> {
-        s3_secret_with(&self.active, access_key_id)
-    }
-
-    /// PREV 키 파생 — 회전 전환기에 회전 이전 발급된 자격증명의 검증용.
-    /// 완전 회전 뒤에는 그 자격증명이 무효가 된다 — 재발급이 계약이다.
-    pub fn s3_secret_prev(&self, access_key_id: &str) -> Result<Option<String>> {
-        self.prev
-            .as_ref()
-            .map(|entry| s3_secret_with(entry, access_key_id))
             .transpose()
     }
 
@@ -273,32 +244,6 @@ mod tests {
         assert_ne!(a, c.relay_secret("lease-2").unwrap());
         let rotated = Crypto::new("v2", &root("one")).unwrap();
         assert_ne!(a, rotated.relay_secret("lease-1").unwrap());
-    }
-
-    #[test]
-    fn s3_secret_is_deterministic_and_purpose_separated() {
-        let c = crypto_v1();
-        let secret = c.s3_secret("fgakdeadbeef00000001").unwrap();
-        // 발급과 검증이 같은 값을 재계산한다 (spec 03).
-        assert_eq!(secret, c.s3_secret("fgakdeadbeef00000001").unwrap());
-        assert_eq!(secret.len(), 64);
-        // access key가 다르면 secret도 다르고, 같은 입력이라도 용도(라벨)가
-        // 다르면 relay 파생과 겹치지 않는다 — 용도 키 분리.
-        assert_ne!(secret, c.s3_secret("fgakdeadbeef00000002").unwrap());
-        assert_ne!(secret, c.relay_secret("fgakdeadbeef00000001").unwrap());
-        // 회전 전환기: PREV 파생이 회전 이전 값을 재현한다.
-        let rotated = Crypto::new("v2", &root("one"))
-            .unwrap()
-            .with_prev("v1", &root("one"))
-            .unwrap();
-        assert_eq!(
-            rotated
-                .s3_secret_prev("fgakdeadbeef00000001")
-                .unwrap()
-                .unwrap(),
-            secret
-        );
-        assert_ne!(rotated.s3_secret("fgakdeadbeef00000001").unwrap(), secret);
     }
 
     #[test]

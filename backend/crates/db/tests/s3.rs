@@ -10,7 +10,15 @@
 
 use filegate_db::files::{self, CreateOutcome, CreateSpec, CreatedFile};
 use filegate_db::registry::{self, BindingRow, StorageRow};
-use filegate_db::s3;
+use filegate_db::s3_surface as s3;
+
+// db 계층은 암호문을 저장만 한다 (복호는 core::Crypto). 더미 암호 재료.
+const CT: &[u8] = &[1, 2, 3, 4];
+const NONCE: &[u8] = &[0_u8; 12];
+
+async fn add_cred(pool: &PgPool, access_key_id: &str, client_id: &str) -> Result<(), sqlx::Error> {
+    s3::insert_credential(pool, access_key_id, client_id, CT, NONCE, "v1").await
+}
 use sqlx::PgPool;
 
 // ── 픽스처 (lifecycle.rs와 같은 형태) ───────────────────────
@@ -72,18 +80,17 @@ async fn create_ok(pool: &PgPool) -> CreatedFile {
 #[sqlx::test(migrations = "./migrations")]
 async fn credential_maps_access_key_to_client(pool: PgPool) {
     wire(&pool).await;
-    s3::insert_credential(&pool, "fgak0123456789abcdef", "c")
+    add_cred(&pool, "fgak0123456789abcdef", "c").await.unwrap();
+    let found = s3::find_credential(&pool, "fgak0123456789abcdef")
         .await
+        .unwrap()
         .unwrap();
-    assert_eq!(
-        s3::client_for_access_key(&pool, "fgak0123456789abcdef")
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("c")
-    );
+    // 검증이 복호할 재료가 그대로 돌아온다 (client + 암호문 셋).
+    assert_eq!(found.client_id, "c");
+    assert_eq!(found.secret_ciphertext, CT);
+    assert_eq!(found.enc_key_id, "v1");
     // 모르는 access key는 None — 403의 재료.
-    assert!(s3::client_for_access_key(&pool, "fgakffffffffffffffff")
+    assert!(s3::find_credential(&pool, "fgakffffffffffffffff")
         .await
         .unwrap()
         .is_none());
@@ -110,15 +117,11 @@ async fn credential_maps_access_key_to_client(pool: PgPool) {
 async fn credential_requires_registered_client_and_slug_form(pool: PgPool) {
     wire(&pool).await;
     // 미등록 client — FK가 거부한다.
-    assert!(
-        s3::insert_credential(&pool, "fgak0123456789abcdef", "ghost")
-            .await
-            .is_err()
-    );
-    // 형태 위반(대문자) — CHECK가 거부한다.
-    assert!(s3::insert_credential(&pool, "FGAK0123456789ABCDEF", "c")
+    assert!(add_cred(&pool, "fgak0123456789abcdef", "ghost")
         .await
         .is_err());
+    // 형태 위반(대문자) — CHECK가 거부한다.
+    assert!(add_cred(&pool, "FGAK0123456789ABCDEF", "c").await.is_err());
 }
 
 // ── 논리 키 매핑 ────────────────────────────────────────────

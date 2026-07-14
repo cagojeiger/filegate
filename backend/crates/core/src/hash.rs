@@ -21,6 +21,15 @@ pub fn generate_url_secret() -> String {
     to_hex(&bytes)
 }
 
+/// S3 표면 access key id — **공개** 식별자다 (secret이 아니다, spec 03).
+/// `fgak` 접두 + 80비트 랜덤 hex. secret은 별도 발급물이라 이 id의
+/// 엔트로피는 PK 충돌 회피에만 쓰인다.
+pub fn generate_access_key_id() -> String {
+    let mut bytes = [0_u8; 10];
+    OsRng.fill_bytes(&mut bytes);
+    format!("fgak{}", to_hex(&bytes))
+}
+
 pub(crate) fn to_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
