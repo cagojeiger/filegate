@@ -154,6 +154,13 @@ impl Config {
                 "FILEGATE_MULTIPART_THRESHOLD_BYTES must be positive",
             ));
         }
+        // 0은 tokio::time::interval을 패닉시킨다 — 다른 숫자 설정처럼 도메인
+        // 검사로 부팅에서 거부한다 (0을 받으면 정리 잡이 조용히 죽는다).
+        if server.reconciler_interval_secs < 1 {
+            return Err(Error::config(
+                "FILEGATE_RECONCILER_INTERVAL_SECS must be >= 1",
+            ));
+        }
         let database = DatabaseConfig {
             url: SecretString::from(env("FILEGATE_DATABASE_URL").unwrap_or_else(|| {
                 "postgres://filegate:filegate@127.0.0.1:55432/filegate".to_owned()
@@ -298,6 +305,16 @@ mod tests {
         assert!(config.security.operator_token_matches("fgop_sub"));
         assert!(!config.security.operator_token_matches("fgop_other"));
         assert!(!config.security.operator_token_matches("fgop_mai"));
+    }
+
+    #[test]
+    fn zero_reconciler_interval_is_rejected() {
+        // 0은 tokio::time::interval을 패닉시키므로 부팅에서 거부한다.
+        let zero = |key: &str| match key {
+            "FILEGATE_RECONCILER_INTERVAL_SECS" => Some("0".to_owned()),
+            other => base_env(other),
+        };
+        assert!(Config::load_from(&zero).is_err());
     }
 
     #[test]
