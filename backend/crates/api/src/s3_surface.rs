@@ -31,6 +31,7 @@ use uuid::Uuid;
 use crate::routes::AppState;
 use crate::spool::{self, spool_root, STREAM_BUF_SIZE};
 use crate::storage_access::{backend_from_row, StorageBackend};
+use crate::validation::{content_type_ok, MAX_SINGLE_PUT_BYTES};
 use filegate_core::ExposeSecret as _;
 
 const READ_TTL: Duration = Duration::from_secs(15 * 60);
@@ -357,13 +358,31 @@ async fn put_object(
                 "content-length is required",
             )
         })?;
+    // 크기 상한은 네이티브 create와 같은 정책이다 (5GiB, 공유 validation).
+    // multipart가 없는 지금은 이 상한을 넘는 업로드가 없어야 한다.
+    if !(0..=MAX_SINGLE_PUT_BYTES).contains(&content_length) {
+        return Err(xml_error(
+            StatusCode::BAD_REQUEST,
+            "EntityTooLarge",
+            "the object exceeds the single-upload limit (5 GiB)",
+        ));
+    }
     // 서명된 본문 해시 — 64 hex면 스트림 실측과 대조한다 (UNSIGNED-PAYLOAD 제외).
     let expected_sha256 = header_str(headers, "x-amz-content-sha256")
         .filter(|v| v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit()))
         .map(str::to_owned);
-    // content_type은 네이티브 create와 같은 가드 — 형태가 아니면 버린다.
-    let content_type = header_str(headers, "content-type")
-        .filter(|ct| ct.len() <= 255 && ct.bytes().all(|b| (0x20..0x7f).contains(&b)));
+    // content_type은 네이티브 create와 같은 가드 — 있는데 형태가 아니면 400
+    // (조용히 버려 메타데이터를 잃지 않는다, 공유 validation).
+    let content_type = header_str(headers, "content-type");
+    if let Some(ct) = content_type {
+        if !content_type_ok(ct) {
+            return Err(xml_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "invalid content-type",
+            ));
+        }
+    }
 
     let spec = CreateSpec {
         client_id,
@@ -638,7 +657,9 @@ async fn get_object(
     };
 
     // 다운로드 관찰 — lease 원장 한 줄 (ADR 002, 네이티브와 한 장부).
-    let _ = files::issue_read_lease(
+    // best-effort지만 실패는 경고로 남긴다 (네이티브 read와 같은 처리) —
+    // 이미 완성된 유효 응답을 DB 실패로 버리지 않되, 감사 공백은 보이게 한다.
+    if let Err(error) = files::issue_read_lease(
         &state.pool,
         file_id,
         READ_TTL.as_secs() as i64,
@@ -647,7 +668,10 @@ async fn get_object(
         client_id,
         file.declared_size,
     )
-    .await;
+    .await
+    {
+        tracing::warn!(event = "file.read_audit_failed", file = %file_id, %error);
+    }
 
     tracing::info!(event = "s3.get", client = %client_id, bucket, key, file = %file_id);
     let mut response =

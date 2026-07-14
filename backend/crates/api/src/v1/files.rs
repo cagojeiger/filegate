@@ -21,15 +21,13 @@ use super::ClientId;
 use crate::error::{bad_request, conflict, internal, not_found, ApiError};
 use crate::routes::AppState;
 use crate::storage_access::{backend_from_row, StorageBackend};
+use crate::validation::{content_type_ok, MAX_SINGLE_PUT_BYTES};
 
 /// 쓰기 lease TTL — 짧게 둔다 (spec 00: 쓰기 URL은 확정 후에도 만료 전까지
 /// 유효하므로, 변조 창을 줄이는 건 TTL이다).
 pub(super) const WRITE_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
 /// 읽기 lease TTL. 발급된 직결 URL은 만료로만 소멸한다 (ADR 002).
 const READ_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
-/// v0 단일 PUT 상한 (spec 00: 5GiB 초과는 multipart와 함께 다음 범위).
-/// 회계 합산의 overflow 방어이기도 하다.
-const MAX_DECLARED_SIZE: i64 = 5 * 1024 * 1024 * 1024;
 
 #[derive(Deserialize)]
 pub(super) struct CreateBody {
@@ -89,7 +87,7 @@ pub(super) async fn create(
                 "declared_md5 is not accepted for multipart uploads (verification is per part)",
             ));
         }
-    } else if body.declared_size > MAX_DECLARED_SIZE {
+    } else if body.declared_size > MAX_SINGLE_PUT_BYTES {
         return Err(bad_request(
             "declared_size exceeds the single-upload limit (5 GiB)",
         ));
@@ -106,7 +104,7 @@ pub(super) async fn create(
         return Err(not_found("unknown intent"));
     }
     if let Some(content_type) = &body.content_type {
-        if content_type.len() > 255 || !content_type.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+        if !content_type_ok(content_type) {
             return Err(bad_request("invalid content_type"));
         }
     }
