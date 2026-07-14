@@ -10,7 +10,7 @@
 
 use filegate_db::files::{self, CreateOutcome, CreateSpec, CreatedFile};
 use filegate_db::registry::{self, BindingRow, StorageRow};
-use filegate_db::s3_surface as s3;
+use filegate_db::s3_registry as s3;
 
 // db 계층은 암호문을 저장만 한다 (복호는 core::Crypto). 더미 암호 재료.
 const CT: &[u8] = &[1, 2, 3, 4];

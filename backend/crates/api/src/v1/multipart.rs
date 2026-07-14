@@ -12,10 +12,11 @@ use filegate_infra::Address;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::files::{committed_or_conflict, committed_response, WRITE_LEASE_TTL};
+use super::files::{committed_or_conflict, committed_response};
 use super::relay::relay_base;
 use super::ClientId;
 use crate::error::{bad_request, conflict, internal, not_found, ApiError};
+use crate::lease::WRITE_LEASE_TTL;
 use crate::routes::AppState;
 use crate::storage_access::{backend_from_row, StorageBackend};
 

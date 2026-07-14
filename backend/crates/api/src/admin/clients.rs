@@ -144,7 +144,7 @@ pub(super) async fn s3_credential_create(
         &access_key_id,
         &filegate_core::SecretString::from(secret_key.clone()),
     )?;
-    filegate_db::s3_surface::insert_credential(
+    filegate_db::s3_registry::insert_credential(
         &state.pool,
         &access_key_id,
         &client_id,
@@ -171,7 +171,7 @@ pub(super) async fn s3_credential_list(
     if !registry::client_exists(&state.pool, &client_id).await? {
         return Err(not_found("client not found"));
     }
-    let ids = filegate_db::s3_surface::list_credentials(&state.pool, &client_id).await?;
+    let ids = filegate_db::s3_registry::list_credentials(&state.pool, &client_id).await?;
     Ok(Json(ids).into_response())
 }
 
@@ -179,7 +179,7 @@ pub(super) async fn s3_credential_delete(
     State(state): State<AppState>,
     Path((client_id, access_key_id)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    filegate_db::s3_surface::delete_credential(&state.pool, &client_id, &access_key_id)
+    filegate_db::s3_registry::delete_credential(&state.pool, &client_id, &access_key_id)
         .await
         .map_err(ApiError::on_delete)?;
     tracing::info!(event = "s3_credential.deleted", client = %client_id, access_key = %access_key_id);

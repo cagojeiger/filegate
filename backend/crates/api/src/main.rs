@@ -4,6 +4,7 @@
 mod admin;
 mod blobs;
 mod error;
+mod lease;
 mod reconciler;
 mod routes;
 mod s3_surface;
