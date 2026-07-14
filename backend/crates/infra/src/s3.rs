@@ -88,7 +88,7 @@ impl S3ClientCache {
 
 /// 접근 확인 없이 클라이언트만 구성한다. 요청 경로(presign·head_object)용 —
 /// 접근성은 등록·부팅 재검증이 이미 보증했다.
-pub fn client(spec: &S3StorageSpec, address: Address) -> S3Storage {
+fn client(spec: &S3StorageSpec, address: Address) -> S3Storage {
     let credentials = Credentials::new(
         spec.access_key.clone(),
         spec.secret_key.expose_secret().to_owned(),
@@ -255,46 +255,6 @@ pub async fn open_read(
             let len = output
                 .content_length()
                 .ok_or_else(|| anyhow::anyhow!("get_object returned no content length"))?;
-            Ok(Some((output.body.into_async_read(), len)))
-        }
-        Err(error) => {
-            let not_found = error
-                .as_service_error()
-                .map(|service| {
-                    matches!(
-                        service,
-                        aws_sdk_s3::operation::get_object::GetObjectError::NoSuchKey(_)
-                    )
-                })
-                .unwrap_or(false);
-            if not_found {
-                Ok(None)
-            } else {
-                Err(error.into())
-            }
-        }
-    }
-}
-
-/// 부분 읽기 스트림 (spec 03 Range) — 벤더 Range GET. 구간은 호출자가
-/// 장부 크기로 검증한 폐구간 [start, end]다. 없으면 None.
-pub async fn open_read_range(
-    storage: &S3Storage,
-    object_key: &str,
-    start: i64,
-    end: i64,
-) -> anyhow::Result<Option<(impl tokio::io::AsyncRead + Send + Unpin, i64)>> {
-    let result = storage
-        .client
-        .get_object()
-        .bucket(&storage.bucket)
-        .key(object_key)
-        .range(format!("bytes={start}-{end}"))
-        .send()
-        .await;
-    match result {
-        Ok(output) => {
-            let len = output.content_length().unwrap_or(end - start + 1);
             Ok(Some((output.body.into_async_read(), len)))
         }
         Err(error) => {
