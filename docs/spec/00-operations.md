@@ -51,6 +51,7 @@
 - 처리: 저장소 실물 크기를 선언 크기와 대조하고, 선언 MD5가 있으면 ETag와도 대조한다. 확정 시점 ETag를 기록한다.
 - 상태: `pending` → `active`. 검증 실패면 `pending`에 남아 lease 만료까지 재시도할 수 있다.
 - 쓰기 URL은 확정 후에도 만료 전까지 유효하다 (실측). 쓰기 TTL을 짧게 두고, 변조 의심은 기록된 ETag로 판정한다.
+- **확정은 두 경로다** — 서비스의 선언(commit)과 reconciler의 **관찰 확정**: 단일 PUT pending의 실물이 선언과 일치하면 다음 tick에 자동 확정된다. commit 없이 "URL 주고 잊기"(직결 presigned 패턴)가 성립하고, 즉시 확정이 필요하면 commit을 부른다 (멱등 공존). multipart는 관찰 확정하지 않는다 — 완료는 벤더도 선언(Complete)이다 (spec 02).
 
 ### read — 읽기 lease 발급
 
