@@ -437,7 +437,9 @@ async fn put_object(
                 fs_backend::commit_write(file, &temp_path, root, &created.object_key).await
             {
                 fs_backend::abort_write(&temp_path).await;
-                return Err(xml_storage_error("fs commit", error));
+                // fs는 로컬/마운트 IO → internal(500). 원격 게이트웨이(s3)만
+                // 503. blobs·spool과 같은 백엔드별 구분.
+                return Err(xml_internal("fs commit", error));
             }
         }
         StorageBackend::S3 { spec, .. } => {
@@ -455,18 +457,27 @@ async fn put_object(
         }
     }
 
-    // 확정 — 스트림 실측이 곧 관찰이다. 실패한 업로드는 여기 못 오고
-    // pending에 남아 만료 회수가 정리한다 (네이티브와 같은 결말).
-    files::finalize_commit(&state.pool, created.file_id, &md5_hex)
+    // 확정 — 스트림 실측이 곧 관찰이다. 전이가 지면(false) pending이 그 사이
+    // 만료 회수됐다는 뜻이다 (좁은 경합). 성공을 보고하고 매핑을 걸면 도달
+    // 불가 객체가 되므로, 재시도 신호(503)로 돌려준다.
+    if !files::finalize_commit(&state.pool, created.file_id, &md5_hex)
         .await
-        .map_err(|e| xml_internal("finalize", e))?;
+        .map_err(|e| xml_internal("finalize", e))?
+    {
+        return Err(xml_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ServiceUnavailable",
+            "the upload expired before it committed; retry",
+        ));
+    }
 
-    // overwrite — 밀려난 옛 file은 delete 결정으로 (S3 시맨틱 번역, spec 03).
-    let replaced = s3reg::upsert_key(&state.pool, client_id, bucket, key, created.file_id)
+    // overwrite — 매핑 교체와 밀려난 옛 file의 detach는 upsert_key가 한
+    // 트랜잭션에서 한다 (도달 불가 고아 방지). 반환값은 로깅용이다.
+    let displaced = s3reg::upsert_key(&state.pool, client_id, bucket, key, created.file_id)
         .await
         .map_err(|e| xml_internal("key mapping", e))?;
-    if let Some(old) = replaced {
-        let _ = files::mark_deleted(&state.pool, client_id, old).await;
+    if let Some(old) = displaced {
+        tracing::info!(event = "s3.overwrite", client = %client_id, bucket, key, displaced = %old);
     }
 
     tracing::info!(
@@ -617,7 +628,13 @@ async fn get_object(
     let (reader, len) = match opened {
         Ok(Some(found)) => found,
         Ok(None) => return Err(no_such_key()),
-        Err(error) => return Err(xml_storage_error("open read", error)),
+        // 백엔드별 구분: fs는 로컬/마운트 IO(500), s3는 원격 게이트웨이(503).
+        Err(error) => {
+            return Err(match backend {
+                StorageBackend::Fs { .. } => xml_internal("open read", error),
+                StorageBackend::S3 { .. } => xml_storage_error("open read", error),
+            })
+        }
     };
 
     // 다운로드 관찰 — lease 원장 한 줄 (ADR 002, 네이티브와 한 장부).
@@ -671,13 +688,13 @@ fn object_headers(headers: &mut HeaderMap, file: &files::FileAccess, content_len
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
 }
 
-/// DeleteObject — 매핑 제거 + detach 결정 (물리는 reconciler). 멱등 204.
+/// DeleteObject — 매핑 제거 + detach 결정을 delete_key가 한 트랜잭션에서
+/// 한다 (물리 purge는 reconciler). 멱등 204.
 async fn delete_object(state: &AppState, client_id: &str, bucket: &str, key: &str) -> S3Result {
     let removed = s3reg::delete_key(&state.pool, client_id, bucket, key)
         .await
         .map_err(|e| xml_internal("key remove", e))?;
     if let Some(file_id) = removed {
-        let _ = files::mark_deleted(&state.pool, client_id, file_id).await;
         tracing::info!(event = "s3.delete", client = %client_id, bucket, key, file = %file_id);
     }
     Ok(StatusCode::NO_CONTENT.into_response())

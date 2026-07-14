@@ -170,6 +170,48 @@ async fn key_overwrite_returns_displaced_file(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn overwrite_and_delete_detach_the_active_file(pool: PgPool) {
+    // overwrite/delete는 밀려난·지워진 active file을 같은 트랜잭션에서
+    // detach한다 — 매핑만 바뀌고 파일이 active로 남으면 도달 불가 고아가 된다.
+    wire(&pool).await;
+    let a = create_ok(&pool).await;
+    let b = create_ok(&pool).await;
+    files::finalize_commit(&pool, a.file_id, "etag-a")
+        .await
+        .unwrap();
+    files::finalize_commit(&pool, b.file_id, "etag-b")
+        .await
+        .unwrap();
+
+    s3::upsert_key(&pool, "c", INTENT, "k", a.file_id)
+        .await
+        .unwrap();
+    // A를 B로 덮어쓰면 A가 detach된다 (B는 그대로 active).
+    assert_eq!(
+        s3::upsert_key(&pool, "c", INTENT, "k", b.file_id)
+            .await
+            .unwrap(),
+        Some(a.file_id)
+    );
+    assert_eq!(file_state(&pool, a.file_id).await, "deleted");
+    assert_eq!(file_state(&pool, b.file_id).await, "active");
+    // 키를 지우면 B도 detach된다.
+    assert_eq!(
+        s3::delete_key(&pool, "c", INTENT, "k").await.unwrap(),
+        Some(b.file_id)
+    );
+    assert_eq!(file_state(&pool, b.file_id).await, "deleted");
+}
+
+async fn file_state(pool: &PgPool, id: uuid::Uuid) -> String {
+    sqlx::query_scalar("SELECT state FROM files WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn key_mapping_dies_with_the_file_row(pool: PgPool) {
     // 종착 행 보존 정리(spec 00)가 file을 지울 때 매핑도 CASCADE로 사라진다
     // — 매달린 매핑이 남지 않는다 (마이그레이션 0004).
