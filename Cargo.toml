@@ -46,6 +46,7 @@ sha2 = "0.10"
 md-5 = "0.10"
 futures-util = { version = "0.3", default-features = false }
 subtle = "2"
+hex = "0.4"
 dotenvy = "0.15"
 
 [workspace.lints.clippy]

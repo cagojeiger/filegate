@@ -98,23 +98,14 @@ pub async fn spool_to_temp(
     }
     Ok(Measured {
         written,
-        md5_hex: hex(&md5.finalize()),
+        md5_hex: hex::encode(md5.finalize()),
         sha256_hex: sha256.map(|sha| {
             use sha2::Digest as _;
-            hex(&sha.finalize())
+            hex::encode(sha.finalize())
         }),
     })
 }
 
 async fn fs_backend_abort(temp_path: &Path) {
     filegate_infra::fs::abort_write(temp_path).await;
-}
-
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }

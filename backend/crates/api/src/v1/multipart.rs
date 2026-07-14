@@ -130,11 +130,8 @@ fn verify_part_sizes(
 fn composite_etag(parts: &[(i32, i64, String)]) -> String {
     use md5::Digest as _;
     let mut hasher = md5::Md5::new();
-    for (_, _, hex) in parts {
-        let bytes: Vec<u8> = (0..hex.len() / 2)
-            .filter_map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
-            .collect();
-        hasher.update(&bytes);
+    for (_, _, part_md5) in parts {
+        hasher.update(hex::decode(part_md5).unwrap_or_default());
     }
     format!("{:x}-{}", hasher.finalize(), parts.len())
 }

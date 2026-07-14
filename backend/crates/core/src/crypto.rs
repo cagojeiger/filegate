@@ -106,7 +106,7 @@ fn relay_secret_with(entry: &KeyEntry, lease_id: &str) -> Result<String> {
     let mut out = [0_u8; KEY_LEN];
     hk.expand(lease_id.as_bytes(), &mut out)
         .map_err(|_e| Error::internal("hkdf expand failed"))?;
-    Ok(crate::hash::to_hex(&out))
+    Ok(hex::encode(out))
 }
 
 impl Crypto {
