@@ -2,6 +2,7 @@
 
 pub mod files;
 pub mod registry;
+pub mod s3;
 pub mod usage;
 
 use sqlx::postgres::PgPoolOptions;
