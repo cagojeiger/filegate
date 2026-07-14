@@ -1,13 +1,14 @@
 //! 도메인 오퍼레이션의 DB 접근 — files 테이블의 생애주기별 경로.
 //!
-//! 회계 원자성이 이 모듈의 존재 이유다: 예약(create)과 정산(commit·sweep)은
-//! 각각 단일 트랜잭션이고, capacity 상한은 원자적 조건부 UPDATE가 집행한다 —
-//! 파드 수와 무관하게 초과 예약이 불가능하다 (ADR 004). 저장소 네트워크
-//! 호출(presign·head_object)은 여기 없다 — 트랜잭션이 네트워크를 기다리지
-//! 않는다.
+//! 상태 전이의 원자성이 이 모듈의 존재 이유다: 예약(create)과 정산
+//! (commit·sweep)은 각각 조건부 단일 트랜잭션이라, 파드 수와 무관하게
+//! 경합이 하나의 승자로 끊긴다. capacity는 집행하지 않는다 — 관찰의
+//! 비교선일 뿐이고, 사용량은 조회 시점에 files·locations에서 집계된다
+//! (저장 카운터 없음, spec 00). 저장소 네트워크 호출(presign·head_object)은
+//! 여기 없다 — 트랜잭션이 네트워크를 기다리지 않는다.
 //!
 //! 생애주기별 하위 모듈:
-//!   create     선언 해석 → capacity 예약 → pending 기록 + object_key 규칙
+//!   create     선언 해석 → pending 기록 + object_key 규칙 (capacity 검사 없음)
 //!   access     조회 전용 (commit 검증·read 해석·stat·byte lease·실측 기록)
 //!   commit     pending→active 확정 정산
 //!   sweep      detach·만료 회수·purge·lease GC (reconciler 스캔)
