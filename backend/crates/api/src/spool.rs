@@ -95,3 +95,34 @@ pub async fn spool_to_temp(
 async fn fs_backend_abort(temp_path: &Path) {
     filegate_infra::fs::abort_write(temp_path).await;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_s3_spec() -> filegate_infra::S3StorageSpec {
+        filegate_infra::S3StorageSpec {
+            endpoint: "http://m:9000".to_owned(),
+            public_endpoint: "http://m:9000".to_owned(),
+            region: "us-east-1".to_owned(),
+            bucket: "b".to_owned(),
+            force_path_style: true,
+            access_key: "ak".to_owned(),
+            secret_key: filegate_core::SecretString::from("sk".to_owned()),
+        }
+    }
+
+    #[test]
+    fn spool_root_targets_root_for_fs_and_temp_dir_for_s3() {
+        let fs = StorageBackend::Fs {
+            root: std::path::PathBuf::from("/data/x"),
+        };
+        assert_eq!(spool_root(&fs), std::path::PathBuf::from("/data/x"));
+        // s3 중계는 OS 로컬 스풀(임시 디렉토리)을 거친다.
+        let s3 = StorageBackend::S3 {
+            spec: dummy_s3_spec(),
+            force_relay: true,
+        };
+        assert_eq!(spool_root(&s3), std::env::temp_dir());
+    }
+}

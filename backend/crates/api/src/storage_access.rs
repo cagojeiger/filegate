@@ -90,3 +90,39 @@ fn field(row: &StorageRow, value: Option<String>, name: &str) -> filegate_core::
 fn missing(row: &StorageRow, name: &str) -> filegate_core::Error {
     filegate_core::Error::internal(format!("storage '{}' is missing {name}", row.id))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_s3_spec() -> S3StorageSpec {
+        S3StorageSpec {
+            endpoint: "http://m:9000".to_owned(),
+            public_endpoint: "http://m:9000".to_owned(),
+            region: "us-east-1".to_owned(),
+            bucket: "b".to_owned(),
+            force_path_style: true,
+            access_key: "ak".to_owned(),
+            secret_key: filegate_core::SecretString::from("sk".to_owned()),
+        }
+    }
+
+    #[test]
+    fn is_relay_is_true_for_fs_and_force_relay_s3_only() {
+        assert!(StorageBackend::Fs {
+            root: std::path::PathBuf::from("/x")
+        }
+        .is_relay());
+        // s3는 force_relay 선언을 따른다 (ADR 001).
+        assert!(StorageBackend::S3 {
+            spec: dummy_s3_spec(),
+            force_relay: true,
+        }
+        .is_relay());
+        assert!(!StorageBackend::S3 {
+            spec: dummy_s3_spec(),
+            force_relay: false,
+        }
+        .is_relay());
+    }
+}

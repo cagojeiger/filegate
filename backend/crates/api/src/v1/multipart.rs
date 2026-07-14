@@ -19,6 +19,7 @@ use crate::error::{bad_request, conflict, internal, not_found, ApiError};
 use crate::lease::WRITE_LEASE_TTL;
 use crate::routes::AppState;
 use crate::storage_access::{backend_from_row, StorageBackend};
+use crate::validation::part_number_ok;
 
 /// multipart 확정 (spec 02): 중계는 원장(part 실측), 직결은 벤더 ListParts를
 /// 대조해 완성한다. 미완성이면 400과 함께 pending에 남는다.
@@ -170,7 +171,7 @@ pub(super) async fn parts(
     if body.parts.is_empty() || body.parts.len() > 1000 {
         return Err(bad_request("request 1 to 1000 parts at a time"));
     }
-    if body.parts.iter().any(|&n| n < 1 || n > count) {
+    if body.parts.iter().any(|&n| !part_number_ok(n, count)) {
         return Err(bad_request("part number out of range"));
     }
     let Some(files::WriteLease {
@@ -264,5 +265,25 @@ mod tests {
         let one = composite_etag(&[(1, 5, zero)]);
         assert!(one.ends_with("-1"));
         assert_ne!(one, etag);
+    }
+
+    #[test]
+    fn verify_part_sizes_checks_count_and_each_part_size() {
+        // 원장·벤더가 낸 part 목록의 개수·크기가 선언과 맞아야 통과한다.
+        let (declared, ps) = (150_i64, 100_i64);
+        let count = files::part_count(declared, ps);
+        let good: Vec<(i32, i64, String)> = (1..=count)
+            .map(|n| (n, files::part_expected_size(declared, ps, n), String::new()))
+            .collect();
+        assert!(verify_part_sizes(&good, declared, ps, count).is_ok());
+        // 개수 미달 — 마지막 part가 빠지면 거부.
+        let short: Vec<(i32, i64, String)> = good.iter().take(1).cloned().collect();
+        assert!(verify_part_sizes(&short, declared, ps, count).is_err());
+        // 크기 불일치 — 각 part를 1바이트 줄이면 거부.
+        let wrong: Vec<(i32, i64, String)> = good
+            .iter()
+            .map(|(n, s, e)| (*n, s - 1, e.clone()))
+            .collect();
+        assert!(verify_part_sizes(&wrong, declared, ps, count).is_err());
     }
 }
