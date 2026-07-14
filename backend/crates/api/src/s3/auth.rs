@@ -9,6 +9,7 @@ use filegate_core::ExposeSecret as _;
 use filegate_db::s3_registry as s3reg;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq as _;
 
 use super::header_str;
 use super::xml::{access_denied, xml_error, xml_internal};
@@ -32,25 +33,7 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> Vec<u8> {
 }
 
 fn sha256_hex(data: &[u8]) -> String {
-    hex(&Sha256::digest(data))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
-}
-
-/// 서명 비교는 상수 시간 — 길이 불일치 즉답 외에는 전 바이트를 본다.
-fn eq_constant_time(a: &str, b: &str) -> bool {
-    a.len() == b.len()
-        && a.bytes()
-            .zip(b.bytes())
-            .fold(0_u8, |acc, (x, y)| acc | (x ^ y))
-            == 0
+    hex::encode(Sha256::digest(data))
 }
 
 struct ParsedAuth {
@@ -217,9 +200,10 @@ pub(super) async fn authenticate(
     let k_region = hmac_sha256(&k_date, parsed.region.as_bytes());
     let k_service = hmac_sha256(&k_region, b"s3");
     let k_signing = hmac_sha256(&k_service, b"aws4_request");
-    let expected = hex(&hmac_sha256(&k_signing, string_to_sign.as_bytes()));
+    let expected = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
 
-    if eq_constant_time(&expected, &parsed.signature) {
+    // 서명 비교는 상수 시간 (config.rs 연산자 토큰 대조와 같은 프리미티브).
+    if bool::from(expected.as_bytes().ct_eq(parsed.signature.as_bytes())) {
         return Ok(credential.client_id);
     }
     Err(xml_error(

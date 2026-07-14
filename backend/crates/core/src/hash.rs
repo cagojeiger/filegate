@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 /// 제시된 raw 키를 등록부 저장 형식으로 만든다: `sha256:<64hex>`.
 pub fn client_key_hash(raw: &str) -> String {
     let digest = Sha256::digest(raw.as_bytes());
-    format!("sha256:{}", to_hex(&digest))
+    format!("sha256:{}", hex::encode(digest))
 }
 
 /// 중계 lease secret — URL에만 실리는 고엔트로피 랜덤 (ADR 003).
@@ -18,7 +18,7 @@ pub fn client_key_hash(raw: &str) -> String {
 pub fn generate_url_secret() -> String {
     let mut bytes = [0_u8; 32];
     OsRng.fill_bytes(&mut bytes);
-    to_hex(&bytes)
+    hex::encode(bytes)
 }
 
 /// S3 표면 access key id — **공개** 식별자다 (secret이 아니다, spec 03).
@@ -27,16 +27,7 @@ pub fn generate_url_secret() -> String {
 pub fn generate_access_key_id() -> String {
     let mut bytes = [0_u8; 10];
     OsRng.fill_bytes(&mut bytes);
-    format!("fgak{}", to_hex(&bytes))
-}
-
-pub(crate) fn to_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    format!("fgak{}", hex::encode(bytes))
 }
 
 #[cfg(test)]
