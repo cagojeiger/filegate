@@ -1,9 +1,12 @@
 //! reconciler 워커 — 요청 경로 밖의 물리 정리 (공리: 결정·집행 분리).
 //!
 //! 모든 파드가 spawn하고, 실행은 tick마다 advisory lock이 하나를 고른다
-//! (docs/stack 멀티 파드 패턴). 잡 두 개, 각각 유계 배치:
-//!   1. 만료 회수 — 쓰기 lease가 만료된 pending의 예약 해제 + 실물 정리
-//!   2. purge — deleted 파일의 물리 삭제 + purge 대기 점유 해제
+//! (docs/stack 멀티 파드 패턴). tick마다 도는 잡(각 유계 배치, 일부는 전량):
+//!   0. 관찰 확정  — 단일 PUT pending의 실물이 선언과 맞으면 확정 (spec 00)
+//!   1. 만료 회수  — 쓰기 lease가 만료된 pending의 예약 해제 + 실물 정리
+//!   2. purge      — deleted 파일의 물리 삭제 + purge 대기 점유 해제
+//!   3. read lease GC / 5. 종료 lease GC / 6. 이력 보존 정리 / 8. 종착 파일 정리
+//!   7. 일별 사용량 스냅샷 (전량 집계) / 4. fs 임시 파일 sweep
 //!
 //! 순서가 잡마다 다르다: 회수는 전이(pending→reclaimed)가 먼저다 —
 //! 물리 삭제를 먼저 하면 늦은 commit이 전이 경합을 이겨 "실물 없는
@@ -140,7 +143,7 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
                     // lease가 갱신됐다 — 어느 쪽이든 실물을 건드리지 않는다.
                     Ok(false) => {}
                     Err(error) => {
-                        tracing::error!(event = "reconciler.reclaim_failed", %error)
+                        tracing::error!(event = "reconciler.reclaim_failed", file = %candidate.file_id, %error)
                     }
                 }
             }
@@ -160,7 +163,7 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
                         ),
                         Ok(false) => {} // 이미 purge됨 — 멱등.
                         Err(error) => {
-                            tracing::error!(event = "reconciler.purge_failed", %error)
+                            tracing::error!(event = "reconciler.purge_failed", file = %candidate.file_id, %error)
                         }
                     },
                     Err(error) => tracing::warn!(

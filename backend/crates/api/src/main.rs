@@ -10,6 +10,7 @@ mod s3_surface;
 mod spool;
 mod storage_access;
 mod v1;
+mod validation;
 
 use std::io;
 use std::sync::Arc;
@@ -76,7 +77,8 @@ async fn main() -> anyhow::Result<()> {
         Some(bind) => {
             let s3_listener = tokio::net::TcpListener::bind(bind).await?;
             info!(event = "server.s3_listening", addr = %bind);
-            let s3_router = s3_surface::routes(state.clone());
+            // 메인 라우터와 같은 telemetry — request-id·trace를 공유한다.
+            let s3_router = routes::with_telemetry(s3_surface::routes(state.clone()));
             let s3_shutdown = shutdown.clone().cancelled_owned();
             Some(tokio::spawn(async move {
                 axum::serve(s3_listener, s3_router)

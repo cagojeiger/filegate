@@ -74,10 +74,18 @@ pub fn app(state: AppState) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,
         ));
-    Router::new()
+    let app = Router::new()
         .merge(control)
         .nest("/blobs", crate::blobs::routes())
-        .with_state(state)
+        .with_state(state);
+    with_telemetry(app)
+}
+
+/// 요청 telemetry — request-id 생성/전파 + trace 스팬. 컨트롤·바이트 표면과
+/// S3 표면(별도 리스너)이 공유한다: 모든 표면이 request-id와 request.end를
+/// 갖도록. 실행 순서는 SetRequestId → Trace → 핸들러다.
+pub(crate) fn with_telemetry(router: Router) -> Router {
+    router
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(
             TraceLayer::new_for_http()
