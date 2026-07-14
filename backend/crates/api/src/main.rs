@@ -7,6 +7,7 @@ mod error;
 mod reconciler;
 mod routes;
 mod s3_surface;
+mod spool;
 mod storage_access;
 mod v1;
 

@@ -114,6 +114,9 @@ async fn verified_s3_row(
 ) -> Result<StorageRow, ApiError> {
     let submission = validated_s3_submission(relay_base_ready, body)?;
     if let Err(error) = s3_connect(&submission.spec).await {
+        // 운영자 표면·설정 시점이라 실패 사유를 응답에 실어 TF 디버깅을 돕는다.
+        // 다른 표면처럼 상세는 로그로도 남긴다 ("내부 상세는 항상 로그" 불변).
+        tracing::error!(event = "storage.verify_failed", %id, kind = "s3", %error);
         return Err(bad_request(&format!(
             "storage verification failed: {error}"
         )));
@@ -224,6 +227,7 @@ async fn verified_fs_row(
         .filter(|v| !v.is_empty())
         .ok_or_else(|| bad_request("fs storage requires root_path"))?;
     if let Err(error) = filegate_infra::fs::connect(&root_path).await {
+        tracing::error!(event = "storage.verify_failed", %id, kind = "fs", %error);
         return Err(bad_request(&format!(
             "storage verification failed: {error}"
         )));

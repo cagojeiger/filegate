@@ -24,18 +24,17 @@ use filegate_infra::{
     fs as fs_backend, s3_open_read, s3_open_read_range, s3_put_object_from_path, Address,
 };
 use hmac::{Hmac, Mac};
-use md5::Md5;
 use sha2::{Digest, Sha256};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::routes::AppState;
+use crate::spool::{self, spool_root, STREAM_BUF_SIZE};
 use crate::storage_access::{backend_from_row, StorageBackend};
 use filegate_core::ExposeSecret as _;
 
 const READ_TTL: Duration = Duration::from_secs(15 * 60);
 const WRITE_LEASE_TTL_SECS: i64 = 15 * 60;
-const STREAM_BUF_SIZE: usize = 256 * 1024;
 /// SigV4 요청 시각의 허용 스큐 (AWS 관례 ±15분).
 const MAX_CLOCK_SKEW_SECS: i64 = 15 * 60;
 
@@ -379,24 +378,20 @@ async fn put_object(
 
     let backend = backend_from_row(&state.crypto, &created.storage)
         .map_err(|e| xml_internal("backend", e))?;
-    // 스풀 목적지: fs는 대상 root(같은 마운트 rename), s3는 OS 로컬 스풀.
-    let spool_root = match &backend {
-        StorageBackend::Fs { root } => root.clone(),
-        StorageBackend::S3 { .. } => std::env::temp_dir(),
-    };
     let temp_name = format!("s3-{}", created.file_id);
-    let (temp_path, file) = fs_backend::begin_write(&spool_root, &temp_name)
+    let (temp_path, file) = fs_backend::begin_write(&spool_root(&backend), &temp_name)
         .await
         .map_err(|e| xml_internal("spool", e))?;
     let mut writer = tokio::io::BufWriter::with_capacity(STREAM_BUF_SIZE, file);
-    let measured = stream_to_spool(body, &mut writer, content_length).await;
-    let (written, md5_hex, sha256_hex) = match measured {
-        Ok(measured) => measured,
-        Err(response) => {
-            fs_backend::abort_write(&temp_path).await;
-            return Err(response);
-        }
-    };
+    // 공유 스풀 프리미티브 — 네이티브 중계와 같은 유휴 타임아웃이 여기서도
+    // slow-loris를 끊는다. sha256은 x-amz-content-sha256 대조용으로 요청한다.
+    let measured =
+        match spool::spool_to_temp(body, &mut writer, &temp_path, content_length, true).await {
+            Ok(measured) => measured,
+            Err(error) => return Err(spool_error_to_xml(error)),
+        };
+    let written = measured.written;
+    let sha256_hex = measured.sha256_hex.unwrap_or_default();
     if written != content_length {
         fs_backend::abort_write(&temp_path).await;
         return Err(xml_error(
@@ -405,6 +400,7 @@ async fn put_object(
             "the body does not match the content-length",
         ));
     }
+    let md5_hex = measured.md5_hex;
     if let Some(expected) = &expected_sha256 {
         if !expected.eq_ignore_ascii_case(&sha256_hex) {
             fs_backend::abort_write(&temp_path).await;
@@ -472,36 +468,27 @@ async fn put_object(
     Ok(response)
 }
 
-/// 본문을 스풀에 쓰며 크기·MD5·SHA256을 실측하고 선언 초과를 끊는다.
-async fn stream_to_spool(
-    body: Body,
-    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
-    declared: i64,
-) -> Result<(i64, String, String), Response> {
-    use futures_util::StreamExt as _;
-    use tokio::io::AsyncWriteExt as _;
-    let mut md5 = Md5::new();
-    let mut sha256 = Sha256::new();
-    let mut written: i64 = 0;
-    let mut stream = body.into_data_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| xml_internal("body read", e))?;
-        written += chunk.len() as i64;
-        if written > declared {
-            return Err(xml_error(
-                StatusCode::BAD_REQUEST,
-                "IncompleteBody",
-                "the body exceeds the content-length",
-            ));
-        }
-        md5.update(&chunk);
-        sha256.update(&chunk);
-        writer
-            .write_all(&chunk)
-            .await
-            .map_err(|e| xml_internal("spool write", e))?;
+/// 공유 스풀 프리미티브의 실패를 S3 XML 에러로 번역한다. 스풀이 이미
+/// 임시 파일을 지웠으므로 여기서는 응답만 만든다.
+fn spool_error_to_xml(error: spool::SpoolError) -> Response {
+    match error {
+        spool::SpoolError::Idle => xml_error(
+            StatusCode::REQUEST_TIMEOUT,
+            "RequestTimeout",
+            "the upload stream was idle for too long",
+        ),
+        spool::SpoolError::Aborted => xml_error(
+            StatusCode::BAD_REQUEST,
+            "IncompleteBody",
+            "the upload stream aborted",
+        ),
+        spool::SpoolError::TooLarge => xml_error(
+            StatusCode::BAD_REQUEST,
+            "IncompleteBody",
+            "the body exceeds the content-length",
+        ),
+        spool::SpoolError::Io(error) => xml_internal("spool write", error),
     }
-    Ok((written, hex(&md5.finalize()), hex(&sha256.finalize())))
 }
 
 // ── GetObject / HeadObject / DeleteObject ────────────────────

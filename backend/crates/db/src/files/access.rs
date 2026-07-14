@@ -19,53 +19,46 @@ pub struct FileAccess {
     pub storage: StorageRow,
 }
 
-/// (state, declared_size, declared_md5, etag, content_type, object_key, part_size)
-type AccessRow = (
-    String,
-    i64,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    String,
-    Option<i64>,
-);
-
 /// 소유 검사 포함 조회 — 남의 file_id는 존재 자체를 모른다 (404).
+/// storage까지 한 왕복·한 스냅샷으로 뽑는다 (byte_lease와 같은 패턴):
+/// 두 번 조회하면 그 사이 동시 회수·purge가 location을 지워 두 번째 조회가
+/// RowNotFound(=Err)로 터진다 — 한 쿼리면 그 창에서 행이 통째로 빠져 Ok(None)이다.
 pub async fn access(
     pool: &PgPool,
     client_id: &str,
     file_id: Uuid,
 ) -> Result<Option<FileAccess>, sqlx::Error> {
-    let row: Option<AccessRow> = sqlx::query_as(
+    use sqlx::{FromRow as _, Row as _};
+    // storages 컬럼은 f와 이름이 겹치므로(id 등) s. 접두로 뽑는다.
+    let storage_cols = STORAGE_COLUMNS
+        .split(", ")
+        .map(|c| format!("s.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let row = sqlx::query(&format!(
         "SELECT f.state, f.declared_size, f.declared_md5, f.etag, f.content_type, \
-         l.object_key, f.part_size \
-         FROM files f JOIN locations l ON l.file_id = f.id \
-         WHERE f.id = $1 AND f.client_id = $2",
-    )
+         f.part_size, l.object_key, {storage_cols} \
+         FROM files f \
+         JOIN locations l ON l.file_id = f.id \
+         JOIN storages s ON s.id = l.storage_id \
+         WHERE f.id = $1 AND f.client_id = $2"
+    ))
     .bind(file_id)
     .bind(client_id)
     .fetch_optional(pool)
     .await?;
-    let Some((state, declared_size, declared_md5, etag, content_type, object_key, part_size)) = row
-    else {
+    let Some(row) = row else {
         return Ok(None);
     };
-    let storage: StorageRow = sqlx::query_as(&format!(
-        "SELECT {STORAGE_COLUMNS} FROM storages s \
-         JOIN locations l ON l.storage_id = s.id WHERE l.file_id = $1"
-    ))
-    .bind(file_id)
-    .fetch_one(pool)
-    .await?;
     Ok(Some(FileAccess {
-        state,
-        declared_size,
-        declared_md5,
-        etag,
-        content_type,
-        object_key,
-        part_size,
-        storage,
+        state: row.try_get("state")?,
+        declared_size: row.try_get("declared_size")?,
+        declared_md5: row.try_get("declared_md5")?,
+        etag: row.try_get("etag")?,
+        content_type: row.try_get("content_type")?,
+        object_key: row.try_get("object_key")?,
+        part_size: row.try_get("part_size")?,
+        storage: StorageRow::from_row(&row)?,
     }))
 }
 
