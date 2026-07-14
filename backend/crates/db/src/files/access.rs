@@ -12,16 +12,18 @@ pub struct FileAccess {
     pub declared_size: i64,
     pub declared_md5: Option<String>,
     pub etag: Option<String>,
+    pub content_type: Option<String>,
     pub object_key: String,
     /// multipart 업로드의 동결 part 크기 — None이면 단일 PUT (spec 02).
     pub part_size: Option<i64>,
     pub storage: StorageRow,
 }
 
-/// (state, declared_size, declared_md5, etag, object_key, part_size)
+/// (state, declared_size, declared_md5, etag, content_type, object_key, part_size)
 type AccessRow = (
     String,
     i64,
+    Option<String>,
     Option<String>,
     Option<String>,
     String,
@@ -35,7 +37,8 @@ pub async fn access(
     file_id: Uuid,
 ) -> Result<Option<FileAccess>, sqlx::Error> {
     let row: Option<AccessRow> = sqlx::query_as(
-        "SELECT f.state, f.declared_size, f.declared_md5, f.etag, l.object_key, f.part_size \
+        "SELECT f.state, f.declared_size, f.declared_md5, f.etag, f.content_type, \
+         l.object_key, f.part_size \
          FROM files f JOIN locations l ON l.file_id = f.id \
          WHERE f.id = $1 AND f.client_id = $2",
     )
@@ -43,7 +46,8 @@ pub async fn access(
     .bind(client_id)
     .fetch_optional(pool)
     .await?;
-    let Some((state, declared_size, declared_md5, etag, object_key, part_size)) = row else {
+    let Some((state, declared_size, declared_md5, etag, content_type, object_key, part_size)) = row
+    else {
         return Ok(None);
     };
     let storage: StorageRow = sqlx::query_as(&format!(
@@ -58,6 +62,7 @@ pub async fn access(
         declared_size,
         declared_md5,
         etag,
+        content_type,
         object_key,
         part_size,
         storage,

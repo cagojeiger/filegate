@@ -272,6 +272,46 @@ pub async fn open_read(
     }
 }
 
+/// 부분 읽기 스트림 (spec 03 Range) — 벤더 Range GET. 구간은 호출자가
+/// 장부 크기로 검증한 폐구간 [start, end]다. 없으면 None.
+pub async fn open_read_range(
+    storage: &S3Storage,
+    object_key: &str,
+    start: i64,
+    end: i64,
+) -> anyhow::Result<Option<(impl tokio::io::AsyncRead + Send + Unpin, i64)>> {
+    let result = storage
+        .client
+        .get_object()
+        .bucket(&storage.bucket)
+        .key(object_key)
+        .range(format!("bytes={start}-{end}"))
+        .send()
+        .await;
+    match result {
+        Ok(output) => {
+            let len = output.content_length().unwrap_or(end - start + 1);
+            Ok(Some((output.body.into_async_read(), len)))
+        }
+        Err(error) => {
+            let not_found = error
+                .as_service_error()
+                .map(|service| {
+                    matches!(
+                        service,
+                        aws_sdk_s3::operation::get_object::GetObjectError::NoSuchKey(_)
+                    )
+                })
+                .unwrap_or(false);
+            if not_found {
+                Ok(None)
+            } else {
+                Err(error.into())
+            }
+        }
+    }
+}
+
 /// 물리 삭제 (reconciler의 purge·회수). S3 DeleteObject는 없는 키에도
 /// 성공한다 — purge는 멱등하다 (spec 00, 실측).
 pub async fn delete_object(storage: &S3Storage, object_key: &str) -> anyhow::Result<()> {
