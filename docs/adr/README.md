@@ -15,6 +15,7 @@ ADR은 방향, 구조, 원칙만 담는다. 범위별 오퍼레이션 계약은 
 | **file / location** | 파일의 정체성 / 물리 위치. location은 바뀔 수 있다 |
 | **lease** | 시간제한·단일목적 접근 권한. 모든 바이트 접근의 단위다. 취소는 원장 기준이다 — 발급된 직결 URL은 만료로만 소멸한다 |
 | **직결 / 중계** | 전송 주체가 바이트에 닿는 두 모드. 직결은 저장소가 서명한 URL, 중계는 filegate의 바이트 엔드포인트. storage capability가 결정한다 |
+| **논리키 (logical key)** | S3 호환 표면에서 서비스가 정하는 object key. 서비스 소유 이름이며 (client, intent, 논리키) → file 매핑으로 산다 ([ADR 006](006-s3-compat-surface.md)) |
 | **quota** | 운영자가 클라이언트별로 정한 용량 몫. 운영자 내부 가드레일이며 클라이언트에게 노출되지 않는다 |
 | **capacity** | storage 등록에 적힌 용량 기준선. 집행하지 않는다 — usage 관찰의 비교선일 뿐 ([spec 00](../spec/00-operations.md)) |
 | **reconciler** | 요청 경로 밖에서 물리 상태를 정리하는 작업 |
@@ -30,4 +31,5 @@ ADR은 방향, 구조, 원칙만 담는다. 범위별 오퍼레이션 계약은 
 | [002](002-lease-model.md) | 모든 바이트 접근은 lease다 | 공리 2 |
 | [003](003-url-ownership.md) | 안정 URL은 서비스가 소유하고, filegate URL은 저장하지 않는다 | 공리 1+2 |
 | [004](004-config-layers.md) | 어휘는 서비스, 카탈로그는 운영자, 정본은 DB다 (컨트롤 플레인) | 공유 전제 + 공리 1+3 |
-| [005](005-presigned-byte-plane.md) | 바이트 인터페이스는 서명 URL 발급 단 하나다 (S3 호환 표면 없음 — 실측 근거) | 공리 2 |
+| [005](005-presigned-byte-plane.md) | 네이티브 바이트 인터페이스는 서명 URL 발급 단 하나다 (실측 근거) | 공리 2 |
+| [006](006-s3-compat-surface.md) | S3 호환 표면은 중계를 수용한 온보딩 계층이다 (무수정 SDK ↔ 양방향 중계) | 공리 2 + ADR 005 |
