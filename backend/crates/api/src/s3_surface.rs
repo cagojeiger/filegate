@@ -4,10 +4,11 @@
 //! 논리키(s3_keys). 바이트는 업로드·다운로드 모두 filegate를 지난다 —
 //! ADR 006이 수용한 비용이다. 파일·lease·회계는 네이티브 표면과 한 장부다.
 //!
-//! 인증은 header-signed SigV4다. secret은 저장이 없다 — access key id에서
-//! 파생한다 (core::Crypto::s3_secret). 확정은 스트림 실측 관찰이다 — S3에
-//! commit이 없으므로 이 표면에도 없다. 에러는 S3 XML 최소형 — SDK가
-//! 파싱하는 모양이다 (HEAD의 본문은 hyper가 프로토콜대로 떨군다).
+//! 인증은 header-signed SigV4다. secret은 암호화 저장돼 있어(storage 벤더
+//! 시크릿과 같은 기계) 검증 시 access_key_id를 AAD로 복호해 HMAC을 다시
+//! 계산한다 — 회전은 enc_key_id 라벨 dispatch가 커버한다. 확정은 스트림
+//! 실측 관찰이다 — S3에 commit이 없으므로 이 표면에도 없다. 에러는 S3 XML
+//! 최소형 — SDK가 파싱하는 모양이다 (HEAD의 본문은 hyper가 떨군다).
 
 use std::time::Duration;
 
@@ -18,7 +19,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
 use filegate_db::files::{self, CreateOutcome, CreateSpec};
-use filegate_db::s3 as s3reg;
+use filegate_db::s3_surface as s3reg;
 use filegate_infra::{
     fs as fs_backend, s3_open_read, s3_open_read_range, s3_put_object_from_path, Address,
 };
@@ -30,6 +31,7 @@ use uuid::Uuid;
 
 use crate::routes::AppState;
 use crate::storage_access::{backend_from_row, StorageBackend};
+use filegate_core::ExposeSecret as _;
 
 const READ_TTL: Duration = Duration::from_secs(15 * 60);
 const WRITE_LEASE_TTL_SECS: i64 = 15 * 60;
@@ -109,9 +111,11 @@ fn xml_internal(context: &'static str, error: impl std::fmt::Display) -> Respons
 type HmacSha256 = Hmac<Sha256>;
 
 fn hmac_sha256(key: &[u8], msg: &[u8]) -> Vec<u8> {
-    // Hmac은 임의 길이 키를 받으므로 이 분기는 도달하지 않는다 — 도달하면
-    // 빈 MAC이 되어 서명 검증이 실패한다 (안전한 쪽으로 넘어진다).
-    let Ok(mut mac) = HmacSha256::new_from_slice(key) else {
+    // Hmac::new_from_slice는 임의 길이 키를 받아 InvalidLength가 나지 않는다.
+    // 그래도 unwrap/expect는 워크스페이스 린트가 막으므로 let-else로 받는다 —
+    // 이 분기는 도달 불가다. 설령 도달해도 결과는 실제 서명과 다른 값이라
+    // 상수시간 비교에서 불일치(403)로 닫힌다.
+    let Ok(mut mac) = <HmacSha256 as Mac>::new_from_slice(key) else {
         return Vec::new();
     };
     mac.update(msg);
@@ -251,7 +255,7 @@ async fn authenticate(
         ));
     }
 
-    let client_id = s3reg::client_for_access_key(&state.pool, &parsed.access_key)
+    let credential = s3reg::find_credential(&state.pool, &parsed.access_key)
         .await
         .map_err(|e| xml_internal("credential lookup", e))?
         .ok_or_else(|| {
@@ -261,6 +265,20 @@ async fn authenticate(
                 "the access key id does not exist",
             )
         })?;
+    // 암호화 저장된 secret을 복호한다 — storage 벤더 시크릿과 같은 기계.
+    // enc_key_id 라벨이 복호 키를 고르므로(active·PREV) 회전이 자연히 커버되고,
+    // AAD=access_key_id가 암호문 재배치를 막는다.
+    let secret = state
+        .crypto
+        .decrypt(
+            &credential.enc_key_id,
+            &parsed.access_key,
+            &filegate_core::EncryptedSecret {
+                ciphertext: credential.secret_ciphertext,
+                nonce: credential.secret_nonce,
+            },
+        )
+        .map_err(|e| xml_internal("secret decrypt", e))?;
 
     // canonical request — SignedHeaders 목록 순서대로 (소문자:trim값).
     let mut canonical_headers = String::new();
@@ -287,33 +305,17 @@ async fn authenticate(
         sha256_hex(canonical_request.as_bytes())
     );
 
-    let sign_with = |secret: &str| {
-        let k_date = hmac_sha256(
-            format!("AWS4{secret}").as_bytes(),
-            parsed.scope_date.as_bytes(),
-        );
-        let k_region = hmac_sha256(&k_date, parsed.region.as_bytes());
-        let k_service = hmac_sha256(&k_region, b"s3");
-        let k_signing = hmac_sha256(&k_service, b"aws4_request");
-        hex(&hmac_sha256(&k_signing, string_to_sign.as_bytes()))
-    };
+    let k_date = hmac_sha256(
+        format!("AWS4{}", secret.expose_secret()).as_bytes(),
+        parsed.scope_date.as_bytes(),
+    );
+    let k_region = hmac_sha256(&k_date, parsed.region.as_bytes());
+    let k_service = hmac_sha256(&k_region, b"s3");
+    let k_signing = hmac_sha256(&k_service, b"aws4_request");
+    let expected = hex(&hmac_sha256(&k_signing, string_to_sign.as_bytes()));
 
-    // 파생 secret으로 검증 — 활성 키, 회전 전환기엔 PREV까지 (crypto.rs).
-    let active = state
-        .crypto
-        .s3_secret(&parsed.access_key)
-        .map_err(|e| xml_internal("secret derivation", e))?;
-    if eq_constant_time(&sign_with(&active), &parsed.signature) {
-        return Ok(client_id);
-    }
-    if let Some(prev) = state
-        .crypto
-        .s3_secret_prev(&parsed.access_key)
-        .map_err(|e| xml_internal("secret derivation", e))?
-    {
-        if eq_constant_time(&sign_with(&prev), &parsed.signature) {
-            return Ok(client_id);
-        }
+    if eq_constant_time(&expected, &parsed.signature) {
+        return Ok(credential.client_id);
     }
     Err(xml_error(
         StatusCode::FORBIDDEN,

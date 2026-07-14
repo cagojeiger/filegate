@@ -40,7 +40,13 @@ HeadBucket 같은 프로브가 없다.
 ### 인증 — SigV4
 
 - 자격증명은 access key id + secret key 쌍이다. 등록부(운영자 API)가
-  client에 발급하며, bearer 클라이언트 키와 별개다.
+  client에 발급하며, bearer 클라이언트 키와 별개다. access key id는 공개
+  식별자, secret은 고엔트로피 랜덤이고 발급 응답에서 원문이 딱 한 번 나간다.
+- **secret은 암호화 저장한다** — storage 벤더 시크릿과 같은 기계 (재현이
+  필요한 장수 시크릿은 암호화 저장, 찰나인 relay만 파생). SigV4 검증은
+  access_key_id를 AAD로 복호해 raw로 HMAC을 재계산한다. 마스터 키 회전은
+  `enc_key_id` 라벨 dispatch가 커버하고(spec 01 런북, storages와 함께),
+  유출 반경은 저장된 암호문에 국한되며 자격증명은 행 단위로 폐기·회전한다.
 - **header-signed SigV4를 검증한다.** canonical request의 payload hash는
   `x-amz-content-sha256` 헤더 값을 그대로 쓴다 — 실측: PUT은 실제
   본문 SHA256, GET/HEAD/DELETE는 empty-payload hash.
