@@ -23,8 +23,6 @@ use filegate_db::files::{self, ByteLease};
 use filegate_infra::{
     fs as fs_backend, rfc5987_encode, s3_open_read, s3_put_object_from_path, Address,
 };
-use futures_util::StreamExt;
-use md5::{Digest, Md5};
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
@@ -32,16 +30,8 @@ use uuid::Uuid;
 
 use crate::error::{internal, not_found, status, ApiError};
 use crate::routes::AppState;
+use crate::spool::{self, spool_root, STREAM_BUF_SIZE};
 use crate::storage_access::{backend_from_row, StorageBackend};
-
-/// 청크 사이 유휴 상한. lease 만료는 진입(authorize) 시에만 검사되므로
-/// 진행 중 연결의 수명은 이 타임아웃이 다스린다 — 바이트를 극소량씩
-/// 흘리며 연결·임시 파일을 점유하는 것을 끊는다.
-const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// 스트림 버퍼 크기 — 다운로드 재청크와 업로드 스풀 쓰기가 공유한다.
-/// 기본 4KiB로 두면 GiB급 전송이 수십만 번의 블로킹 풀 왕복이 된다.
-const STREAM_BUF_SIZE: usize = 256 * 1024;
 
 /// 파드당 동시 fs part 승격 상한. 승격은 claim(DB 행 락 + 풀 커넥션)을 쥔 채
 /// 디스크 복사를 하므로, 상한 없이 몰리면 커넥션 풀이 승격에 잠식돼 요청
@@ -139,7 +129,7 @@ async fn upload(
     let mut writer = tokio::io::BufWriter::with_capacity(STREAM_BUF_SIZE, file);
 
     let (written, md5_hex) =
-        stream_to_temp(body, &mut writer, &temp_path, lease.declared_size).await?;
+        spool_measured(body, &mut writer, &temp_path, lease.declared_size).await?;
 
     // 버퍼 잔량을 파일로 내리고 원본 핸들을 되찾는다 — 이후 확정 단계는
     // 버퍼를 모른다 (fs는 sync+rename, s3는 스풀 업로드).
@@ -223,7 +213,7 @@ async fn upload_part(
         .await
         .map_err(internal)?;
     let mut writer = tokio::io::BufWriter::with_capacity(STREAM_BUF_SIZE, file);
-    let (written, md5_hex) = stream_to_temp(body, &mut writer, &temp_path, expected).await?;
+    let (written, md5_hex) = spool_measured(body, &mut writer, &temp_path, expected).await?;
     if let Err(error) = writer.flush().await {
         fs_backend::abort_write(&temp_path).await;
         return Err(internal(error));
@@ -313,57 +303,37 @@ async fn upload_part(
     Ok(ok_with_etag(&md5_hex))
 }
 
-/// 스트림 통과 계측 (ADR 002): body를 임시 파일에 쓰며 크기·MD5를 실측하고,
-/// 선언 크기를 넘는 순간 끊는다 — 직결(presigned)이 못 하는 사전 차단.
-/// 유휴·단절·초과·미달 등 모든 실패는 임시 파일을 지우고 에러로 돌아간다.
-/// 성공 시 (실측 크기, md5 hex)를 돌려준다.
-async fn stream_to_temp(
+/// 공유 스풀 프리미티브(ADR 002)를 blobs 표면 에러로 번역한다 — 단일
+/// PUT·part 공용. 스풀이 유휴·단절·초과·IO 실패 시 임시 파일을 지우므로,
+/// 여기서는 미달(선언보다 작음)만 추가로 검사한다.
+async fn spool_measured(
     body: Body,
-    file: &mut (impl tokio::io::AsyncWrite + Unpin),
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
     temp_path: &std::path::Path,
     declared_size: i64,
 ) -> Result<(i64, String), ApiError> {
-    let mut hasher = Md5::new();
-    let mut written: i64 = 0;
-    let mut stream = body.into_data_stream();
-    loop {
-        let chunk = match tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
-            Err(_) => {
-                fs_backend::abort_write(temp_path).await;
-                return Err(status(
-                    StatusCode::REQUEST_TIMEOUT,
-                    "upload stream idle for too long",
-                ));
-            }
-            Ok(None) => break,
-            Ok(Some(Err(_))) => {
-                fs_backend::abort_write(temp_path).await;
-                return Err(status(StatusCode::BAD_REQUEST, "upload stream aborted"));
-            }
-            Ok(Some(Ok(chunk))) => chunk,
-        };
-        written += chunk.len() as i64;
-        if written > declared_size {
-            fs_backend::abort_write(temp_path).await;
-            return Err(status(
+    let measured = spool::spool_to_temp(body, writer, temp_path, declared_size, false)
+        .await
+        .map_err(|error| match error {
+            spool::SpoolError::Idle => status(
+                StatusCode::REQUEST_TIMEOUT,
+                "upload stream idle for too long",
+            ),
+            spool::SpoolError::Aborted => status(StatusCode::BAD_REQUEST, "upload stream aborted"),
+            spool::SpoolError::TooLarge => status(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "upload exceeds the declared size",
-            ));
-        }
-        hasher.update(&chunk);
-        if let Err(error) = file.write_all(&chunk).await {
-            fs_backend::abort_write(temp_path).await;
-            return Err(internal(error));
-        }
-    }
-    if written != declared_size {
+            ),
+            spool::SpoolError::Io(error) => internal(error),
+        })?;
+    if measured.written != declared_size {
         fs_backend::abort_write(temp_path).await;
         return Err(status(
             StatusCode::BAD_REQUEST,
             "upload is smaller than the declared size",
         ));
     }
-    Ok((written, format!("{:x}", hasher.finalize())))
+    Ok((measured.written, measured.md5_hex))
 }
 
 async fn download(
@@ -417,15 +387,6 @@ async fn download(
         }
     }
     Ok(response)
-}
-
-/// 쓰기 스풀 목적지: fs는 대상 root의 임시 파일(같은 마운트 rename),
-/// s3 중계는 OS 로컬 스풀을 거친다.
-fn spool_root(backend: &StorageBackend) -> std::path::PathBuf {
-    match backend {
-        StorageBackend::Fs { root } => root.clone(),
-        StorageBackend::S3 { .. } => std::env::temp_dir(),
-    }
 }
 
 /// 실측 md5를 따옴표 ETag 헤더로 실은 200 응답 — 단일 PUT·part 공용.
