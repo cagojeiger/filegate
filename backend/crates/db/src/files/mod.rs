@@ -25,7 +25,7 @@ pub use access::{
     access, attach_write_secret, byte_lease, issue_read_lease, record_upload, recorded_upload,
     stat, ByteLease, FileAccess, FileStat,
 };
-pub use commit::finalize_commit;
+pub use commit::{finalize_commit, observed_commit_candidates, ObservedCommitCandidate};
 pub use create::{create, CreateOutcome, CreateSpec, CreatedFile};
 pub use geometry::{part_count, part_expected_size, part_offset};
 pub use multipart::{

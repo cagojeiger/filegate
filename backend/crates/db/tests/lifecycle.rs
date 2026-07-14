@@ -206,6 +206,39 @@ async fn purge_removes_location_and_observation(pool: PgPool) {
     assert!(!files::finalize_purge(&pool, candidate).await.unwrap());
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn observed_commit_scan_targets_live_single_put_pending(pool: PgPool) {
+    wire(&pool, 1000).await;
+    // 후보: lease가 살아 있는 단일 PUT pending.
+    let live = create_ok(&pool, 100).await;
+    // 제외 1: 이미 active.
+    let committed = create_ok(&pool, 100).await;
+    files::finalize_commit(&pool, committed.file_id, "etag")
+        .await
+        .unwrap();
+    // 제외 2: lease 만료 — 회수의 몫이다.
+    let stale = create_ok(&pool, 100).await;
+    sqlx::query("UPDATE leases SET expires_at = now() - interval '1 hour' WHERE file_id = $1")
+        .bind(stale.file_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // 제외 3: multipart — 완료는 선언이다 (spec 02).
+    let mp_spec = CreateSpec {
+        part_size: Some(1024),
+        ..spec(5000)
+    };
+    files::create(&pool, mp_spec).await.unwrap();
+
+    let candidates = files::observed_commit_candidates(&pool, 10).await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    let candidate = candidates.first().unwrap();
+    assert_eq!(candidate.file_id, live.file_id);
+    assert_eq!(candidate.declared_size, 100);
+    assert_eq!(candidate.object_key, live.object_key);
+    assert_eq!(candidate.storage.id, "s");
+}
+
 const RETENTION_90D: i64 = 90 * 24 * 3600;
 
 #[sqlx::test(migrations = "./migrations")]

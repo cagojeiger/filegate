@@ -17,7 +17,7 @@ use std::time::Duration;
 use filegate_core::Crypto;
 use filegate_db::files::{self, SweepCandidate};
 use filegate_db::{registry, usage, PgPool};
-use filegate_infra::{fs as fs_backend, s3_delete_object, Address, S3ClientCache};
+use filegate_infra::{fs as fs_backend, s3_delete_object, s3_head_object, Address, S3ClientCache};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
@@ -84,6 +84,37 @@ pub fn spawn(
 }
 
 async fn run_jobs(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
+    // 잡 0: 관찰 확정 (spec 00) — 단일 PUT pending의 실물이 선언과 맞으면
+    // 서비스의 commit 없이 확정한다. 직결 presigned 패턴("URL 주고 잊기")이
+    // filegate에서도 성립하는 지점이다. commit API는 즉시 확정이 필요한
+    // 서비스의 선택지로 남는다 (멱등 공존). multipart는 후보가 아니다 —
+    // 완료는 벤더도 선언이다 (spec 02).
+    match files::observed_commit_candidates(pool, BATCH_LIMIT).await {
+        Ok(candidates) => {
+            for candidate in candidates {
+                match observe_commit(pool, crypto, s3_clients, &candidate).await {
+                    Ok(true) => tracing::info!(
+                        event = "file.committed",
+                        file = %candidate.file_id,
+                        observed = true,
+                    ),
+                    // 실물 미도착·선언 불일치·전이 패배 — pending에 남는다.
+                    // 도착 전이면 다음 tick이 다시 보고, 끝내 안 맞으면 만료
+                    // 회수가 처리한다 (commit 검증 실패와 같은 결말).
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(
+                        event = "reconciler.observe_failed",
+                        file = %candidate.file_id,
+                        %error,
+                    ),
+                }
+            }
+        }
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", job = "observe_commit", %error)
+        }
+    }
+
     // 잡 1: 만료 회수 (spec 00 — pending의 capacity 해제 지점).
     // 전이가 먼저다: reclaimed로 잠근 뒤에만 실물을 지운다. 늦은 commit이
     // 전이를 이겼으면(false) 실물을 건드리지 않는다. 전이 후 물리 삭제가
@@ -265,6 +296,42 @@ async fn sweep_local_temps() {
 /// multipart 회수 재료가 있으면 함께 치운다 (spec 02): s3는 벤더 세션
 /// 중단(중단하지 않은 미완성 part는 보이지 않게 과금된다), fs는 offset
 /// 기록 중이던 대상 임시 파일.
+/// 실물 관찰 → 선언 대조 → 확정. commit 핸들러와 같은 게이트다 (spec 00):
+/// 크기 일치 + (선언 시) md5 = ETag. 중계는 스트림 중 실측을, 직결은 내부
+/// 주소의 head_object를 대조한다.
+async fn observe_commit(
+    pool: &PgPool,
+    crypto: &Crypto,
+    s3_clients: &S3ClientCache,
+    candidate: &files::ObservedCommitCandidate,
+) -> anyhow::Result<bool> {
+    let backend = crate::storage_access::backend_from_row(crypto, &candidate.storage)?;
+    let (actual_size, etag) = if backend.is_relay() {
+        match files::recorded_upload(pool, candidate.file_id).await? {
+            Some(recorded) => recorded,
+            None => return Ok(false), // 아직 업로드 전
+        }
+    } else {
+        let crate::storage_access::StorageBackend::S3 { spec, .. } = &backend else {
+            return Ok(false);
+        };
+        let storage = s3_clients.get(&candidate.storage.id, spec, Address::Internal);
+        match s3_head_object(&storage, &candidate.object_key).await? {
+            Some(head) => head,
+            None => return Ok(false), // 아직 업로드 전
+        }
+    };
+    if actual_size != candidate.declared_size {
+        return Ok(false);
+    }
+    if let Some(declared) = &candidate.declared_md5 {
+        if !declared.eq_ignore_ascii_case(&etag) {
+            return Ok(false);
+        }
+    }
+    Ok(files::finalize_commit(pool, candidate.file_id, &etag).await?)
+}
+
 async fn sweep_object(
     pool: &PgPool,
     crypto: &Crypto,
