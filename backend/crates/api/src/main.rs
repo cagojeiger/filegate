@@ -7,7 +7,7 @@ mod error;
 mod lease;
 mod reconciler;
 mod routes;
-mod s3_surface;
+mod s3;
 mod spool;
 mod storage_access;
 mod v1;
@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
             let s3_listener = tokio::net::TcpListener::bind(bind).await?;
             info!(event = "server.s3_listening", addr = %bind);
             // 메인 라우터와 같은 telemetry — request-id·trace를 공유한다.
-            let s3_router = routes::with_telemetry(s3_surface::routes(state.clone()));
+            let s3_router = routes::with_telemetry(s3::routes(state.clone()));
             let s3_shutdown = shutdown.clone().cancelled_owned();
             Some(tokio::spawn(async move {
                 axum::serve(s3_listener, s3_router)
