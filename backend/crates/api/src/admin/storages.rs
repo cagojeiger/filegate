@@ -348,3 +348,18 @@ fn require_http_url(value: &str, field: &str) -> Result<(), ApiError> {
         Err(bad_request(&format!("{field} must be an http(s) URL")))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn require_http_url_accepts_http_https_only() {
+        assert!(require_http_url("http://minio:9000", "endpoint").is_ok());
+        assert!(require_http_url("https://cdn.example.com", "public_endpoint").is_ok());
+        assert!(require_http_url("ftp://x", "endpoint").is_err()); // http(s) 아닌 스킴
+        assert!(require_http_url("minio:9000", "endpoint").is_err()); // 스킴 없음
+                                                                      // 빈 host(authority)는 presign이 붙을 곳이 없다 — 거부한다.
+        assert!(require_http_url("http:///path", "endpoint").is_err());
+    }
+}

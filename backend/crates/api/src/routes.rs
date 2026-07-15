@@ -183,3 +183,39 @@ fn log_request_end(response: &axum::response::Response, latency: Duration, span:
         latency_ms = latency.as_millis() as u64,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{header, HeaderMap, HeaderValue};
+
+    #[test]
+    fn bearer_token_extracts_only_a_well_formed_bearer_header() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(bearer_token(&headers), None); // 헤더 부재
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer abc123"),
+        );
+        assert_eq!(bearer_token(&headers), Some("abc123"));
+        // scheme은 대소문자 무시 (eq_ignore_ascii_case).
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("bearer xyz"),
+        );
+        assert_eq!(bearer_token(&headers), Some("xyz"));
+        // 다른 scheme·공백 없는 값은 None.
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Basic abc"));
+        assert_eq!(bearer_token(&headers), None);
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearerabc"));
+        assert_eq!(bearer_token(&headers), None);
+    }
+
+    #[test]
+    fn is_system_path_matches_only_the_probes() {
+        assert!(is_system_path("/healthz"));
+        assert!(is_system_path("/readyz"));
+        assert!(!is_system_path("/api/v1/files"));
+        assert!(!is_system_path("/"));
+    }
+}

@@ -20,7 +20,7 @@ use crate::error::{bad_request, conflict, internal, not_found, ApiError};
 use crate::lease::{READ_LEASE_TTL, WRITE_LEASE_TTL};
 use crate::routes::AppState;
 use crate::storage_access::{backend_from_row, StorageBackend};
-use crate::validation::{content_type_ok, MAX_SINGLE_PUT_BYTES};
+use crate::validation::{classify_upload, content_type_ok, declared_md5_format_ok};
 
 #[derive(Deserialize)]
 pub(super) struct CreateBody {
@@ -63,30 +63,16 @@ pub(super) async fn create(
     Extension(client): Extension<ClientId>,
     Json(body): Json<CreateBody>,
 ) -> Result<Response, ApiError> {
-    if body.declared_size < 0 {
-        return Err(bad_request("declared_size must be >= 0"));
-    }
-    // 임계값을 넘으면 multipart다 (spec 02). 크기 상한은 모드가 정한다:
-    // 단일 PUT은 벤더 한계 5GiB, multipart는 part × 10,000 (벤더 part 수 한계).
-    let multipart = body.declared_size > state.multipart_threshold;
-    if multipart {
-        if body.declared_size > state.part_size.saturating_mul(10_000) {
-            return Err(bad_request("declared_size exceeds the multipart limit"));
-        }
-        // 전체 MD5는 multipart의 어떤 모드에서도 실측되지 않는다 —
-        // 검증 단위는 part다 (ADR 002). 받아주는 것이 거짓 계약이라 400.
-        if body.declared_md5.is_some() {
-            return Err(bad_request(
-                "declared_md5 is not accepted for multipart uploads (verification is per part)",
-            ));
-        }
-    } else if body.declared_size > MAX_SINGLE_PUT_BYTES {
-        return Err(bad_request(
-            "declared_size exceeds the single-upload limit (5 GiB)",
-        ));
-    }
+    // 크기·모드·md5-무효 규칙은 순수 계약이다 (validation) — is_multipart 반환.
+    let multipart = classify_upload(
+        body.declared_size,
+        state.multipart_threshold,
+        state.part_size,
+        body.declared_md5.is_some(),
+    )
+    .map_err(bad_request)?;
     if let Some(md5) = &body.declared_md5 {
-        if md5.len() != 32 || !md5.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if !declared_md5_format_ok(md5) {
             return Err(bad_request("declared_md5 must be 32 hex chars"));
         }
     }

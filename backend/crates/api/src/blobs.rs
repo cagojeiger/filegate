@@ -32,6 +32,7 @@ use crate::error::{internal, not_found, status, ApiError};
 use crate::routes::AppState;
 use crate::spool::{self, spool_root, STREAM_BUF_SIZE};
 use crate::storage_access::{backend_from_row, StorageBackend};
+use crate::validation::part_number_ok;
 
 /// 파드당 동시 fs part 승격 상한. 승격은 claim(DB 행 락 + 풀 커넥션)을 쥔 채
 /// 디스크 복사를 하므로, 상한 없이 몰리면 커넥션 풀이 승격에 잠식돼 요청
@@ -196,7 +197,7 @@ async fn upload_part(
         ));
     };
     let count = files::part_count(lease.declared_size, part_size);
-    if part_no < 1 || part_no > count {
+    if !part_number_ok(part_no, count) {
         return Err(status(StatusCode::BAD_REQUEST, "part number out of range"));
     }
     let expected = files::part_expected_size(lease.declared_size, part_size, part_no);
