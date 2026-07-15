@@ -7,6 +7,7 @@ mod error;
 mod lease;
 mod reconciler;
 mod routes;
+mod s3;
 mod spool;
 mod storage_access;
 mod v1;
@@ -72,6 +73,23 @@ async fn main() -> anyhow::Result<()> {
         )),
     };
 
+    // S3 호환 표면 — 전용 리스너 (spec 03). 미설정이면 표면이 꺼진다.
+    let s3_server = match config.server.s3_bind {
+        Some(bind) => {
+            let s3_listener = tokio::net::TcpListener::bind(bind).await?;
+            info!(event = "server.s3_listening", addr = %bind);
+            // 메인 라우터와 같은 telemetry — request-id·trace를 공유한다.
+            let s3_router = routes::with_telemetry(s3::routes(state.clone()));
+            let s3_shutdown = shutdown.clone().cancelled_owned();
+            Some(tokio::spawn(async move {
+                axum::serve(s3_listener, s3_router)
+                    .with_graceful_shutdown(s3_shutdown)
+                    .await
+            }))
+        }
+        None => None,
+    };
+
     let http_shutdown = shutdown.clone().cancelled_owned();
     let server = async move {
         axum::serve(listener, routes::app(state))
@@ -97,6 +115,13 @@ async fn main() -> anyhow::Result<()> {
 
     if let Err(error) = worker.await {
         tracing::warn!(event = "reconciler.join_failed", %error);
+    }
+    if let Some(handle) = s3_server {
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(event = "server.s3_error", %error),
+            Err(error) => tracing::warn!(event = "server.s3_join_failed", %error),
+        }
     }
     pool.close().await;
     info!(event = "shutdown.complete");

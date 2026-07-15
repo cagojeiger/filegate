@@ -45,6 +45,14 @@ pub fn admin_routes() -> Router<AppState> {
             get(clients::key_get).delete(clients::key_delete),
         )
         .route(
+            "/clients/{id}/s3-credentials",
+            get(clients::s3_credential_list).post(clients::s3_credential_create),
+        )
+        .route(
+            "/clients/{id}/s3-credentials/{access_key_id}",
+            axum::routing::delete(clients::s3_credential_delete),
+        )
+        .route(
             "/clients/{id}/bindings/{intent}",
             get(bindings::get)
                 .post(bindings::create)
