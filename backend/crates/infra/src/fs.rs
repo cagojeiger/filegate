@@ -91,6 +91,27 @@ pub async fn open_read(root: &Path, object_key: &str) -> anyhow::Result<Option<(
     }
 }
 
+/// 부분 읽기 스트림 (spec 03 Range) — seek 후 길이 제한. 구간은 호출자가
+/// 파일 크기로 검증한 폐구간 [start, end]다. 없으면 None.
+pub async fn open_read_range(
+    root: &Path,
+    object_key: &str,
+    start: i64,
+    end: i64,
+) -> anyhow::Result<Option<(impl tokio::io::AsyncRead + Send + Unpin, i64)>> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let path = object_path(root, object_key)?;
+    match fs::File::open(&path).await {
+        Ok(mut file) => {
+            file.seek(std::io::SeekFrom::Start(start as u64)).await?;
+            let len = end - start + 1;
+            Ok(Some((file.take(len as u64), len)))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// 장부 밖 임시 정리 (spec 00 물리 배치): 디렉토리 최상위의 `.fg-tmp-*` 중
 /// mtime이 max_age를 넘은 것을 지운다. 단일 PUT temp는 DB를 보지 않는다 —
 /// 진행 중 업로드는 어리므로 걸리지 않고, 크래시가 남긴 것만 늙어서 걸린다.

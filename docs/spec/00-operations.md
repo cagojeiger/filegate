@@ -13,7 +13,7 @@
 
 ## 범위
 
-이번 범위: `create`→`commit`(업로드), `read`(다운로드), `stat`, `delete`, `usage`(운영자). 임계값을 넘는 대용량과 갱신·재개는 [spec 02](02-multipart.md)가 확장한다.
+이번 범위: `create`→`commit`(업로드), `read`(다운로드), `stat`, `delete`, `usage`(운영자). 임계값을 넘는 대용량과 갱신·재개는 [spec 02](02-multipart.md)가 확장한다. 무수정 S3 SDK를 받는 호환 표면은 [spec 03](03-s3-surface.md)이 정의한다 (ADR 006).
 
 접근 모드는 둘 다 구현되어 있다 — **직결**(저장소 presigned URL)과 **중계**(filegate 바이트 엔드포인트). 서비스 계약은 두 모드에서 같고(ADR 001·002), 모드는 storage 선언이 정한다: fs는 항상 중계, s3는 기본 직결에 `force_relay`로 중계 강제(CORS 없는 벤더, 사설망 뒤 저장소).
 

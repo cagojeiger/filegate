@@ -8,5 +8,5 @@ mod hash;
 pub use config::{Config, DatabaseConfig, LogFormat, SecurityConfig, ServerConfig};
 pub use crypto::{Crypto, EncryptedSecret};
 pub use error::{Error, Result};
-pub use hash::{client_key_hash, generate_url_secret};
+pub use hash::{client_key_hash, generate_access_key_id, generate_url_secret};
 pub use secrecy::{ExposeSecret, SecretString};
