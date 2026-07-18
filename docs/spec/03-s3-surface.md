@@ -53,8 +53,11 @@ HeadBucket 같은 프로브가 없다.
 - `SignedHeaders`에 열거된 헤더 전부가 canonical에 들어간다 — boto3
   기본 무결성 헤더(`x-amz-checksum-crc32`, `x-amz-sdk-checksum-algorithm`)도
   서명 범위로 함께 검증된다 (실측: 최신 botocore가 PUT에 기본 첨부).
-- query-signed(presigned URL) 요청은 이 표면에서 보류한다 — 그 용도는
-  네이티브 계층의 몫이다.
+- **query-signed(presigned URL)도 검증한다.** 서명·자격이 쿼리스트링
+  (`X-Amz-Credential/Date/Expires/SignedHeaders/Signature`)에 실려 오고,
+  canonical query에서 `X-Amz-Signature`만 제외해 재계산한다. payload hash는
+  `UNSIGNED-PAYLOAD`, 만료는 `X-Amz-Expires` 창으로 본다. 서비스가 자기 S3
+  SDK의 `generate_presigned_url`을 filegate에 그대로 겨누는 경로다.
 
 ### 전송과 검증
 
