@@ -20,9 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::put;
 use axum::Router;
 use filegate_db::files::{self, ByteLease};
-use filegate_infra::{
-    fs as fs_backend, rfc5987_encode, s3_open_read, s3_put_object_from_path, Address,
-};
+use filegate_infra::{fs as fs_backend, rfc5987_encode, s3_open_read, Address};
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
@@ -31,7 +29,7 @@ use uuid::Uuid;
 use crate::error::{internal, not_found, status, ApiError};
 use crate::routes::AppState;
 use crate::spool::{self, spool_root, STREAM_BUF_SIZE};
-use crate::storage_access::{backend_from_row, StorageBackend};
+use crate::storage_access::{backend_from_row, commit_temp_to_backend, CommitErr, StorageBackend};
 use crate::validation::part_number_ok;
 
 /// 파드당 동시 fs part 승격 상한. 승격은 claim(DB 행 락 + 풀 커넥션)을 쥔 채
@@ -140,31 +138,22 @@ async fn upload(
     }
     let file = writer.into_inner();
 
-    // 뒷단 확정: fs는 rename, s3는 스풀에서 업로드.
-    match &backend {
-        StorageBackend::Fs { root } => {
-            if let Err(error) = fs_backend::commit_write(file, &temp_path, root, object_key).await {
-                fs_backend::abort_write(&temp_path).await;
-                return Err(internal(error));
-            }
-        }
-        StorageBackend::S3 { spec, .. } => {
-            drop(file);
-            let storage = state
-                .s3_clients
-                .get(&storage_row.id, spec, Address::Internal);
-            let uploaded = s3_put_object_from_path(
-                &storage,
-                object_key,
-                &temp_path,
-                lease.content_type.as_deref(),
-            )
-            .await;
-            fs_backend::abort_write(&temp_path).await; // 스풀 정리 (성공/실패 공통)
-            if let Err(error) = uploaded {
-                return Err(ApiError::Storage(error));
-            }
-        }
+    // 뒷단 확정: fs는 rename, s3는 스풀에서 업로드 (abort 순서는 헬퍼가 쥔다).
+    if let Err(error) = commit_temp_to_backend(
+        &state.s3_clients,
+        &backend,
+        &storage_row.id,
+        file,
+        &temp_path,
+        object_key,
+        lease.content_type.as_deref(),
+    )
+    .await
+    {
+        return Err(match error {
+            CommitErr::Fs(error) => internal(error),
+            CommitErr::Storage(error) => ApiError::Storage(error),
+        });
     }
 
     files::record_upload(&state.pool, lease_id, written, &md5_hex).await?;

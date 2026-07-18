@@ -7,19 +7,17 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use filegate_db::files::{self, CreateOutcome, CreateSpec};
 use filegate_db::s3_registry as s3reg;
-use filegate_infra::{
-    fs as fs_backend, s3_open_read, s3_open_read_range, s3_put_object_from_path, Address,
-};
+use filegate_infra::{fs as fs_backend, s3_open_read, s3_open_read_range, Address};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use super::header_str;
 use super::xml::{no_such_key, xml_error, xml_internal, xml_storage_error};
 use super::S3Result;
-use crate::lease::{READ_LEASE_TTL, WRITE_LEASE_TTL};
+use crate::lease::WRITE_LEASE_TTL;
 use crate::routes::AppState;
 use crate::spool::{self, spool_root, STREAM_BUF_SIZE};
-use crate::storage_access::{backend_from_row, StorageBackend};
+use crate::storage_access::{backend_from_row, commit_temp_to_backend, CommitErr, StorageBackend};
 use crate::validation::{content_type_ok, MAX_SINGLE_PUT_BYTES};
 
 // ── PutObject ────────────────────────────────────────────────
@@ -136,30 +134,23 @@ pub(super) async fn put_object(
     }
     let file = writer.into_inner();
 
-    match &backend {
-        StorageBackend::Fs { root } => {
-            if let Err(error) =
-                fs_backend::commit_write(file, &temp_path, root, &created.object_key).await
-            {
-                fs_backend::abort_write(&temp_path).await;
-                // fs는 로컬/마운트 IO → internal(500). 원격 게이트웨이(s3)만
-                // 503. blobs·spool과 같은 백엔드별 구분.
-                return Err(xml_internal("fs commit", error));
-            }
-        }
-        StorageBackend::S3 { spec, .. } => {
-            drop(file);
-            let storage = state
-                .s3_clients
-                .get(&created.storage.id, spec, Address::Internal);
-            let uploaded =
-                s3_put_object_from_path(&storage, &created.object_key, &temp_path, content_type)
-                    .await;
-            fs_backend::abort_write(&temp_path).await;
-            if let Err(error) = uploaded {
-                return Err(xml_storage_error("s3 upload", error));
-            }
-        }
+    // fs는 로컬/마운트 IO → internal(500), 원격 게이트웨이(s3)만 503 —
+    // blobs·spool과 같은 백엔드별 구분. abort 순서는 헬퍼가 쥔다.
+    if let Err(error) = commit_temp_to_backend(
+        &state.s3_clients,
+        &backend,
+        &created.storage.id,
+        file,
+        &temp_path,
+        &created.object_key,
+        content_type,
+    )
+    .await
+    {
+        return Err(match error {
+            CommitErr::Fs(error) => xml_internal("fs commit", error),
+            CommitErr::Storage(error) => xml_storage_error("s3 upload", error),
+        });
     }
 
     // 확정 — 스트림 실측이 곧 관찰이다. 전이가 지면(false) pending이 그 사이
@@ -343,21 +334,14 @@ pub(super) async fn get_object(
     };
 
     // 다운로드 관찰 — lease 원장 한 줄 (ADR 002, 네이티브와 한 장부).
-    // best-effort지만 실패는 경고로 남긴다 (네이티브 read와 같은 처리) —
-    // 이미 완성된 유효 응답을 DB 실패로 버리지 않되, 감사 공백은 보이게 한다.
-    if let Err(error) = files::issue_read_lease(
+    crate::lease::audit_read(
         &state.pool,
         file_id,
-        READ_LEASE_TTL.as_secs() as i64,
-        None,
         &file.storage.id,
         client_id,
         file.declared_size,
     )
-    .await
-    {
-        tracing::warn!(event = "file.read_audit_failed", file = %file_id, %error);
-    }
+    .await;
 
     tracing::info!(event = "s3.get", client = %client_id, bucket, key, file = %file_id);
     let mut response =

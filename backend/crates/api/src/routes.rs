@@ -58,7 +58,7 @@ pub(crate) fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
 }
 
 pub fn app(state: AppState) -> Router {
-    // 표면이 둘이다: 컨트롤(JSON, 본문 상한·타임아웃)과 바이트(/b, 스트리밍 —
+    // 표면이 둘이다: 컨트롤(JSON, 본문 상한·타임아웃)과 바이트(/blobs, 스트리밍 —
     // 요청 전체 타임아웃 없음: 크기는 스트림 차단이, 진행 중 연결의 수명은
     // blobs의 청크 유휴 타임아웃이 다스린다. lease 만료는 진입 시에만 검사된다.
     // GET의 저속 수신은 여기서 다스리지 않는다 — 앞단 프록시의 몫).
