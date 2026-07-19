@@ -119,6 +119,9 @@ async fn upload(
     // 쓰기 목적지: fs는 대상 root의 임시 파일(같은 마운트 rename),
     // s3 중계는 로컬 스풀을 거친다.
     let temp_root = spool_root(&backend);
+    // S3 중계는 공유 임시 볼륨에 스풀한다 — 동시 스풀 볼륨 고갈(DoS)을 막는
+    // 슬롯을 잡는다(스코프 종료 시 자동 반납). fs는 상한 밖이라 None.
+    let _spool_slot = spool::acquire_spool_slot(&backend, &state.spool_slots).await;
     // 같은 lease의 재PUT이 겹쳐도 서로 다른 임시 파일에 쓴다 — 이름을
     // lease_id로만 지으면 truncate로 두 스트림이 섞여 손상본이 커밋될 수 있다.
     let temp_name = format!("{lease_id}-{}", Uuid::new_v4());
@@ -198,6 +201,9 @@ async fn upload_part(
     }
 
     let temp_root = spool_root(backend);
+    // S3 중계 part도 공유 임시 볼륨에 스풀한다 — 동시 스풀 슬롯을 잡는다
+    // (스코프 종료 시 자동 반납). fs part 승격은 별도 part_promotions가 다스린다.
+    let _spool_slot = spool::acquire_spool_slot(backend, &state.spool_slots).await;
     let temp_name = format!("{lease_id}-p{part_no}-{}", Uuid::new_v4());
     let (temp_path, file) = fs_backend::begin_write(&temp_root, &temp_name)
         .await

@@ -7,6 +7,7 @@ edition.workspace = true
 anyhow = { workspace = true }
 tokio = { workspace = true }
 aws-sdk-s3 = { workspace = true }
+aws-smithy-http-client = { workspace = true }
 secrecy = { workspace = true }
 
 [lints]

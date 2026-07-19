@@ -101,8 +101,17 @@ fn client(spec: &S3StorageSpec, address: Address) -> S3Storage {
         Address::Internal => &spec.endpoint,
         Address::Public => &spec.public_endpoint,
     };
+    // TLS 커넥터를 명시적으로 준다 — rustls 0.23 + ring. aws-sdk의 레거시
+    // "rustls"(0.21) 피처를 끄고 sqlx와 같은 스택으로 통일한다. 커넥터는 자기
+    // 커넥션 풀을 소유하므로 storage당 하나가 자연스럽다(이 함수는 캐시 미스에만 돈다).
+    let http_client = aws_smithy_http_client::Builder::new()
+        .tls_provider(aws_smithy_http_client::tls::Provider::Rustls(
+            aws_smithy_http_client::tls::rustls_provider::CryptoMode::Ring,
+        ))
+        .build_https();
     let s3_config = aws_sdk_s3::Config::builder()
         .behavior_version(BehaviorVersion::latest())
+        .http_client(http_client)
         .region(Region::new(spec.region.clone()))
         .endpoint_url(endpoint)
         .credentials_provider(credentials)
