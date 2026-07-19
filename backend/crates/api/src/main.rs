@@ -9,6 +9,7 @@ mod reconciler;
 mod routes;
 mod s3;
 mod spool;
+mod status;
 mod storage_access;
 mod v1;
 mod validation;
@@ -21,7 +22,37 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> anyhow::Result<std::process::ExitCode> {
+    match std::env::args().nth(1).as_deref() {
+        None | Some("serve") => {
+            serve().await?;
+            Ok(std::process::ExitCode::SUCCESS)
+        }
+        Some("status") => status::run().await,
+        Some("--help") | Some("-h") | Some("help") => {
+            print_usage();
+            Ok(std::process::ExitCode::SUCCESS)
+        }
+        Some(other) => {
+            eprintln!("filegate: unknown command '{other}'");
+            print_usage();
+            Ok(std::process::ExitCode::from(2))
+        }
+    }
+}
+
+fn print_usage() {
+    eprintln!(
+        "filegate — file gateway\n\n\
+         USAGE:\n    \
+         filegate [serve]   서버를 기동한다 (기본)\n    \
+         filegate status    배포 상태를 점검하고 요약을 출력한다"
+    );
+}
+
+/// 서버 기동: env 설정 → PostgreSQL(+마이그레이션) → storage 재검증
+/// → HTTP + reconciler → graceful shutdown.
+async fn serve() -> anyhow::Result<()> {
     let config = filegate_core::Config::load()?;
     init_tracing(config.server.log_format);
 
