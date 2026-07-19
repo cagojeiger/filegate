@@ -437,7 +437,7 @@ async fn run_jobs(
         chrono::Utc::now() - chrono::Duration::seconds(HISTORY_RETENTION.as_secs() as i64);
     match moves::prune_move_history(pool, move_cutoff, BATCH_LIMIT).await {
         Ok(0) => {}
-        Ok(count) => tracing::info!(event = "move_history.pruned", count),
+        Ok(count) => tracing::info!(event = "reconciler.move_history_pruned", count),
         Err(error) => {
             tracing::error!(event = "reconciler.scan_failed", job = "prune_move_history", %error)
         }
@@ -511,7 +511,7 @@ async fn run_jobs(
 }
 
 /// 이동 시도 실패를 저널에 남긴다 — 횟수·오류를 기록하고 backoff·park한다.
-/// 세 이동 잡이 공유하는 실패 경로다. 기록 자체가 실패하면(DB) 다음 tick이
+/// 이동 잡들이 공유하는 실패 경로다. 기록 자체가 실패하면(DB) 다음 tick이
 /// 같은 후보를 다시 줍는다 — error 로그만 남긴다.
 async fn mark_move_attempt(pool: &PgPool, file_id: uuid::Uuid, error: &str, policy: &MovePolicy) {
     tracing::warn!(event = "reconciler.move_failed", file = %file_id, error);

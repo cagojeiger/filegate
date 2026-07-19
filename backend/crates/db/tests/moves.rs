@@ -492,9 +492,9 @@ async fn admin_file_detail_includes_location(pool: PgPool) {
     );
 }
 
-// ── 리뷰 회귀: 스왑↔취소 경합·종착 정리 가드 ─────────────────
+// ── 스왑↔취소 경합·종착 정리 가드 ─────────────────
 
-/// C1 회귀: 복사 중 취소가 끼어들면(저널이 canceled) 스왑은 저널 0행을
+/// 복사 중 취소가 끼어들면(저널이 canceled) 스왑은 저널 0행을
 /// 보고 포인터 전이까지 롤백해야 한다 — 커밋되면 취소 정리가 살아있는
 /// dest 실물을 지운다 (스왑→취소 방향의 경합).
 #[sqlx::test(migrations = "./migrations")]
@@ -517,7 +517,7 @@ async fn finalize_swap_rolls_back_when_canceled_mid_copy(pool: PgPool) {
     assert!(!has_delete_after);
 }
 
-/// H1 회귀: 이동 저널이 남은 종착 파일은 prune이 건너뛴다 (FK로 배치
+/// 이동 저널이 남은 종착 파일은 prune이 건너뛴다 (FK로 배치
 /// 전체가 실패하는 대신) — 다른 종착 파일의 정리는 계속된다.
 #[sqlx::test(migrations = "./migrations")]
 async fn prune_terminal_files_skips_files_with_move_rows(pool: PgPool) {
@@ -564,7 +564,7 @@ async fn prune_terminal_files_skips_files_with_move_rows(pool: PgPool) {
     assert!(a_exists);
 }
 
-/// H1 회귀: 파일이 떠난 failed 이동은 stale_moves가 종결 후보로 줍는다 —
+/// 파일이 떠난 failed 이동은 stale_moves가 종결 후보로 줍는다 —
 /// 남겨두면 위 가드 때문에 그 파일 행이 영원히 정리되지 않는다.
 #[sqlx::test(migrations = "./migrations")]
 async fn stale_moves_catches_failed_move_after_file_left(pool: PgPool) {

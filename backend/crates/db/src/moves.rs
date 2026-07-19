@@ -17,7 +17,6 @@ pub struct MoveRow {
     pub file_id: Uuid,
     pub source_storage_id: String,
     pub dest_storage_id: String,
-    pub object_key: String,
     pub state: String,
     pub attempts: i32,
     pub next_attempt_at: DateTime<Utc>,
@@ -32,9 +31,6 @@ pub struct LocationInfo {
     pub file_state: String,
     pub storage_id: String,
     pub object_key: String,
-    pub content_type: Option<String>,
-    pub etag: Option<String>,
-    pub declared_size: i64,
 }
 
 /// move.execute 후보 한 건 — 복사·검증에 필요한 재료까지.
@@ -49,7 +45,7 @@ pub struct DueMove {
     pub declared_size: i64,
 }
 
-/// 경합에 진 requested 이동 — 조인이 실패해 dest stray만 치우고 행을 지운다.
+/// 경합에 진 이동 — 조인이 실패해 dest stray만 치우고 행을 지운다.
 #[derive(Debug, sqlx::FromRow)]
 pub struct StaleMove {
     pub file_id: Uuid,
@@ -162,8 +158,7 @@ pub async fn location_of(
     file_id: Uuid,
 ) -> Result<Option<LocationInfo>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT f.state AS file_state, l.storage_id, l.object_key, \
-         f.content_type, f.etag, f.declared_size \
+        "SELECT f.state AS file_state, l.storage_id, l.object_key \
          FROM files f JOIN locations l ON l.file_id = f.id \
          WHERE f.id = $1",
     )
@@ -265,7 +260,7 @@ pub async fn finalize_swap(
 /// requested만 max에 닿으면 failed로 멈춘다 (운영자 재요청이 재무장한다).
 /// swapped·canceled는 park하지 않는다 — 정리(삭제)는 멱등·저렴해 영원히
 /// backoff로 재시도해도 안전하고, STUCK 가시성은 status의 attempts가 준다.
-/// 세 이동 잡이 공유하는 실패 경로다.
+/// 이동 잡들이 공유하는 실패 경로다.
 pub async fn mark_attempt(
     pool: &PgPool,
     file_id: Uuid,
@@ -304,7 +299,7 @@ pub async fn due_deletes(pool: &PgPool, limit: i64) -> Result<Vec<DueDelete>, sq
 /// 저널 전체 조회 (운영자 목록) — 소수 행이라 무계 조회다.
 pub async fn list_moves(pool: &PgPool) -> Result<Vec<MoveRow>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT file_id, source_storage_id, dest_storage_id, object_key, state, attempts, \
+        "SELECT file_id, source_storage_id, dest_storage_id, state, attempts, \
          next_attempt_at, delete_after, last_error, created_at \
          FROM object_moves ORDER BY created_at",
     )
@@ -315,7 +310,7 @@ pub async fn list_moves(pool: &PgPool) -> Result<Vec<MoveRow>, sqlx::Error> {
 /// 저널 단건 조회 (운영자) — 없으면 None.
 pub async fn get_move(pool: &PgPool, file_id: Uuid) -> Result<Option<MoveRow>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT file_id, source_storage_id, dest_storage_id, object_key, state, attempts, \
+        "SELECT file_id, source_storage_id, dest_storage_id, state, attempts, \
          next_attempt_at, delete_after, last_error, created_at \
          FROM object_moves WHERE file_id = $1",
     )
