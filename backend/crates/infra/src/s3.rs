@@ -250,7 +250,7 @@ pub async fn put_object_from_path(
 pub async fn open_read(
     storage: &S3Storage,
     object_key: &str,
-) -> anyhow::Result<Option<(impl tokio::io::AsyncRead + Send + Unpin, i64)>> {
+) -> anyhow::Result<Option<(impl tokio::io::AsyncRead + Send + Unpin + use<>, i64)>> {
     let result = storage
         .client
         .get_object()
@@ -293,7 +293,7 @@ pub async fn open_read_range(
     object_key: &str,
     start: i64,
     end: i64,
-) -> anyhow::Result<Option<(impl tokio::io::AsyncRead + Send + Unpin, i64)>> {
+) -> anyhow::Result<Option<(impl tokio::io::AsyncRead + Send + Unpin + use<>, i64)>> {
     let result = storage
         .client
         .get_object()

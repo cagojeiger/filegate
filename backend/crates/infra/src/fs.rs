@@ -98,7 +98,7 @@ pub async fn open_read_range(
     object_key: &str,
     start: i64,
     end: i64,
-) -> anyhow::Result<Option<(impl tokio::io::AsyncRead + Send + Unpin, i64)>> {
+) -> anyhow::Result<Option<(impl tokio::io::AsyncRead + Send + Unpin + use<>, i64)>> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let path = object_path(root, object_key)?;
     match fs::File::open(&path).await {
