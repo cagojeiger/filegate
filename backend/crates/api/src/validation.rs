@@ -74,7 +74,7 @@ mod tests {
     #[test]
     fn classify_upload_splits_single_put_from_multipart_at_the_threshold() {
         let (thr, ps) = (64, 64); // 임계·part 크기
-                                  // 임계 이하는 단일 PUT(false), 초과는 multipart(true).
+        // 임계 이하는 단일 PUT(false), 초과는 multipart(true).
         assert_eq!(classify_upload(0, thr, ps, false), Ok(false));
         assert_eq!(classify_upload(thr, thr, ps, false), Ok(false)); // 경계: 같으면 단일
         assert_eq!(classify_upload(thr + 1, thr, ps, false), Ok(true)); // 경계: +1이면 multipart

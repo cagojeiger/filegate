@@ -73,9 +73,11 @@ async fn create_ok(pool: &PgPool, client: &str, intent: &str, size: i64) -> Crea
 /// create → commit 으로 active 파일을 만든다.
 async fn commit_one(pool: &PgPool, client: &str, intent: &str, size: i64) {
     let file = create_ok(pool, client, intent, size).await;
-    assert!(files::finalize_commit(pool, file.file_id, "etag")
-        .await
-        .unwrap());
+    assert!(
+        files::finalize_commit(pool, file.file_id, "etag")
+            .await
+            .unwrap()
+    );
 }
 
 // ── by_storage ──────────────────────────────────────────────
@@ -151,7 +153,7 @@ async fn by_client_splits_a_shared_storage_between_clients(pool: PgPool) {
     commit_one(&pool, "a", "att", 100).await;
     commit_one(&pool, "a", "att", 200).await; // a: 2파일 300
     commit_one(&pool, "b", "att", 500).await; // b: 1파일 500
-                                              // b의 pending 하나는 active가 아니라 리포트에 안 잡힌다.
+    // b의 pending 하나는 active가 아니라 리포트에 안 잡힌다.
     create_ok(&pool, "b", "att", 999).await;
 
     let rows = usage::by_client(&pool).await.unwrap();

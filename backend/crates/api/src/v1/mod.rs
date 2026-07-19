@@ -8,11 +8,11 @@ mod files;
 mod multipart;
 mod relay;
 
+use axum::Router;
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use filegate_db::registry;
 
 use crate::routes::AppState;

@@ -4,7 +4,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::registry::{StorageRow, STORAGE_COLUMNS};
+use crate::registry::{STORAGE_COLUMNS, StorageRow};
 
 /// commit의 사후 검증과 read의 위치 해석에 필요한 정보 (조회 전용).
 pub struct FileAccess {

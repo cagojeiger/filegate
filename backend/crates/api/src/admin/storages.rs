@@ -6,19 +6,19 @@
 //! DB에 닿지 않는다. 중계 storage는 공개 베이스 URL(FILEGATE_PUBLIC_URL)이
 //! 서 있어야 등록된다 — 발급할 수 없는 URL의 storage는 등록부에 못 들어온다.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use filegate_core::{Crypto, SecretString};
-use filegate_db::registry::{self, StorageRow};
 use filegate_db::PgPool;
-use filegate_infra::{s3_connect, S3StorageSpec};
+use filegate_db::registry::{self, StorageRow};
+use filegate_infra::{S3StorageSpec, s3_connect};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{bad_request, not_found, ApiError};
+use crate::error::{ApiError, bad_request, not_found};
 use crate::routes::AppState;
-use crate::storage_access::{backend_from_row, StorageBackend};
+use crate::storage_access::{StorageBackend, backend_from_row};
 
 /// 등록·갱신 본문. kind가 필드 요구를 가른다 — 종류별 필수는 여기서 400,
 /// 최종 집행은 DB CHECK(0002). secret_key는 여기서만 원문으로 존재한다.
@@ -389,7 +389,7 @@ mod tests {
         assert!(require_http_url("https://cdn.example.com", "public_endpoint").is_ok());
         assert!(require_http_url("ftp://x", "endpoint").is_err()); // http(s) 아닌 스킴
         assert!(require_http_url("minio:9000", "endpoint").is_err()); // 스킴 없음
-                                                                      // 빈 host(authority)는 presign이 붙을 곳이 없다 — 거부한다.
+        // 빈 host(authority)는 presign이 붙을 곳이 없다 — 거부한다.
         assert!(require_http_url("http:///path", "endpoint").is_err());
     }
 }

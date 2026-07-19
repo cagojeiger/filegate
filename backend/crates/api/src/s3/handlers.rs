@@ -3,22 +3,22 @@
 //! 관찰이다. 파일·lease·회계는 네이티브 표면과 한 장부다.
 
 use axum::body::Body;
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use filegate_db::files::{self, CreateOutcome, CreateSpec};
 use filegate_db::s3_registry as s3reg;
-use filegate_infra::{fs as fs_backend, s3_open_read, s3_open_read_range, Address};
+use filegate_infra::{Address, fs as fs_backend, s3_open_read, s3_open_read_range};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
+use super::S3Result;
 use super::header_str;
 use super::xml::{no_such_key, xml_error, xml_internal, xml_storage_error};
-use super::S3Result;
 use crate::lease::WRITE_LEASE_TTL;
 use crate::routes::AppState;
-use crate::spool::{self, spool_root, STREAM_BUF_SIZE};
-use crate::storage_access::{backend_from_row, commit_temp_to_backend, CommitErr, StorageBackend};
-use crate::validation::{content_type_ok, MAX_SINGLE_PUT_BYTES};
+use crate::spool::{self, STREAM_BUF_SIZE, spool_root};
+use crate::storage_access::{CommitErr, StorageBackend, backend_from_row, commit_temp_to_backend};
+use crate::validation::{MAX_SINGLE_PUT_BYTES, content_type_ok};
 
 // ── PutObject ────────────────────────────────────────────────
 
@@ -58,14 +58,14 @@ pub(super) async fn put_object(
     // content_type은 네이티브 create와 같은 가드 — 있는데 형태가 아니면 400
     // (조용히 버려 메타데이터를 잃지 않는다, 공유 validation).
     let content_type = header_str(headers, "content-type");
-    if let Some(ct) = content_type {
-        if !content_type_ok(ct) {
-            return Err(xml_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidArgument",
-                "invalid content-type",
-            ));
-        }
+    if let Some(ct) = content_type
+        && !content_type_ok(ct)
+    {
+        return Err(xml_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "invalid content-type",
+        ));
     }
 
     let spec = CreateSpec {
@@ -87,7 +87,7 @@ pub(super) async fn put_object(
                 StatusCode::NOT_FOUND,
                 "NoSuchBucket",
                 "the specified bucket does not exist",
-            ))
+            ));
         }
     };
 
@@ -119,15 +119,15 @@ pub(super) async fn put_object(
         ));
     }
     let md5_hex = measured.md5_hex;
-    if let Some(expected) = &expected_sha256 {
-        if !expected.eq_ignore_ascii_case(&sha256_hex) {
-            fs_backend::abort_write(&temp_path).await;
-            return Err(xml_error(
-                StatusCode::BAD_REQUEST,
-                "XAmzContentSHA256Mismatch",
-                "the provided x-amz-content-sha256 does not match what was computed",
-            ));
-        }
+    if let Some(expected) = &expected_sha256
+        && !expected.eq_ignore_ascii_case(&sha256_hex)
+    {
+        fs_backend::abort_write(&temp_path).await;
+        return Err(xml_error(
+            StatusCode::BAD_REQUEST,
+            "XAmzContentSHA256Mismatch",
+            "the provided x-amz-content-sha256 does not match what was computed",
+        ));
     }
 
     use tokio::io::AsyncWriteExt as _;
@@ -332,7 +332,7 @@ pub(super) async fn get_object(
             return Err(match backend {
                 StorageBackend::Fs { .. } => xml_internal("open read", error),
                 StorageBackend::S3 { .. } => xml_storage_error("open read", error),
-            })
+            });
         }
     };
 
@@ -382,10 +382,10 @@ fn object_headers(headers: &mut HeaderMap, file: &files::FileAccess, content_len
     if let Ok(value) = HeaderValue::from_str(content_type) {
         headers.insert(header::CONTENT_TYPE, value);
     }
-    if let Some(etag) = &file.etag {
-        if let Ok(value) = HeaderValue::from_str(&format!("\"{etag}\"")) {
-            headers.insert(header::ETAG, value);
-        }
+    if let Some(etag) = &file.etag
+        && let Ok(value) = HeaderValue::from_str(&format!("\"{etag}\""))
+    {
+        headers.insert(header::ETAG, value);
     }
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
 }

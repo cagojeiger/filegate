@@ -3,14 +3,14 @@
 //! 키는 해시로만 도착한다 (spec 01: raw는 서버에 도달하지 않는다).
 //! 검증은 전부 DB가 한다 — 슬러그·해시 형식은 CHECK, 참조는 FK.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use filegate_db::registry;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{not_found, ApiError};
+use crate::error::{ApiError, not_found};
 use crate::routes::AppState;
 
 #[derive(Deserialize)]

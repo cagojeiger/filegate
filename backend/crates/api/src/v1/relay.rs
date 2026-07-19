@@ -5,7 +5,7 @@
 
 use uuid::Uuid;
 
-use crate::error::{internal, ApiError};
+use crate::error::{ApiError, internal};
 use crate::routes::AppState;
 
 /// 중계 접근 secret 한 벌 — 원문은 URL로만 나가고 서버엔 해시만 남는다

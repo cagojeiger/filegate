@@ -98,7 +98,7 @@ pub async fn open_read_range(
     object_key: &str,
     start: i64,
     end: i64,
-) -> anyhow::Result<Option<(impl tokio::io::AsyncRead + Send + Unpin, i64)>> {
+) -> anyhow::Result<Option<(impl tokio::io::AsyncRead + Send + Unpin + use<>, i64)>> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let path = object_path(root, object_key)?;
     match fs::File::open(&path).await {
@@ -134,10 +134,10 @@ pub async fn sweep_stale_temps(
         if !name.starts_with(".fg-tmp-") {
             continue;
         }
-        if let Some(lease_id) = name.strip_prefix(".fg-tmp-mp-") {
-            if protected_mp_leases.contains(lease_id) {
-                continue;
-            }
+        if let Some(lease_id) = name.strip_prefix(".fg-tmp-mp-")
+            && protected_mp_leases.contains(lease_id)
+        {
+            continue;
         }
         let Ok(meta) = entry.metadata().await else {
             continue;

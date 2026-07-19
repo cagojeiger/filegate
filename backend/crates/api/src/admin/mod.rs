@@ -14,11 +14,11 @@ mod usage;
 
 pub use storages::{check_registered, verify_registered};
 
+use axum::Router;
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 
 use crate::routes::AppState;
 

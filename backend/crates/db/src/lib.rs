@@ -5,9 +5,9 @@ pub mod registry;
 pub mod s3_registry;
 pub mod usage;
 
-use sqlx::postgres::PgPoolOptions;
 pub use sqlx::Error as DbError;
 pub use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 
 pub async fn connect(database_url: &str, max_connections: u32) -> Result<PgPool, sqlx::Error> {
     PgPoolOptions::new()

@@ -154,10 +154,10 @@ impl Crypto {
         if key_id == self.active.key_id {
             return Ok(&self.active);
         }
-        if let Some(prev) = &self.prev {
-            if key_id == prev.key_id {
-                return Ok(prev);
-            }
+        if let Some(prev) = &self.prev
+            && key_id == prev.key_id
+        {
+            return Ok(prev);
         }
         let known: Vec<&str> = std::iter::once(self.active.key_id.as_str())
             .chain(self.prev.as_ref().map(|p| p.key_id.as_str()))

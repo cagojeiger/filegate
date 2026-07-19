@@ -23,18 +23,18 @@ mod multipart;
 mod sweep;
 
 pub use access::{
-    access, attach_write_secret, byte_lease, issue_read_lease, record_upload, recorded_upload,
-    stat, ByteLease, FileAccess, FileStat,
+    ByteLease, FileAccess, FileStat, access, attach_write_secret, byte_lease, issue_read_lease,
+    record_upload, recorded_upload, stat,
 };
-pub use commit::{finalize_commit, observed_commit_candidates, ObservedCommitCandidate};
-pub use create::{create, CreateOutcome, CreateSpec, CreatedFile};
+pub use commit::{ObservedCommitCandidate, finalize_commit, observed_commit_candidates};
+pub use create::{CreateOutcome, CreateSpec, CreatedFile, create};
 pub use geometry::{part_count, part_expected_size, part_offset};
 pub use multipart::{
-    attach_upload_id, claim_part, done_parts, extend_write_lease, has_done_parts, record_part_done,
-    write_lease, PartClaim, WriteLease,
+    PartClaim, WriteLease, attach_upload_id, claim_part, done_parts, extend_write_lease,
+    has_done_parts, record_part_done, write_lease,
 };
 pub use sweep::{
-    active_multipart_lease_ids, expire_read_leases, expired_pending, finalize_purge,
-    finalize_reclaim, mark_deleted, prune_history, prune_terminal_files, prune_terminal_leases,
-    purgeable, DeleteOutcome, SweepCandidate,
+    DeleteOutcome, SweepCandidate, active_multipart_lease_ids, expire_read_leases, expired_pending,
+    finalize_purge, finalize_reclaim, mark_deleted, prune_history, prune_terminal_files,
+    prune_terminal_leases, purgeable,
 };

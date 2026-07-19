@@ -3,7 +3,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::registry::{StorageRow, STORAGE_COLUMNS};
+use crate::registry::{STORAGE_COLUMNS, StorageRow};
 
 /// 검증 통과 후 확정: pending→active 전이 + lease 정산.
 /// 전이는 조건부라 동시 commit 중 하나만 true를 받는다 — 패자는 현재

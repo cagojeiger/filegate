@@ -100,9 +100,11 @@ async fn lease_state(pool: &PgPool, lease_id: uuid::Uuid) -> String {
 async fn extend_renews_live_lease(pool: PgPool) {
     wire(&pool).await;
     let file = create_ok(&pool).await;
-    assert!(files::extend_write_lease(&pool, file.lease_id, 900)
-        .await
-        .unwrap());
+    assert!(
+        files::extend_write_lease(&pool, file.lease_id, 900)
+            .await
+            .unwrap()
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -112,15 +114,19 @@ async fn extend_refuses_expired_lease(pool: PgPool) {
     force_expire(&pool, file.file_id).await;
     // 만료 후 갱신은 소생이다 — byte 접근이 이미 거부하는 lease를 되살리면
     // 회수와 경합하므로 0행이어야 한다.
-    assert!(!files::extend_write_lease(&pool, file.lease_id, 900)
-        .await
-        .unwrap());
+    assert!(
+        !files::extend_write_lease(&pool, file.lease_id, 900)
+            .await
+            .unwrap()
+    );
     // 갱신이 거부됐으므로 회수는 그대로 성립한다.
     let candidates = files::expired_pending(&pool, 10).await.unwrap();
     assert_eq!(candidates.len(), 1);
-    assert!(files::finalize_reclaim(&pool, &candidates[0])
-        .await
-        .unwrap());
+    assert!(
+        files::finalize_reclaim(&pool, &candidates[0])
+            .await
+            .unwrap()
+    );
 }
 
 // ── finalize_reclaim의 갱신 재확인 ──────────────────────────
@@ -139,9 +145,11 @@ async fn reclaim_cancels_when_renewed_after_snapshot(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    assert!(!files::finalize_reclaim(&pool, &candidates[0])
-        .await
-        .unwrap());
+    assert!(
+        !files::finalize_reclaim(&pool, &candidates[0])
+            .await
+            .unwrap()
+    );
     assert_eq!(file_state(&pool, file.file_id).await, "pending");
     assert_eq!(lease_state(&pool, file.lease_id).await, "issued");
     let locations: i64 = sqlx::query_scalar("SELECT count(*) FROM locations WHERE file_id = $1")
@@ -158,12 +166,16 @@ async fn reclaimed_lease_cannot_be_extended(pool: PgPool) {
     let file = create_ok(&pool).await;
     force_expire(&pool, file.file_id).await;
     let candidates = files::expired_pending(&pool, 10).await.unwrap();
-    assert!(files::finalize_reclaim(&pool, &candidates[0])
-        .await
-        .unwrap());
+    assert!(
+        files::finalize_reclaim(&pool, &candidates[0])
+            .await
+            .unwrap()
+    );
     assert_eq!(file_state(&pool, file.file_id).await, "reclaimed");
     assert_eq!(lease_state(&pool, file.lease_id).await, "expired");
-    assert!(!files::extend_write_lease(&pool, file.lease_id, 900)
-        .await
-        .unwrap());
+    assert!(
+        !files::extend_write_lease(&pool, file.lease_id, 900)
+            .await
+            .unwrap()
+    );
 }

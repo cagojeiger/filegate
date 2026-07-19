@@ -1,7 +1,7 @@
 //! S3 XML 에러 응답 빌더 (spec 03) — 표면 전역이 공유하는 에러 어휘.
 //! SDK가 파싱하는 최소형 XML을 만든다.
 
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 pub(super) fn xml_error(status: StatusCode, code: &str, message: &str) -> Response {

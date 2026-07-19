@@ -12,13 +12,13 @@ use filegate_infra::Address;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::ClientId;
 use super::files::{committed_or_conflict, committed_response};
 use super::relay::relay_base;
-use super::ClientId;
-use crate::error::{bad_request, conflict, internal, not_found, ApiError};
+use crate::error::{ApiError, bad_request, conflict, internal, not_found};
 use crate::lease::WRITE_LEASE_TTL;
 use crate::routes::AppState;
-use crate::storage_access::{backend_from_row, StorageBackend};
+use crate::storage_access::{StorageBackend, backend_from_row};
 use crate::validation::part_number_ok;
 
 /// multipart 확정 (spec 02): 중계는 원장(part 실측), 직결은 벤더 ListParts를
@@ -231,7 +231,7 @@ pub(super) async fn parts(
                     _ => {
                         return Err(conflict(
                             "upload predates a key rotation; restart the upload",
-                        ))
+                        ));
                     }
                 }
             };

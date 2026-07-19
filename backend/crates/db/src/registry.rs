@@ -39,8 +39,7 @@ impl std::fmt::Debug for StorageRow {
     }
 }
 
-pub(crate) const STORAGE_COLUMNS: &str =
-    "id, kind, force_relay, root_path, endpoint, public_endpoint, region, bucket, \
+pub(crate) const STORAGE_COLUMNS: &str = "id, kind, force_relay, root_path, endpoint, public_endpoint, region, bucket, \
      force_path_style, access_key, secret_key_ciphertext, secret_key_nonce, enc_key_id, \
      capacity_bytes";
 

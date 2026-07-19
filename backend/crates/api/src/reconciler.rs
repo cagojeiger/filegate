@@ -19,10 +19,10 @@ use std::time::Duration;
 
 use filegate_core::Crypto;
 use filegate_db::files::{self, SweepCandidate};
-use filegate_db::{registry, usage, PgPool};
-use filegate_infra::{fs as fs_backend, s3_delete_object, s3_head_object, Address, S3ClientCache};
+use filegate_db::{PgPool, registry, usage};
+use filegate_infra::{Address, S3ClientCache, fs as fs_backend, s3_delete_object, s3_head_object};
 use tokio::task::JoinHandle;
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 
 /// 한 tick에 잡별로 처리하는 최대 건수 (유계 배치, docs/stack).
@@ -322,10 +322,10 @@ async fn observe_commit(
     if actual_size != candidate.declared_size {
         return Ok(false);
     }
-    if let Some(declared) = &candidate.declared_md5 {
-        if !declared.eq_ignore_ascii_case(&etag) {
-            return Ok(false);
-        }
+    if let Some(declared) = &candidate.declared_md5
+        && !declared.eq_ignore_ascii_case(&etag)
+    {
+        return Ok(false);
     }
     Ok(files::finalize_commit(pool, candidate.file_id, &etag).await?)
 }

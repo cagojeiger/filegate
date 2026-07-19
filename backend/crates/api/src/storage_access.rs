@@ -155,20 +155,26 @@ mod tests {
 
     #[test]
     fn is_relay_is_true_for_fs_and_force_relay_s3_only() {
-        assert!(StorageBackend::Fs {
-            root: std::path::PathBuf::from("/x")
-        }
-        .is_relay());
+        assert!(
+            StorageBackend::Fs {
+                root: std::path::PathBuf::from("/x")
+            }
+            .is_relay()
+        );
         // s3는 force_relay 선언을 따른다 (ADR 001).
-        assert!(StorageBackend::S3 {
-            spec: dummy_s3_spec(),
-            force_relay: true,
-        }
-        .is_relay());
-        assert!(!StorageBackend::S3 {
-            spec: dummy_s3_spec(),
-            force_relay: false,
-        }
-        .is_relay());
+        assert!(
+            StorageBackend::S3 {
+                spec: dummy_s3_spec(),
+                force_relay: true,
+            }
+            .is_relay()
+        );
+        assert!(
+            !StorageBackend::S3 {
+                spec: dummy_s3_spec(),
+                force_relay: false,
+            }
+            .is_relay()
+        );
     }
 }
