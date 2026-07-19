@@ -32,8 +32,9 @@ HeadBucket 같은 프로브가 없다.
   `/{bucket}/{key}`로 S3가 받는다. 컨트롤 라우트가 우선하고 그 뒤에 S3를
   병합한다 (routes::app).
 - path-style만 지원한다: `/{bucket}/{key}`. virtual-host style은 보류.
-- **bucket = intent.** 등록된 binding이 없으면 404 `NoSuchBucket`.
-  서비스는 운영자가 통보한 기본 버킷 이름 하나만 안다 (ADR 006).
+- **bucket = client_id** (client가 자기 기반 storage를 소유한다). 인증된
+  client_id와 버킷 이름이 다르면 404 `NoSuchBucket`. 서비스는 자기 client
+  id를 버킷 이름으로 쓴다 (ADR 006).
 - **key = 논리키** — 서비스 소유 이름 (ADR 003). 퍼센트 인코딩·유니코드를
   수용하고 디코딩된 형태로 보관한다. 같은 키 재PUT은 덮어쓰기다:
   매핑이 새 file을 가리키고 옛 file은 detach로 넘어간다 — S3의

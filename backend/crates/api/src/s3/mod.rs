@@ -16,56 +16,20 @@ mod auth;
 mod handlers;
 mod xml;
 
-use std::time::Duration;
-
 use axum::Router;
 use axum::extract::{Path, Request, State};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::Response;
 use axum::routing::any;
-use tower_http::cors::CorsLayer;
 
 use crate::routes::AppState;
 
 pub fn routes(cors_allowed_origins: &[String]) -> Router<AppState> {
     let router = Router::new().route("/{bucket}/{*key}", any(dispatch));
-    match cors_layer(cors_allowed_origins) {
+    match crate::cors::layer(cors_allowed_origins) {
         Some(cors) => router.layer(cors),
         None => router,
     }
-}
-
-/// 브라우저 직접 업로드용 CORS — preflight(OPTIONS)를 인증(dispatch) 전에
-/// 단락 처리하고, 실제 PUT/GET 성공·오류 응답에도 CORS 헤더를 싣는다.
-/// 허용 origin이 없으면 미적용(None) — 기존 동작 그대로.
-fn cors_layer(allowed_origins: &[String]) -> Option<CorsLayer> {
-    let origins: Vec<HeaderValue> = allowed_origins
-        .iter()
-        .filter_map(|o| o.parse().ok())
-        .collect();
-    if origins.is_empty() {
-        return None;
-    }
-    Some(
-        CorsLayer::new()
-            .allow_origin(origins)
-            .allow_methods([
-                Method::GET,
-                Method::PUT,
-                Method::HEAD,
-                Method::DELETE,
-                Method::OPTIONS,
-            ])
-            .allow_headers([
-                header::CONTENT_TYPE,
-                header::IF_NONE_MATCH,
-                header::AUTHORIZATION,
-                HeaderName::from_static("x-amz-content-sha256"),
-                HeaderName::from_static("x-amz-date"),
-            ])
-            .expose_headers([header::ETAG])
-            .max_age(Duration::from_secs(3600)),
-    )
 }
 
 /// 핸들러 에러는 이미 완성된 S3 XML 응답이다 — `?`로 즉시 반환된다.
@@ -82,6 +46,15 @@ async fn dispatch(
             Ok(client_id) => client_id,
             Err(response) => return response,
         };
+    // client == bucket: 인증된 클라이언트의 버킷은 자기 id뿐이다. GET/HEAD/
+    // DELETE/PUT 모두 이 검사를 지나야 한다 (다른 버킷은 존재하지 않는다).
+    if bucket != client_id {
+        return xml::xml_error(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "the specified bucket does not exist",
+        );
+    }
     let result = match parts.method {
         Method::PUT => {
             handlers::put_object(&state, &client_id, &bucket, &key, &parts.headers, body).await

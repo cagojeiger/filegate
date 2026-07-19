@@ -38,10 +38,12 @@ use crate::validation::part_number_ok;
 /// 복사 시간만 점유한다 — 상한은 그 점유를 풀 크기(기본 20)보다 한참 아래로 묶는다.
 pub const PART_PROMOTION_LIMIT: usize = 4;
 
-pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/{lease_id}", put(upload).get(download).options(preflight))
-        .layer(axum::middleware::map_response(with_cors))
+pub fn routes(cors_allowed_origins: &[String]) -> Router<AppState> {
+    let router = Router::new().route("/{lease_id}", put(upload).get(download).options(preflight));
+    match crate::cors::layer(cors_allowed_origins) {
+        Some(cors) => router.layer(cors),
+        None => router,
+    }
 }
 
 #[derive(Deserialize)]
@@ -409,30 +411,4 @@ async fn authorize(
         Some(lease) if lease.lease_kind == expected_kind => Ok(lease),
         _ => Err(status(StatusCode::FORBIDDEN, "invalid or expired lease")),
     }
-}
-
-/// 모든 `/blobs` 응답에 붙는 CORS 헤더 — 성공·에러·preflight 공통 (map_response).
-async fn with_cors(mut response: Response) -> Response {
-    let headers = response.headers_mut();
-    headers.insert(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        HeaderValue::from_static("*"),
-    );
-    headers.insert(
-        header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("PUT, GET, OPTIONS"),
-    );
-    headers.insert(
-        header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("content-type"),
-    );
-    headers.insert(
-        header::ACCESS_CONTROL_MAX_AGE,
-        HeaderValue::from_static("600"),
-    );
-    headers.insert(
-        header::ACCESS_CONTROL_EXPOSE_HEADERS,
-        HeaderValue::from_static("etag"),
-    );
-    response
 }

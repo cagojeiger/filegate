@@ -3,6 +3,7 @@
 
 mod admin;
 mod blobs;
+mod cors;
 mod error;
 mod lease;
 mod reconciler;

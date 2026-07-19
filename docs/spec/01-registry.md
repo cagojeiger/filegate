@@ -8,11 +8,11 @@
 
 ## 등록부
 
-- 정본은 DB다. 노드 둘은 독립이고(storages, clients), 엣지 하나가 잇는다: `binding(client, intent) → storage`.
+- 정본은 DB다. client는 자기 기반 storage(`storage_id`)를 직접 소유한다 — 별도 binding/intent 테이블 없이 client 행이 storage 하나를 참조한다. S3 표면 자격증명은 client 아래 1:N이다.
 - id는 운영자가 정하는 안정 슬러그다 (`oci-std`, `notegate`). 생성 후 불변 — Terraform·API 모두 이 id로 참조한다.
 - storage는 내부 접근 주소(`endpoint`)와 전송 주체가 쓰는 공개 주소(`public_endpoint`)를 구분한다. 같으면 같은 값을 둔다.
 - 검증은 쓰기 시점이다: 참조 무결성은 FK가, storage 등록은 제출된 자격증명으로 저장 공간 접근을 즉석 확인해 지킨다. 실패한 등록은 거부된다.
-- 삭제는 연결부터다: binding이 남아 있는 storage·client는 삭제가 거부된다. Terraform destroy는 의존 역순이라 이 순서를 자동으로 지킨다.
+- 삭제는 참조부터다: client가 참조하는 storage는 삭제가 거부된다 (FK). Terraform destroy는 의존 역순이라 이 순서를 자동으로 지킨다.
 - 부팅은 등록된 storage들의 접근을 재검증한다. 실패하면 부팅 중단 (ADR 001).
 
 ## 키와 비밀
@@ -29,15 +29,15 @@
 
 ## v0 배치: 명시 선언만
 
-- binding은 storage **하나**를 가리킨다. create는 (client, intent) → binding → storage를 해석해 그곳에만 저장한다.
-- 자동 선택 없음, 자동 이동 없음. binding을 바꾸면 새 파일만 새 곳으로 간다. 후보 풀·선택 전략은 자동 배치가 올 때 확장한다 (ADR 001의 방향).
-- 일괄 배치 변경은 Terraform 참조가 담당한다 — 여러 binding이 같은 storage 참조(`filegate_storage_s3.x.id`)를 공유하면, 선언 한 줄이 바뀔 때 전부 따라간다.
+- client는 storage **하나**를 소유한다. create는 client의 `storage_id`를 해석해 그곳에만 저장한다.
+- 자동 선택 없음, 자동 이동 없음. client의 storage_id를 바꾸면 새 파일만 새 곳으로 간다. 후보 풀·선택 전략은 자동 배치가 올 때 확장한다 (ADR 001의 방향).
+- 일괄 배치 변경은 Terraform 참조가 담당한다 — 여러 client가 같은 storage 참조(`filegate_storage_s3.x.id`)를 공유하면, 선언 한 줄이 바뀔 때 전부 따라간다.
 
 ## 자동화 단계 (방향)
 
 - **Level 0 (v0)**: 이동 없음.
 - **Level 1**: reconciler가 이동 계획만 계산해 기록하고, 운영자 승인 후에만 집행한다 (plan/approve).
-- **Level 2**: 명시적으로 켠 binding만 승인 없이 자동 수렴한다. 기본은 manual이다.
+- **Level 2**: 명시적으로 켠 배치만 승인 없이 자동 수렴한다. 기본은 manual이다.
 
 ## 운영자 제어
 
@@ -48,5 +48,5 @@
 ## 경계선
 
 - 이 문서는 모양과 방향만 정한다. 스키마·엔드포인트·CLI 동사 목록은 구현의 영역이다.
-- 구축 순서: 등록 테이블 → storage 등록 API(시크릿 암호화 때문에 SQL 시드 불가; clients·bindings는 SQL 시드 가능) → 등록부 전체의 Terraform 리소스 → 도메인 오퍼레이션([spec 00](00-operations.md)) → 나머지 운영자 API.
+- 구축 순서: 등록 테이블 → storage 등록 API(시크릿 암호화 때문에 SQL 시드 불가; clients는 SQL 시드 가능) → 등록부 전체의 Terraform 리소스 → 도메인 오퍼레이션([spec 00](00-operations.md)) → 나머지 운영자 API.
 - 클라이언트 인증 미들웨어(키 해시 → client 신원 부착)는 인증이 필요한 첫 오퍼레이션과 함께 구현한다. filegate 자체 키다 — authgate에 의존하지 않는다 (공리 3).

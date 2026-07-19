@@ -37,10 +37,10 @@
 
 ### create — 쓰기 lease 발급
 
-- 입력: intent, 선언 크기. 선택: content_type, 선언 MD5. 0바이트도 유효한 선언이다.
+- 입력: 선언 크기. 선택: content_type, 선언 MD5. 0바이트도 유효한 선언이다.
   - content_type은 서명에 포함해야 강제된다 (실측).
   - 선언 MD5는 commit이 ETag와 대조한다. 단일 PUT의 ETag = MD5다 (실측).
-- 처리: 선언 해석 ((client, intent) → binding → storage — [spec 01](01-registry.md), v0는 명시 선언 단일 대상), file_id 발급, 대여 이력 기록.
+- 처리: 배치 해석 (client의 `storage_id` → storage — [spec 01](01-registry.md), v0는 client가 소유한 단일 storage), file_id 발급, 대여 이력 기록.
 - 출력: file_id, 만료가 있는 PUT URL. URL 구조는 계약이 아니다 (직결이면 저장소 presigned, 중계면 filegate 엔드포인트).
 - capacity로 발급을 거부하지 않는다 — capacity는 usage 조회의 관찰 기준선일 뿐이다. 물리 한계는 저장소가 낸다 (fs는 디스크 풀, object storage는 사실상 무한). 배치·정리 판단은 관찰을 본 운영자의 몫이다.
 - 상태: `pending`. commit 전까지 파일이 아니다.
@@ -62,7 +62,7 @@
 ### stat — 메타데이터 조회
 
 - 입력: file_id. 클라이언트는 자기 소유 file_id만 조회한다.
-- 출력: 상태(`pending`|`active`|`deleted`), 크기, intent. (location·URL은 제외.)
+- 출력: 상태(`pending`|`active`|`deleted`), 크기. (location·URL은 제외.)
 - `deleted`의 stat은 **보존 기간(90일)까지** 답한다 — 종착 행 정리(아래 상태 절) 뒤에는 404와 구분되지 않는다.
 
 ### delete — 삭제 결정
@@ -94,7 +94,7 @@ sequenceDiagram
 
     U->>S: 업로드 요청
     S->>S: 유저 권한 확인 (서비스 몫)
-    S->>F: create(intent, 크기)
+    S->>F: create(크기)
     F->>F: 선언 해석 + 기록
     F-->>S: file_id + PUT URL
     S-->>U: PUT URL 위임
@@ -186,13 +186,13 @@ fs:       fg/{client}/{yyyy}/{mm}/{zz}/{file_id}[.ext]
 | 사용량 관찰 | 완전 | 항상 조회 시점 파생 — 저장 카운터가 없어 재구축할 것도 없다 |
 | 점유 시계열(usage_snapshot)·대여 이력(lease_history) | 소실 | 박제·기록된 관찰은 재계산 불가 — pg_dump가 유일한 보호 |
 | 파일의 의미(어느 노트의 첨부인지) | 완전 | 서비스 DB의 file_id (ADR 003 — 서비스가 두 번째 장부) |
-| intent | 소실 | 키에 없음 — 배치에만 쓰이므로 사후엔 정보성 |
+| 배치(client.storage_id) | 소실 | 객체 키엔 client_id만 있다 — 어느 storage였는지는 Terraform 재적용으로 복원 |
 | deleted(미purge) 결정 | 소실 | detach는 DB에만 있는 결정 — 전부 active로 과잉 복구되고, 서비스가 재삭제하면 끝 |
 
 복구의 오류 방향은 항상 **과잉 복구**다(직결의 미커밋 객체·삭제 결정이
 active로 살아남) — 데이터를 잃는 방향의 오류는 구조적으로 없다.
 pg_dump 백업은 여전히 권장하지만, 잃는 것이 "전부"가 아니라
-"intent와 삭제 결정"으로 줄었다.
+"배치와 삭제 결정"으로 줄었다.
 
 **기각 기록** (같은 고민의 반복 방지): UUIDv7 등 시간 내장 ID — 경로 날짜와
 벤더 mtime이 같은 정보를 이미 가지므로 철회. object_key를 저장하지 않고

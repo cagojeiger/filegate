@@ -33,14 +33,6 @@ pub(super) async fn put_object(
     headers: &HeaderMap,
     body: Body,
 ) -> S3Result {
-    // client == bucket: 인증된 클라이언트의 버킷은 자기 id뿐이다.
-    if bucket != client_id {
-        return Err(xml_error(
-            StatusCode::NOT_FOUND,
-            "NoSuchBucket",
-            "the specified bucket does not exist",
-        ));
-    }
     let content_length = header_str(headers, "content-length")
         .and_then(|v| v.parse::<i64>().ok())
         .ok_or_else(|| {
@@ -407,4 +399,76 @@ pub(super) async fn delete_object(
         tracing::info!(event = "s3.delete", client = %client_id, bucket, key, file = %file_id);
     }
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn with_range(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("range", HeaderValue::from_str(value).unwrap());
+        headers
+    }
+
+    #[test]
+    fn no_range_header_reads_the_whole_object() {
+        assert!(matches!(
+            parse_range(&HeaderMap::new(), 100),
+            RangeReq::Full
+        ));
+    }
+
+    #[test]
+    fn byte_span_is_parsed_inclusive() {
+        assert!(matches!(
+            parse_range(&with_range("bytes=0-4"), 100),
+            RangeReq::Span(0, 4)
+        ));
+    }
+
+    #[test]
+    fn open_ended_span_runs_to_the_last_byte() {
+        // bytes=N- → 끝은 total-1 (마지막 바이트).
+        assert!(matches!(
+            parse_range(&with_range("bytes=5-"), 100),
+            RangeReq::Span(5, 99)
+        ));
+    }
+
+    #[test]
+    fn start_at_or_past_total_is_unsatisfiable() {
+        assert!(matches!(
+            parse_range(&with_range("bytes=100-"), 100),
+            RangeReq::Unsatisfiable
+        ));
+    }
+
+    #[test]
+    fn malformed_range_falls_back_to_full() {
+        // 접두 없음·start 비정수·suffix(-n) 형태는 모두 전체로 답한다.
+        assert!(matches!(
+            parse_range(&with_range("weird"), 100),
+            RangeReq::Full
+        ));
+        assert!(matches!(
+            parse_range(&with_range("bytes=abc-5"), 100),
+            RangeReq::Full
+        ));
+        assert!(matches!(
+            parse_range(&with_range("bytes=-20"), 100),
+            RangeReq::Full
+        ));
+    }
+
+    #[test]
+    fn empty_object_range_is_unsatisfiable() {
+        // total=0에선 start=0도 0 >= 0이라 만족 불가다 (416).
+        assert!(matches!(
+            parse_range(&with_range("bytes=0-"), 0),
+            RangeReq::Unsatisfiable
+        ));
+    }
 }
