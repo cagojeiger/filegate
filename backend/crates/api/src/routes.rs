@@ -92,7 +92,7 @@ pub fn app(state: AppState) -> Router {
 /// 요청 telemetry — request-id 생성/전파 + trace 스팬. 컨트롤·바이트·S3 표면이
 /// 한 리스너에서 공유한다: 모든 표면이 request-id와 request.end를 갖도록.
 /// 실행 순서는 SetRequestId → Trace → 핸들러다.
-pub(crate) fn with_telemetry(router: Router) -> Router {
+fn with_telemetry(router: Router) -> Router {
     router
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(
