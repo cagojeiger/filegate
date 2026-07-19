@@ -195,12 +195,16 @@ async fn client_key_exists_checks_ownership(pool: PgPool) {
     registry::insert_client_key(&pool, "owner", HASH)
         .await
         .unwrap();
-    assert!(registry::client_key_exists(&pool, "owner", HASH)
-        .await
-        .unwrap());
-    assert!(!registry::client_key_exists(&pool, "other", HASH)
-        .await
-        .unwrap());
+    assert!(
+        registry::client_key_exists(&pool, "owner", HASH)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !registry::client_key_exists(&pool, "other", HASH)
+            .await
+            .unwrap()
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -208,10 +212,12 @@ async fn deleting_client_cascades_its_keys(pool: PgPool) {
     registry::insert_client(&pool, "c").await.unwrap();
     registry::insert_client_key(&pool, "c", HASH).await.unwrap();
     registry::delete_client(&pool, "c").await.unwrap();
-    assert!(registry::list_client_keys(&pool, "c")
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        registry::list_client_keys(&pool, "c")
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(!registry::client_key_exists(&pool, "c", HASH).await.unwrap());
 }
 

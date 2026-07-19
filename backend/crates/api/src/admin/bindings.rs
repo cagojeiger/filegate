@@ -4,14 +4,14 @@
 //! 전용(없으면 404) — Terraform의 Create/Update 라이프사이클과 1:1이다.
 //! storage 포인터 교체가 곧 배치 변경이다 (spec 01).
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use filegate_db::registry::{self, BindingRow};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{not_found, ApiError};
+use crate::error::{ApiError, not_found};
 use crate::routes::AppState;
 
 #[derive(Deserialize)]

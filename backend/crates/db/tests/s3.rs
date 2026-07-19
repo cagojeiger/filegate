@@ -90,10 +90,12 @@ async fn credential_maps_access_key_to_client(pool: PgPool) {
     assert_eq!(found.secret_ciphertext, CT);
     assert_eq!(found.enc_key_id, "v1");
     // 모르는 access key는 None — 403의 재료.
-    assert!(s3::get_credential(&pool, "fgakffffffffffffffff")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        s3::get_credential(&pool, "fgakffffffffffffffff")
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         s3::list_credentials(&pool, "c").await.unwrap(),
         vec!["fgak0123456789abcdef".to_owned()]
@@ -117,9 +119,11 @@ async fn credential_maps_access_key_to_client(pool: PgPool) {
 async fn credential_requires_registered_client_and_slug_form(pool: PgPool) {
     wire(&pool).await;
     // 미등록 client — FK가 거부한다.
-    assert!(add_cred(&pool, "fgak0123456789abcdef", "ghost")
-        .await
-        .is_err());
+    assert!(
+        add_cred(&pool, "fgak0123456789abcdef", "ghost")
+            .await
+            .is_err()
+    );
     // 형태 위반(대문자) — CHECK가 거부한다.
     assert!(add_cred(&pool, "FGAK0123456789ABCDEF", "c").await.is_err());
 }
@@ -163,10 +167,12 @@ async fn key_overwrite_returns_displaced_file(pool: PgPool) {
             .unwrap(),
         Some(second.file_id)
     );
-    assert!(s3::delete_key(&pool, "c", INTENT, "dir/a.bin")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        s3::delete_key(&pool, "c", INTENT, "dir/a.bin")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -227,9 +233,11 @@ async fn key_mapping_dies_with_the_file_row(pool: PgPool) {
         .await
         .unwrap();
     let candidates = files::expired_pending(&pool, 10).await.unwrap();
-    assert!(files::finalize_reclaim(&pool, &candidates[0])
-        .await
-        .unwrap());
+    assert!(
+        files::finalize_reclaim(&pool, &candidates[0])
+            .await
+            .unwrap()
+    );
     files::prune_terminal_leases(&pool, 0, 10).await.unwrap();
     sqlx::query("UPDATE files SET created_at = now() - interval '91 days' WHERE id = $1")
         .bind(file.file_id)
@@ -242,8 +250,10 @@ async fn key_mapping_dies_with_the_file_row(pool: PgPool) {
             .unwrap(),
         1
     );
-    assert!(s3::get_key(&pool, "c", INTENT, "dir/b.bin")
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        s3::get_key(&pool, "c", INTENT, "dir/b.bin")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }

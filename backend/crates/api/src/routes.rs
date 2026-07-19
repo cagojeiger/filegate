@@ -16,13 +16,13 @@ use axum::extract::{MatchedPath, Request, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::{middleware, Json, Router};
+use axum::{Json, Router, middleware};
 use filegate_db::PgPool;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
-use tracing::{info, info_span, Span};
+use tracing::{Span, info, info_span};
 
 /// 컨트롤 API 요청 본문 상한. 바이트는 이 표면을 지나지 않는다 (공리 2).
 const CONTROL_BODY_LIMIT: usize = 1024 * 1024;
@@ -191,7 +191,7 @@ fn log_request_end(response: &axum::response::Response, latency: Duration, span:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::{header, HeaderMap, HeaderValue};
+    use axum::http::{HeaderMap, HeaderValue, header};
 
     #[test]
     fn bearer_token_extracts_only_a_well_formed_bearer_header() {

@@ -74,9 +74,11 @@ async fn create_ok(pool: &PgPool, client: &str, intent: &str, size: i64) -> Crea
 /// create → commit 으로 active 파일을 만든다.
 async fn commit_one(pool: &PgPool, client: &str, intent: &str, size: i64) {
     let file = create_ok(pool, client, intent, size).await;
-    assert!(files::finalize_commit(pool, file.file_id, "etag")
-        .await
-        .unwrap());
+    assert!(
+        files::finalize_commit(pool, file.file_id, "etag")
+            .await
+            .unwrap()
+    );
 }
 
 fn today() -> NaiveDate {

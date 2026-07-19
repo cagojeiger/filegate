@@ -120,14 +120,18 @@ async fn create_beyond_capacity_is_not_rejected(pool: PgPool) {
 async fn commit_moves_reserved_to_active(pool: PgPool) {
     wire(&pool, 1000).await;
     let file = create_ok(&pool, 100).await;
-    assert!(files::finalize_commit(&pool, file.file_id, "etag")
-        .await
-        .unwrap());
+    assert!(
+        files::finalize_commit(&pool, file.file_id, "etag")
+            .await
+            .unwrap()
+    );
     assert_eq!(observed(&pool).await, (0, 100, 0));
     // 이중 commit은 전이 경합의 패자 — false.
-    assert!(!files::finalize_commit(&pool, file.file_id, "etag")
-        .await
-        .unwrap());
+    assert!(
+        !files::finalize_commit(&pool, file.file_id, "etag")
+            .await
+            .unwrap()
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -304,9 +308,11 @@ async fn prune_terminal_files_keeps_occupied_and_leased_rows(pool: PgPool) {
         .await
         .unwrap();
     let candidates = files::expired_pending(&pool, 10).await.unwrap();
-    assert!(files::finalize_reclaim(&pool, &candidates[0])
-        .await
-        .unwrap());
+    assert!(
+        files::finalize_reclaim(&pool, &candidates[0])
+            .await
+            .unwrap()
+    );
     sqlx::query("UPDATE files SET created_at = now() - interval '91 days' WHERE id = $1")
         .bind(reclaimed.file_id)
         .execute(&pool)

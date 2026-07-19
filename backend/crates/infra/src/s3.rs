@@ -71,12 +71,11 @@ pub struct S3ClientCache {
 impl S3ClientCache {
     /// id는 등록부 storage id — 갱신 시 옛 항목이 제자리 교체되게 하는 키.
     pub fn get(&self, id: &str, spec: &S3StorageSpec, address: Address) -> S3Storage {
-        if let Ok(cache) = self.inner.read() {
-            if let Some((cached_spec, storage)) = cache.get(&(id.to_owned(), address)) {
-                if cached_spec == spec {
-                    return storage.clone();
-                }
-            }
+        if let Ok(cache) = self.inner.read()
+            && let Some((cached_spec, storage)) = cache.get(&(id.to_owned(), address))
+            && cached_spec == spec
+        {
+            return storage.clone();
         }
         let storage = client(spec, address);
         if let Ok(mut cache) = self.inner.write() {
@@ -548,11 +547,7 @@ pub async fn abort_multipart(
                 .raw_response()
                 .map(|response| response.status().as_u16() == 404)
                 .unwrap_or(false);
-            if gone {
-                Ok(())
-            } else {
-                Err(error.into())
-            }
+            if gone { Ok(()) } else { Err(error.into()) }
         }
     }
 }

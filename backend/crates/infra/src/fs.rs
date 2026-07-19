@@ -134,10 +134,10 @@ pub async fn sweep_stale_temps(
         if !name.starts_with(".fg-tmp-") {
             continue;
         }
-        if let Some(lease_id) = name.strip_prefix(".fg-tmp-mp-") {
-            if protected_mp_leases.contains(lease_id) {
-                continue;
-            }
+        if let Some(lease_id) = name.strip_prefix(".fg-tmp-mp-")
+            && protected_mp_leases.contains(lease_id)
+        {
+            continue;
         }
         let Ok(meta) = entry.metadata().await else {
             continue;

@@ -108,7 +108,7 @@ impl Config {
                 Some(other) => {
                     return Err(Error::config(format!(
                         "FILEGATE_LOG_FORMAT must be pretty|json, got '{other}'"
-                    )))
+                    )));
                 }
             },
             public_url: match env("FILEGATE_PUBLIC_URL") {

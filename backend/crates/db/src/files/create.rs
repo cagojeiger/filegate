@@ -7,7 +7,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::registry::{StorageRow, STORAGE_COLUMNS};
+use crate::registry::{STORAGE_COLUMNS, StorageRow};
 
 /// create 요청의 선언 (spec 00: intent, 크기, 선택 항목들).
 pub struct CreateSpec<'a> {

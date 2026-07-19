@@ -10,16 +10,16 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use filegate_db::files::{self, CreateOutcome, CreateSpec, DeleteOutcome};
-use filegate_infra::{s3_head_object, s3_presign_get, s3_presign_put, Address};
+use filegate_infra::{Address, s3_head_object, s3_presign_get, s3_presign_put};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::relay::{relay_base, relay_url, RelaySecret};
 use super::ClientId;
-use crate::error::{bad_request, conflict, internal, not_found, ApiError};
+use super::relay::{RelaySecret, relay_base, relay_url};
+use crate::error::{ApiError, bad_request, conflict, internal, not_found};
 use crate::lease::{READ_LEASE_TTL, WRITE_LEASE_TTL};
 use crate::routes::AppState;
-use crate::storage_access::{backend_from_row, StorageBackend};
+use crate::storage_access::{StorageBackend, backend_from_row};
 use crate::validation::{classify_upload, content_type_ok, declared_md5_format_ok};
 
 #[derive(Deserialize)]
@@ -74,10 +74,10 @@ pub(super) async fn create(
         body.declared_md5.is_some(),
     )
     .map_err(bad_request)?;
-    if let Some(md5) = &body.declared_md5 {
-        if !declared_md5_format_ok(md5) {
-            return Err(bad_request("declared_md5 must be 32 hex chars"));
-        }
+    if let Some(md5) = &body.declared_md5
+        && !declared_md5_format_ok(md5)
+    {
+        return Err(bad_request("declared_md5 must be 32 hex chars"));
     }
     // intent는 슬러그 어휘다 (등록부 CHECK와 같은 형태). 형태가 아니면
     // binding이 존재할 수 없으므로 조회 없이 같은 404로 답한다 — NUL 같은
@@ -85,10 +85,10 @@ pub(super) async fn create(
     if !is_intent_slug(&body.intent) {
         return Err(not_found("unknown intent"));
     }
-    if let Some(content_type) = &body.content_type {
-        if !content_type_ok(content_type) {
-            return Err(bad_request("invalid content_type"));
-        }
+    if let Some(content_type) = &body.content_type
+        && !content_type_ok(content_type)
+    {
+        return Err(bad_request("invalid content_type"));
     }
 
     let spec = CreateSpec {
@@ -264,10 +264,10 @@ pub(super) async fn commit(
     if actual_size != file.declared_size {
         return Err(bad_request("uploaded size does not match declaration"));
     }
-    if let Some(declared_md5) = &file.declared_md5 {
-        if !declared_md5.eq_ignore_ascii_case(&etag) {
-            return Err(bad_request("uploaded content does not match declared md5"));
-        }
+    if let Some(declared_md5) = &file.declared_md5
+        && !declared_md5.eq_ignore_ascii_case(&etag)
+    {
+        return Err(bad_request("uploaded content does not match declared md5"));
     }
 
     if files::finalize_commit(&state.pool, file_id, &etag).await? {
@@ -462,7 +462,7 @@ pub(super) fn committed_response(file_id: Uuid, etag: String) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_intent_slug, CreateBody};
+    use super::{CreateBody, is_intent_slug};
 
     #[test]
     fn create_body_accepts_bucket_as_alias_for_intent() {

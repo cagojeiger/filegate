@@ -2,9 +2,9 @@
 //! 핸들러는 `Result<_, ApiError>`를 돌려주고 `?`로 전파한다 —
 //! 상태 코드 규칙이 이 파일 한 곳에 산다.
 
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use filegate_db::registry::{self, WriteOp, WriteViolation};
 
 pub(crate) enum ApiError {
