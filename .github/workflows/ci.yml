@@ -61,3 +61,22 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # RUSTSEC-2023-0071 (rsa/Marvin): rsa는 sqlx-mysql 전용 전이 의존성이라
+      # postgres-only인 이 워크스페이스 빌드엔 컴파일되지 않는다(cargo tree -i로 확인,
+      # Cargo.lock에만 잔존). 상위 픽스 릴리스도 아직 없다 — 근거 있는 무시.
+      - name: Audit
+        run: cargo audit --ignore RUSTSEC-2023-0071
