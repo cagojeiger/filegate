@@ -39,6 +39,17 @@ fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
+/// SigV4 서명 계산 — secret + scope(date/region) + string_to_sign → hex 서명.
+/// service는 s3, terminator는 aws4_request로 고정이다 (authenticate가 scope를
+/// 이미 검증한 뒤 부른다). 순수 함수라 알려진 답 벡터로 테스트한다.
+fn sign(secret: &str, scope_date: &str, region: &str, string_to_sign: &str) -> String {
+    let k_date = hmac_sha256(format!("AWS4{secret}").as_bytes(), scope_date.as_bytes());
+    let k_region = hmac_sha256(&k_date, region.as_bytes());
+    let k_service = hmac_sha256(&k_region, b"s3");
+    let k_signing = hmac_sha256(&k_service, b"aws4_request");
+    hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()))
+}
+
 /// 검증에 필요한 재료 — 두 서명 모드가 같은 형태로 모은다. 여기까지 오면
 /// 이후 조립·재계산은 모드와 무관하다.
 struct SigV4 {
@@ -330,14 +341,12 @@ pub(super) async fn authenticate(
         sha256_hex(canonical_request.as_bytes())
     );
 
-    let k_date = hmac_sha256(
-        format!("AWS4{}", secret.expose_secret()).as_bytes(),
-        sig.scope_date.as_bytes(),
+    let expected = sign(
+        secret.expose_secret(),
+        &sig.scope_date,
+        &sig.region,
+        &string_to_sign,
     );
-    let k_region = hmac_sha256(&k_date, sig.region.as_bytes());
-    let k_service = hmac_sha256(&k_region, b"s3");
-    let k_signing = hmac_sha256(&k_service, b"aws4_request");
-    let expected = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
 
     // 서명 비교는 상수 시간 (config.rs 연산자 토큰 대조와 같은 프리미티브).
     if bool::from(expected.as_bytes().ct_eq(sig.signature.as_bytes())) {
@@ -395,6 +404,26 @@ mod tests {
         assert_eq!(sig.signed_headers, vec!["host".to_owned()]);
         assert_eq!(sig.payload_hash, "UNSIGNED-PAYLOAD");
         assert_eq!(sig.signature, "deadbeef");
+    }
+
+    #[test]
+    fn sign_matches_a_known_answer_vector() {
+        // AWS SigV4(S3) 서명 체인의 자기정합 알려진 답 — secret·scope·
+        // string-to-sign을 고정하면 서명은 이 hex다. 파이썬 hmac 참조와 대조.
+        let string_to_sign = "AWS4-HMAC-SHA256\n\
+             20130524T000000Z\n\
+             20130524/us-east-1/s3/aws4_request\n\
+             7344ae5b7ee6c3e7e6b0fe0640412a37625d1fbfff95c48bbb2dc43964946972";
+        let got = sign(
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            "20130524",
+            "us-east-1",
+            string_to_sign,
+        );
+        assert_eq!(
+            got,
+            "67fe34c8530db585abddc51067328adfedb6e42487d2566dc7d927d6e2722900"
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@ filegate를 지나는 것이다 (ADR [006](../adr/006-s3-compat-surface.md) —
 |---|---|
 | endpoint | `https://filegate.internal` (컨트롤과 같은 리스너 — 전용 포트 없음) |
 | access key id / secret key | 등록부가 발급 |
-| 버킷 이름 | 운영자가 지정한 intent 하나 (예: `attachment`) |
+| 버킷 이름 | 서비스의 client id (버킷 = client id, 예: `notegate`) |
 
 ## 붙는 법 (boto3)
 

@@ -30,5 +30,10 @@ tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+[dev-dependencies]
+# CORS preflight 라우터 테스트용 oneshot (ServiceExt). tower는 axum 경유로
+# 이미 잠겨 있고, util feature만 테스트에서 켠다.
+tower = { version = "0.5", features = ["util"] }
+
 [lints]
 workspace = true

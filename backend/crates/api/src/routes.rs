@@ -28,6 +28,11 @@ use tracing::{Span, info, info_span};
 const CONTROL_BODY_LIMIT: usize = 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// 단일 리스너의 최상위 제어 경로 세그먼트다. client id(= S3 버킷, 루트
+/// path-style)가 이 중 하나와 같으면 제어 라우트를 가리므로 예약된다
+/// (admin::clients가 client id로 거부한다).
+pub(crate) const RESERVED_TOP_LEVEL: &[&str] = &["api", "blobs", "healthz", "readyz"];
+
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
@@ -83,7 +88,7 @@ pub fn app(state: AppState, s3_cors_allowed_origins: &[String]) -> Router {
     // (admin::clients가 client id로 거부한다).
     let app = Router::new()
         .merge(control)
-        .nest("/blobs", crate::blobs::routes())
+        .nest("/blobs", crate::blobs::routes(s3_cors_allowed_origins))
         .merge(crate::s3::routes(s3_cors_allowed_origins))
         .with_state(state);
     with_telemetry(app)
@@ -226,5 +231,14 @@ mod tests {
         assert!(is_system_path("/readyz"));
         assert!(!is_system_path("/api/v1/files"));
         assert!(!is_system_path("/"));
+    }
+
+    #[test]
+    fn reserved_top_level_covers_every_control_segment() {
+        // 라우팅 충돌 예약 — 이 목록이 최상위 제어 경로와 어긋나면 client id가
+        // 제어 라우트를 가릴 수 있다 (admin::clients가 이 상수로 거부한다).
+        for segment in ["api", "blobs", "healthz", "readyz"] {
+            assert!(RESERVED_TOP_LEVEL.contains(&segment));
+        }
     }
 }
