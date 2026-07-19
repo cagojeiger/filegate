@@ -19,11 +19,24 @@ use std::time::Duration;
 
 use filegate_core::Crypto;
 use filegate_db::files::{self, SweepCandidate};
-use filegate_db::{PgPool, registry, usage};
+use filegate_db::{PgPool, moves, registry, usage};
 use filegate_infra::{Address, S3ClientCache, fs as fs_backend, s3_delete_object, s3_head_object};
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
+
+/// 이동 잡의 정책 파라미터 — 재시도 상한·삭제 지연·backoff. main.rs가
+/// config에서 구성해 spawn에 넘긴다. 요청 경로와 무관한 reconciler 튜닝값이다.
+#[derive(Debug, Clone, Copy)]
+pub struct MovePolicy {
+    /// 이 횟수만큼 실패하면 이동을 `failed`로 멈춘다 (운영자 재요청이 재시도).
+    pub max_attempts: i32,
+    /// 스왑 후 old 실물을 지우기까지의 지연 — presigned GET 수명(READ_LEASE_TTL)
+    /// 이상이어야 발급된 URL이 살아 있는 동안 실물이 사라지지 않는다.
+    pub delete_delay_secs: i64,
+    /// 실패 후 다음 시도까지의 backoff 기준 (attempts 배수로 증가).
+    pub retry_backoff_secs: i64,
+}
 
 /// 한 tick에 잡별로 처리하는 최대 건수 (유계 배치, docs/stack).
 const BATCH_LIMIT: i64 = 20;
@@ -49,6 +62,7 @@ pub fn spawn(
     crypto: Arc<Crypto>,
     s3_clients: Arc<S3ClientCache>,
     tick: Duration,
+    move_policy: MovePolicy,
     shutdown: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -69,7 +83,7 @@ pub fn spawn(
                     // 락을 못 이긴 pod의 잔여물이 밀린다.
                     sweep_local_temps().await;
                     let result = filegate_db::with_reconciler_lock(&pool, || async {
-                        run_jobs(&pool, &crypto, &s3_clients).await;
+                        run_jobs(&pool, &crypto, &s3_clients, &move_policy).await;
                     })
                     .await;
                     match result {
@@ -86,7 +100,12 @@ pub fn spawn(
     })
 }
 
-async fn run_jobs(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
+async fn run_jobs(
+    pool: &PgPool,
+    crypto: &Crypto,
+    s3_clients: &S3ClientCache,
+    move_policy: &MovePolicy,
+) {
     // 잡 0: 관찰 확정 (spec 00) — 단일 PUT pending의 실물이 선언과 맞으면
     // 서비스의 commit 없이 확정한다. 직결 presigned 패턴("URL 주고 잊기")이
     // filegate에서도 성립하는 지점이다. commit API는 즉시 확정이 필요한
@@ -175,6 +194,155 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
             }
         }
         Err(error) => tracing::error!(event = "reconciler.scan_failed", job = "purge", %error),
+    }
+
+    // 잡 M1: move.execute — 이동 요청의 복사·검증·스왑. 황금률: dest 복사가
+    // 검증되고 포인터 스왑이 커밋되기 전에는 source를 절대 건드리지 않는다.
+    // 스왑 패배(Ok(false))는 경합에 진 것 — 요청 경로가 이겼으니 dest stray만
+    // 치우고 이동을 조용히 버린다. 복사 실패는 mark_attempt로 backoff·park.
+    match moves::due_moves(pool, BATCH_LIMIT).await {
+        Ok(candidates) => {
+            for candidate in candidates {
+                match crate::storage_access::copy_object(pool, crypto, s3_clients, &candidate).await
+                {
+                    Ok(()) => match moves::finalize_swap(
+                        pool,
+                        candidate.file_id,
+                        &candidate.source_storage_id,
+                        &candidate.dest_storage_id,
+                        &candidate.object_key,
+                        move_policy.delete_delay_secs,
+                    )
+                    .await
+                    {
+                        Ok(true) => tracing::info!(
+                            event = "move.swapped",
+                            file = %candidate.file_id,
+                            dest = %candidate.dest_storage_id,
+                        ),
+                        // 스왑 패배 — dest에 남은 stray를 best-effort로 치우고 종료.
+                        Ok(false) => {
+                            if let Err(error) = crate::storage_access::delete_object_at(
+                                pool,
+                                crypto,
+                                s3_clients,
+                                &candidate.dest_storage_id,
+                                &candidate.object_key,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    event = "reconciler.move_failed",
+                                    file = %candidate.file_id,
+                                    stage = "lost_cleanup",
+                                    %error,
+                                );
+                            }
+                            match moves::finish_move(pool, candidate.file_id).await {
+                                Ok(()) => {
+                                    tracing::info!(event = "move.lost", file = %candidate.file_id)
+                                }
+                                Err(error) => tracing::error!(
+                                    event = "reconciler.move_failed",
+                                    file = %candidate.file_id,
+                                    stage = "lost_finish",
+                                    %error,
+                                ),
+                            }
+                        }
+                        Err(error) => {
+                            mark_move_attempt(
+                                pool,
+                                candidate.file_id,
+                                &error.to_string(),
+                                move_policy,
+                            )
+                            .await
+                        }
+                    },
+                    Err(error) => {
+                        mark_move_attempt(pool, candidate.file_id, &error.to_string(), move_policy)
+                            .await
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", job = "move_execute", %error)
+        }
+    }
+
+    // 잡 M2: move.sweep — 스왑이 끝나 지연이 지난 old 실물을 지운다. 지우고
+    // 나서만 저널을 지운다 (멱등: 남은 실물이 없어도 삭제는 성공). sweep 실패도
+    // mark_attempt로 park해 STUCK 가시성을 준다.
+    match moves::due_deletes(pool, BATCH_LIMIT).await {
+        Ok(candidates) => {
+            for candidate in candidates {
+                match crate::storage_access::delete_object_at(
+                    pool,
+                    crypto,
+                    s3_clients,
+                    &candidate.source_storage_id,
+                    &candidate.object_key,
+                )
+                .await
+                {
+                    Ok(()) => match moves::finish_move(pool, candidate.file_id).await {
+                        Ok(()) => {
+                            tracing::info!(event = "move.swept", file = %candidate.file_id)
+                        }
+                        Err(error) => tracing::error!(
+                            event = "reconciler.move_failed",
+                            file = %candidate.file_id,
+                            stage = "sweep_finish",
+                            %error,
+                        ),
+                    },
+                    Err(error) => {
+                        mark_move_attempt(pool, candidate.file_id, &error.to_string(), move_policy)
+                            .await
+                    }
+                }
+            }
+        }
+        Err(error) => tracing::error!(event = "reconciler.scan_failed", job = "move_sweep", %error),
+    }
+
+    // 잡 M3: move.stale — 경합에 진 requested 이동을 치운다. dest에 stray가
+    // 남았을 수 있으니(없어도 무해) 지우고 저널을 지운다. 이 잡이 없으면 진
+    // 이동이 dest에 고아 객체를 남긴 채 due_moves 조인 밖에 영원히 머문다.
+    match moves::stale_requested(pool, BATCH_LIMIT).await {
+        Ok(candidates) => {
+            for candidate in candidates {
+                match crate::storage_access::delete_object_at(
+                    pool,
+                    crypto,
+                    s3_clients,
+                    &candidate.dest_storage_id,
+                    &candidate.object_key,
+                )
+                .await
+                {
+                    Ok(()) => match moves::finish_move(pool, candidate.file_id).await {
+                        Ok(()) => tracing::info!(
+                            event = "move.stale_cleaned",
+                            file = %candidate.file_id,
+                        ),
+                        Err(error) => tracing::error!(
+                            event = "reconciler.move_failed",
+                            file = %candidate.file_id,
+                            stage = "stale_finish",
+                            %error,
+                        ),
+                    },
+                    Err(error) => {
+                        mark_move_attempt(pool, candidate.file_id, &error.to_string(), move_policy)
+                            .await
+                    }
+                }
+            }
+        }
+        Err(error) => tracing::error!(event = "reconciler.scan_failed", job = "move_stale", %error),
     }
 
     // 잡 3: 만료된 read lease의 원장 정리 — 회계 무관, issued가 무한히
@@ -273,6 +441,29 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
             }
         }
         Err(error) => tracing::error!(event = "reconciler.scan_failed", job = "temps", %error),
+    }
+}
+
+/// 이동 시도 실패를 저널에 남긴다 — 횟수·오류를 기록하고 backoff·park한다.
+/// 세 이동 잡이 공유하는 실패 경로다. 기록 자체가 실패하면(DB) 다음 tick이
+/// 같은 후보를 다시 줍는다 — error 로그만 남긴다.
+async fn mark_move_attempt(pool: &PgPool, file_id: uuid::Uuid, error: &str, policy: &MovePolicy) {
+    tracing::warn!(event = "reconciler.move_failed", file = %file_id, error);
+    if let Err(mark_error) = moves::mark_attempt(
+        pool,
+        file_id,
+        error,
+        policy.max_attempts,
+        policy.retry_backoff_secs,
+    )
+    .await
+    {
+        tracing::error!(
+            event = "reconciler.move_failed",
+            file = %file_id,
+            stage = "mark_attempt",
+            error = %mark_error,
+        );
     }
 }
 

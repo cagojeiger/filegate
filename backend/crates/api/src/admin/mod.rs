@@ -8,6 +8,7 @@
 //! 상태 코드 번역은 error에 산다.
 
 mod clients;
+mod moves;
 mod storages;
 mod usage;
 
@@ -50,6 +51,11 @@ pub fn admin_routes() -> Router<AppState> {
         .route(
             "/clients/{id}/s3-credentials/{access_key_id}",
             axum::routing::delete(clients::s3_credential_delete),
+        )
+        .route("/moves", get(moves::list))
+        .route(
+            "/files/{file_id}/move",
+            axum::routing::post(moves::request_move),
         )
 }
 
