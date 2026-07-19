@@ -10,7 +10,7 @@ filegate를 지나는 것이다 (ADR [006](../adr/006-s3-compat-surface.md) —
 
 | 항목 | 예 |
 |---|---|
-| endpoint | `https://filegate.internal:9010` (S3 표면 전용 리스너) |
+| endpoint | `https://filegate.internal` (컨트롤과 같은 리스너 — 전용 포트 없음) |
 | access key id / secret key | 등록부가 발급 |
 | 버킷 이름 | 운영자가 지정한 intent 하나 (예: `attachment`) |
 

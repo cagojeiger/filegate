@@ -26,9 +26,11 @@ HeadBucket 같은 프로브가 없다.
 
 ### 주소와 어휘
 
-- 표면은 **전용 리스너**(`FILEGATE_S3_BIND`)에 산다 — S3 path-style은
-  루트 경로가 bucket이라, 컨트롤 표면(`/api`·`/blobs`·probes)과 자리
-  경합을 리스너 분리로 없앤다.
+- 표면은 컨트롤과 **한 리스너**(`FILEGATE_BIND`)를 공유한다 — S3 path-style은
+  루트 경로가 bucket이라, 컨트롤 표면(`/api`·`/blobs`·probes)과 겹치는
+  이름(`api`·`blobs`·`healthz`·`readyz`)은 버킷으로 예약되고, 나머지는
+  `/{bucket}/{key}`로 S3가 받는다. 컨트롤 라우트가 우선하고 그 뒤에 S3를
+  병합한다 (routes::app).
 - path-style만 지원한다: `/{bucket}/{key}`. virtual-host style은 보류.
 - **bucket = intent.** 등록된 binding이 없으면 404 `NoSuchBucket`.
   서비스는 운영자가 통보한 기본 버킷 이름 하나만 안다 (ADR 006).
