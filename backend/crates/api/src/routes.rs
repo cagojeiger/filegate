@@ -77,16 +77,21 @@ pub fn app(state: AppState) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             REQUEST_TIMEOUT,
         ));
+    // S3 호환 표면은 control 바깥에 둔다 — 루트 path-style `/{bucket}/{key}`라
+    // 컨트롤 표면과 한 리스너를 공유하되, control의 본문 상한·타임아웃(스트리밍
+    // 업로드를 자른다)은 피한다. api·blobs·probes 이름의 버킷은 예약된다
+    // (admin::clients가 client id로 거부한다).
     let app = Router::new()
         .merge(control)
         .nest("/blobs", crate::blobs::routes())
+        .merge(crate::s3::routes())
         .with_state(state);
     with_telemetry(app)
 }
 
-/// 요청 telemetry — request-id 생성/전파 + trace 스팬. 컨트롤·바이트 표면과
-/// S3 표면(별도 리스너)이 공유한다: 모든 표면이 request-id와 request.end를
-/// 갖도록. 실행 순서는 SetRequestId → Trace → 핸들러다.
+/// 요청 telemetry — request-id 생성/전파 + trace 스팬. 컨트롤·바이트·S3 표면이
+/// 한 리스너에서 공유한다: 모든 표면이 request-id와 request.end를 갖도록.
+/// 실행 순서는 SetRequestId → Trace → 핸들러다.
 pub(crate) fn with_telemetry(router: Router) -> Router {
     router
         .layer(PropagateRequestIdLayer::x_request_id())

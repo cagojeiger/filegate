@@ -26,6 +26,10 @@ struct ClientOut {
     storage_id: String,
 }
 
+/// client id는 곧 S3 버킷이자 단일 리스너의 루트 경로다 — 컨트롤 표면의
+/// 최상위 경로와 겹치는 이름은 버킷으로 쓸 수 없다 (routes::app 병합).
+const RESERVED_CLIENT_IDS: [&str; 4] = ["api", "blobs", "healthz", "readyz"];
+
 #[derive(Deserialize)]
 pub(super) struct ClientKeyCreateBody {
     key_hash: String,
@@ -41,6 +45,11 @@ pub(super) async fn create(
     State(state): State<AppState>,
     Json(body): Json<ClientCreateBody>,
 ) -> Result<Response, ApiError> {
+    if RESERVED_CLIENT_IDS.contains(&body.id.as_str()) {
+        return Err(bad_request(
+            "id is reserved and cannot be used as a client/bucket name",
+        ));
+    }
     // 없는 storage를 가리키는 건 잘못된 입력이다 (FK도 거부하지만 400으로).
     if registry::get_storage(&state.pool, &body.storage_id)
         .await?

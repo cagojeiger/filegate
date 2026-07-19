@@ -71,9 +71,6 @@ pub struct ServerConfig {
     /// multipart part 크기 (균일, 마지막만 나머지). 업로드별로 동결된다 —
     /// 설정 변경은 새 업로드부터다 (spec 02). 벤더 규칙상 5MiB..=5GiB.
     pub part_size_bytes: i64,
-    /// S3 호환 표면의 전용 리스너 주소 (spec 03). 미설정이면 표면이 꺼진다 —
-    /// path-style의 루트 경로 bucket이 컨트롤 표면과 경합하지 않도록 분리한다.
-    pub s3_bind: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -138,10 +135,6 @@ impl Config {
                 .transpose()
                 .map_err(|e| Error::config(format!("FILEGATE_PART_SIZE_BYTES: {e}")))?
                 .unwrap_or(64 * 1024 * 1024),
-            s3_bind: env("FILEGATE_S3_BIND")
-                .map(|v| v.parse())
-                .transpose()
-                .map_err(|e| Error::config(format!("FILEGATE_S3_BIND: {e}")))?,
         };
         // 벤더 규칙 (S3 multipart): part는 5MiB 이상(마지막 제외), 5GiB 이하.
         if !(5 * 1024 * 1024..=5 * 1024 * 1024 * 1024).contains(&server.part_size_bytes) {

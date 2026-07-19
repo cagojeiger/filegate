@@ -24,10 +24,8 @@ use axum::routing::any;
 
 use crate::routes::AppState;
 
-pub fn routes(app: AppState) -> Router {
-    Router::new()
-        .route("/{bucket}/{*key}", any(dispatch))
-        .with_state(app)
+pub fn routes() -> Router<AppState> {
+    Router::new().route("/{bucket}/{*key}", any(dispatch))
 }
 
 /// 핸들러 에러는 이미 완성된 S3 XML 응답이다 — `?`로 즉시 반환된다.
