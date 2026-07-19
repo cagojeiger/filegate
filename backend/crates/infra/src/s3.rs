@@ -87,8 +87,9 @@ impl S3ClientCache {
 }
 
 /// 접근 확인 없이 클라이언트만 구성한다. 요청 경로(presign·head_object)용 —
-/// 접근성은 등록·부팅 재검증이 이미 보증했다.
-pub fn client(spec: &S3StorageSpec, address: Address) -> S3Storage {
+/// 접근성은 등록·부팅 재검증이 이미 보증했다. crate 내부 헬퍼다: 외부는
+/// 캐시 래퍼(S3ClientCache::get)와 connect를 지난다.
+fn client(spec: &S3StorageSpec, address: Address) -> S3Storage {
     let credentials = Credentials::new(
         spec.access_key.clone(),
         spec.secret_key.expose_secret().to_owned(),

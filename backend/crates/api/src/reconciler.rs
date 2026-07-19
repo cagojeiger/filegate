@@ -294,11 +294,6 @@ async fn sweep_local_temps() {
     }
 }
 
-/// 실물 제거 — 등록부에서 백엔드를 복원해 내부 경로로 지운다.
-/// s3 DeleteObject·fs remove 모두 없는 대상에 성공하므로 멱등이다.
-/// multipart 회수 재료가 있으면 함께 치운다 (spec 02): s3는 벤더 세션
-/// 중단(중단하지 않은 미완성 part는 보이지 않게 과금된다), fs는 offset
-/// 기록 중이던 대상 임시 파일.
 /// 실물 관찰 → 선언 대조 → 확정. commit 핸들러와 같은 게이트다 (spec 00):
 /// 크기 일치 + (선언 시) md5 = ETag. 중계는 스트림 중 실측을, 직결은 내부
 /// 주소의 head_object를 대조한다.
@@ -335,6 +330,11 @@ async fn observe_commit(
     Ok(files::finalize_commit(pool, candidate.file_id, &etag).await?)
 }
 
+/// 실물 제거 — 등록부에서 백엔드를 복원해 내부 경로로 지운다.
+/// s3 DeleteObject·fs remove 모두 없는 대상에 성공하므로 멱등이다.
+/// multipart 회수 재료가 있으면 함께 치운다 (spec 02): s3는 벤더 세션
+/// 중단(중단하지 않은 미완성 part는 보이지 않게 과금된다), fs는 offset
+/// 기록 중이던 대상 임시 파일.
 async fn sweep_object(
     pool: &PgPool,
     crypto: &Crypto,
