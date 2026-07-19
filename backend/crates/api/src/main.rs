@@ -71,6 +71,9 @@ async fn main() -> anyhow::Result<()> {
         part_promotions: std::sync::Arc::new(tokio::sync::Semaphore::new(
             blobs::PART_PROMOTION_LIMIT,
         )),
+        spool_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            spool::SPOOL_CONCURRENCY_LIMIT,
+        )),
     };
 
     // S3 호환 표면 — 전용 리스너 (spec 03). 미설정이면 표면이 꺼진다.

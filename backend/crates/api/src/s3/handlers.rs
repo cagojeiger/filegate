@@ -93,6 +93,9 @@ pub(super) async fn put_object(
 
     let backend = backend_from_row(&state.crypto, &created.storage)
         .map_err(|e| xml_internal("backend", e))?;
+    // S3 중계는 공유 임시 볼륨에 스풀한다 — 슬롯이 없으면 대기(백프레셔)해
+    // 동시 스풀 볼륨 고갈을 막는다. 스코프 종료 시 자동 반납된다.
+    let _spool_slot = spool::acquire_spool_slot(&backend, &state.spool_slots).await;
     let temp_name = format!("s3-{}", created.file_id);
     let (temp_path, file) = fs_backend::begin_write(&spool_root(&backend), &temp_name)
         .await

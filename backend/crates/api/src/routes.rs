@@ -45,6 +45,9 @@ pub struct AppState {
     /// fs part 승격 동시성 상한 — 승격은 claim(DB 행 락 + 커넥션)을 쥔 채
     /// 디스크 복사를 하므로, 파드당 동시 승격 수를 묶어 풀 고갈을 막는다.
     pub part_promotions: Arc<tokio::sync::Semaphore>,
+    /// S3 중계 스풀 동시성 상한 — 공유 임시 볼륨(temp_dir)을 채우는 자원
+    /// 고갈(DoS)을 막는다. 진입 시 S3 백엔드만 슬롯을 잡는다(spool 모듈).
+    pub spool_slots: Arc<tokio::sync::Semaphore>,
 }
 
 /// `Authorization: Bearer <token>`에서 토큰을 꺼낸다 — 두 인증 미들웨어
