@@ -60,5 +60,5 @@ filegate를 또 하나의 S3로 등록한다"는 온보딩 — 무수정 AWS SDK
 
 - 서비스 온보딩 = "S3 계정 하나 더": endpoint + key 쌍 + 버킷 이름.
 - 트래픽 비용의 선택권이 서비스 단위로 생긴다: 편의(호환) ↔ 직결(네이티브).
-- 다음 실용 단위는 스파이크 승격이다 — SigV4 검증, 논리키 매핑,
-  Put/Get/Head/Delete 네 오퍼레이션.
+- 스파이크를 승격해 SigV4 검증(header·query-signed), 논리키 매핑,
+  Put/Get/Head/Delete 네 오퍼레이션을 구현했다 (spec 03, api/src/s3).

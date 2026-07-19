@@ -26,20 +26,28 @@
 - 버킷은 홈 리전의 기본 namespace에 있어야 compat API로 접근 가능
 - presigned GET/PUT/HEAD/DELETE 지원, multipart 지원, presigned POST도 최근 추가
 - path-style 권장 (`force_path_style: true`)
-- ⚠️ **버킷 단위 CORS 설정 API가 없음** — 브라우저 직접 PUT(위임 업로드)이 성립하는지 M3에서 실측 필요. PAR 응답에 `access-control-allow-origin`이 온다는 커뮤니티 보고는 있으나 origin 제어 불가. 안 되면 폴백: filegate 중계 모드(ADR 002) 또는 presigned POST(브라우저 HTML 폼용으로 추가된 기능)
+- ⚠️ **버킷 단위 CORS 설정 API가 없음** — 브라우저 직접 PUT(위임 업로드)이 성립하는지 M3에서 실측 필요. PAR 응답에 `access-control-allow-origin`이 온다는 커뮤니티 보고는 있으나 origin 제어 불가. 안 되면 폴백: filegate 중계 모드(ADR 002)
 
 ## filegate 설정 감각
 
-```yaml
-storages:
-  oci-std:
-    endpoint: "https://{namespace}.compat.objectstorage.ap-osaka-1.oraclecloud.com"
-    public_endpoint: 동일 (공개 인터넷)
-    region: "ap-osaka-1"
-    force_path_style: true
-capacity:
-  oci-std: { max_total_bytes: 21474836480 } # 20 GiB = Always Free 상한
+운영자 API로 등록한다 (`POST /api/admin/v1/storages`) — YAML 설정 파일은 없다:
+
+```json
+{
+  "id": "oci-std",
+  "kind": "s3",
+  "endpoint": "https://{namespace}.compat.objectstorage.ap-osaka-1.oraclecloud.com",
+  "region": "ap-osaka-1",
+  "bucket": "oci-std",
+  "force_path_style": true,
+  "access_key": "<Customer Secret Key id>",
+  "secret_key": "<Customer Secret Key>",
+  "capacity_bytes": 21474836480
+}
 ```
+
+`capacity_bytes`는 20 GiB = Always Free 상한. `public_endpoint`는 생략하면
+endpoint와 같은 값으로 등록된다 (공개 인터넷 동일 주소).
 
 ## 출처
 
