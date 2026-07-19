@@ -29,7 +29,11 @@ sqlx = { version = "0.8", default-features = false, features = [
     "uuid",
     "chrono",
 ] }
-aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio"] }
+# TLS 커넥터는 명시적으로 주입한다(infra::s3) — rustls 0.23 + ring로 sqlx와
+# 스택을 통일하고, aws-sdk의 레거시 "rustls"(0.21) 피처를 끊는다. aws-lc가
+# 아니라 ring이라 빌드에 cmake가 필요 없다.
+aws-smithy-http-client = { version = "1", default-features = false, features = ["rustls-ring"] }
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
