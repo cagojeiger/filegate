@@ -108,8 +108,9 @@ async fn serve() -> anyhow::Result<()> {
     };
 
     let http_shutdown = shutdown.clone().cancelled_owned();
+    let app = routes::app(state, &config.server.s3_cors_allowed_origins);
     let server = async move {
-        axum::serve(listener, routes::app(state))
+        axum::serve(listener, app)
             .with_graceful_shutdown(http_shutdown)
             .await
     };
