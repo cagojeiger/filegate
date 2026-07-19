@@ -244,7 +244,7 @@ async fn stale_requested_catches_move_whose_location_vanished(pool: PgPool) {
         .await
         .unwrap();
     assert!(moves::due_moves(&pool, 10).await.unwrap().is_empty());
-    let stale = moves::stale_requested(&pool, 10).await.unwrap();
+    let stale = moves::stale_moves(&pool, 10).await.unwrap();
     assert_eq!(stale.len(), 1);
     assert_eq!(stale[0].file_id, file.file_id);
     assert_eq!(stale[0].dest_storage_id, "d");
@@ -490,4 +490,99 @@ async fn admin_file_detail_includes_location(pool: PgPool) {
             .unwrap()
             .is_none()
     );
+}
+
+// ── 리뷰 회귀: 스왑↔취소 경합·종착 정리 가드 ─────────────────
+
+/// C1 회귀: 복사 중 취소가 끼어들면(저널이 canceled) 스왑은 저널 0행을
+/// 보고 포인터 전이까지 롤백해야 한다 — 커밋되면 취소 정리가 살아있는
+/// dest 실물을 지운다 (스왑→취소 방향의 경합).
+#[sqlx::test(migrations = "./migrations")]
+async fn finalize_swap_rolls_back_when_canceled_mid_copy(pool: PgPool) {
+    wire(&pool).await;
+    let file = active_file(&pool, 100).await;
+    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+        .await
+        .unwrap();
+    // 복사가 도는 사이 운영자가 취소한다.
+    assert!(moves::cancel_move(&pool, file.file_id).await.unwrap());
+    // 스왑은 져야 하고, 포인터·저널 모두 그대로여야 한다.
+    let swapped = moves::finalize_swap(&pool, file.file_id, "s", "d", &file.object_key, 900)
+        .await
+        .unwrap();
+    assert!(!swapped);
+    assert_eq!(location_storage(&pool, file.file_id).await, "s");
+    let (state, _, has_delete_after) = journal(&pool, file.file_id).await;
+    assert_eq!(state, "canceled");
+    assert!(!has_delete_after);
+}
+
+/// H1 회귀: 이동 저널이 남은 종착 파일은 prune이 건너뛴다 (FK로 배치
+/// 전체가 실패하는 대신) — 다른 종착 파일의 정리는 계속된다.
+#[sqlx::test(migrations = "./migrations")]
+async fn prune_terminal_files_skips_files_with_move_rows(pool: PgPool) {
+    wire(&pool).await;
+    // 파일 A: failed 이동이 남은 종착 파일. 파일 B: 저널 없는 종착 파일.
+    let a = active_file(&pool, 100).await;
+    let b = active_file(&pool, 100).await;
+    moves::insert_move(&pool, a.file_id, "s", "d", &a.object_key)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE object_moves SET state = 'failed' WHERE file_id = $1")
+        .bind(a.file_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for file_id in [a.file_id, b.file_id] {
+        sqlx::query(
+            "UPDATE files SET state = 'deleted', deleted_at = now() - interval '1 day' \
+             WHERE id = $1",
+        )
+        .bind(file_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM locations WHERE file_id = $1")
+            .bind(file_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM leases WHERE file_id = $1")
+            .bind(file_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    // B만 정리되고, A는 저널이 정리될 때까지 남는다 — 배치는 에러 없이 돈다.
+    let pruned = files::prune_terminal_files(&pool, 0, 10).await.unwrap();
+    assert_eq!(pruned, 1);
+    let a_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM files WHERE id = $1)")
+        .bind(a.file_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(a_exists);
+}
+
+/// H1 회귀: 파일이 떠난 failed 이동은 stale_moves가 종결 후보로 줍는다 —
+/// 남겨두면 위 가드 때문에 그 파일 행이 영원히 정리되지 않는다.
+#[sqlx::test(migrations = "./migrations")]
+async fn stale_moves_catches_failed_move_after_file_left(pool: PgPool) {
+    wire(&pool).await;
+    let file = active_file(&pool, 100).await;
+    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE object_moves SET state = 'failed' WHERE file_id = $1")
+        .bind(file.file_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // 파일이 active인 동안 failed는 운영자 몫이라 stale이 아니다.
+    assert!(moves::stale_moves(&pool, 10).await.unwrap().is_empty());
+    // 삭제로 파일이 떠나면 stale로 종결된다.
+    files::mark_deleted(&pool, "c", file.file_id).await.unwrap();
+    let stale = moves::stale_moves(&pool, 10).await.unwrap();
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale[0].file_id, file.file_id);
 }

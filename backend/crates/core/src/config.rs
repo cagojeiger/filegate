@@ -194,10 +194,11 @@ impl Config {
         if server.move_max_attempts < 1 {
             return Err(Error::config("FILEGATE_MOVE_MAX_ATTEMPTS must be >= 1"));
         }
-        // 음수 지연은 스왑 즉시 삭제가 되어 presigned 수명 보호가 깨진다.
-        if server.move_delete_delay_secs < 0 {
+        // 0·음수 지연은 스왑 즉시 삭제가 되어 presigned 수명 보호가 깨진다 —
+        // 이 손잡이가 지키려는 불변식을 손잡이로 끌 수 없게 한다.
+        if server.move_delete_delay_secs < 1 {
             return Err(Error::config(
-                "FILEGATE_MOVE_DELETE_DELAY_SECS must be >= 0",
+                "FILEGATE_MOVE_DELETE_DELAY_SECS must be >= 1",
             ));
         }
         if server.move_retry_backoff_secs < 0 {
@@ -294,13 +295,13 @@ mod tests {
     fn move_envs_override_and_validate() {
         let overridden = |key: &str| match key {
             "FILEGATE_MOVE_MAX_ATTEMPTS" => Some("3".to_owned()),
-            "FILEGATE_MOVE_DELETE_DELAY_SECS" => Some("0".to_owned()),
+            "FILEGATE_MOVE_DELETE_DELAY_SECS" => Some("1".to_owned()),
             "FILEGATE_MOVE_RETRY_BACKOFF_SECS" => Some("0".to_owned()),
             other => base_env(other),
         };
         let config = Config::load_from(&overridden).unwrap();
         assert_eq!(config.server.move_max_attempts, 3);
-        assert_eq!(config.server.move_delete_delay_secs, 0);
+        assert_eq!(config.server.move_delete_delay_secs, 1);
         assert_eq!(config.server.move_retry_backoff_secs, 0);
 
         // 0회 시도는 이동이 즉시 failed로 태어난다 — 거부한다.
@@ -309,12 +310,12 @@ mod tests {
             other => base_env(other),
         };
         assert!(Config::load_from(&zero_attempts).is_err());
-        // 음수 지연은 스왑 즉시 삭제 — presigned 수명 보호가 깨진다.
-        let negative_delay = |key: &str| match key {
-            "FILEGATE_MOVE_DELETE_DELAY_SECS" => Some("-1".to_owned()),
+        // 0·음수 지연은 스왑 즉시 삭제 — presigned 수명 보호가 깨진다.
+        let zero_delay = |key: &str| match key {
+            "FILEGATE_MOVE_DELETE_DELAY_SECS" => Some("0".to_owned()),
             other => base_env(other),
         };
-        assert!(Config::load_from(&negative_delay).is_err());
+        assert!(Config::load_from(&zero_delay).is_err());
         // 파싱 불가한 값도 거부한다.
         let unparsable = |key: &str| match key {
             "FILEGATE_MOVE_RETRY_BACKOFF_SECS" => Some("soon".to_owned()),

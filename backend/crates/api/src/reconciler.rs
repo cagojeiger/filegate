@@ -317,7 +317,7 @@ async fn run_jobs(
     // 잡 M3: move.stale — 경합에 진 requested 이동을 치운다. dest에 stray가
     // 남았을 수 있으니(없어도 무해) 지우고 저널을 지운다. 이 잡이 없으면 진
     // 이동이 dest에 고아 객체를 남긴 채 due_moves 조인 밖에 영원히 머문다.
-    match moves::stale_requested(pool, BATCH_LIMIT).await {
+    match moves::stale_moves(pool, BATCH_LIMIT).await {
         Ok(candidates) => {
             for candidate in candidates {
                 match crate::storage_access::delete_object_at(

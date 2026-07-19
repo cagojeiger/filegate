@@ -174,7 +174,7 @@ pub async fn location_of(
 
 /// move.execute 후보 — requested이고 due이며, 파일이 여전히 active이고
 /// 실물이 여전히 source의 그 키에 있는 이동만. 하나라도 어긋나면(경합 패배)
-/// 후보에서 빠져 stale_requested가 대신 줍는다.
+/// 후보에서 빠져 stale_moves가 대신 줍는다.
 pub async fn due_moves(pool: &PgPool, limit: i64) -> Result<Vec<DueMove>, sqlx::Error> {
     sqlx::query_as(
         "SELECT m.file_id, m.source_storage_id, m.dest_storage_id, m.object_key, \
@@ -191,14 +191,16 @@ pub async fn due_moves(pool: &PgPool, limit: i64) -> Result<Vec<DueMove>, sqlx::
     .await
 }
 
-/// 경합에 진 requested 이동 — due_moves의 조인이 실패하는 행(파일이 active가
-/// 아니거나 실물이 옮겨졌거나 사라졌다). dest에 남았을지 모를 stray를 치우고
-/// 행을 지워야 한다 — 요청 경로가 이겼으니 이동은 조용히 패배한다.
-pub async fn stale_requested(pool: &PgPool, limit: i64) -> Result<Vec<StaleMove>, sqlx::Error> {
+/// 경합에 진 이동 — due_moves의 조인이 실패하는 행(파일이 active가 아니거나
+/// 실물이 옮겨졌거나 사라졌다). dest에 남았을지 모를 stray를 치우고 행을
+/// 지워야 한다 — 요청 경로가 이겼으니 이동은 조용히 패배한다. failed도
+/// 파일이 떠났으면 여기로 종결된다 — 남겨두면 종착 파일 정리를 영원히
+/// 막는다 (prune_terminal_files의 object_moves 가드).
+pub async fn stale_moves(pool: &PgPool, limit: i64) -> Result<Vec<StaleMove>, sqlx::Error> {
     sqlx::query_as(
         "SELECT m.file_id, m.dest_storage_id, m.object_key \
          FROM object_moves m \
-         WHERE m.state = 'requested' AND NOT EXISTS ( \
+         WHERE m.state IN ('requested', 'failed') AND NOT EXISTS ( \
          SELECT 1 FROM files f \
          JOIN locations l ON l.file_id = f.id \
          WHERE f.id = m.file_id AND f.state = 'active' \
@@ -239,7 +241,7 @@ pub async fn finalize_swap(
     if swapped.rows_affected() == 0 {
         return Ok(false);
     }
-    sqlx::query(
+    let journaled = sqlx::query(
         "UPDATE object_moves SET state = 'swapped', \
          delete_after = now() + $2 * interval '1 second', \
          attempts = 0, next_attempt_at = now(), last_error = NULL \
@@ -249,6 +251,12 @@ pub async fn finalize_swap(
     .bind(delete_delay_secs)
     .execute(&mut *tx)
     .await?;
+    // 저널이 0행이면 복사 중 취소가 끼어든 것이다 — 여기서 커밋하면 포인터는
+    // dest인데 저널은 canceled가 되어, 취소 정리가 살아있는 dest 실물을 지운다.
+    // 롤백으로 포인터 전이까지 되돌린다 (스왑→취소 방향의 경합 방어).
+    if journaled.rows_affected() == 0 {
+        return Ok(false);
+    }
     tx.commit().await?;
     Ok(true)
 }
