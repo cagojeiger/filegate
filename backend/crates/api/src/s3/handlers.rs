@@ -33,6 +33,14 @@ pub(super) async fn put_object(
     headers: &HeaderMap,
     body: Body,
 ) -> S3Result {
+    // client == bucket: 인증된 클라이언트의 버킷은 자기 id뿐이다.
+    if bucket != client_id {
+        return Err(xml_error(
+            StatusCode::NOT_FOUND,
+            "NoSuchBucket",
+            "the specified bucket does not exist",
+        ));
+    }
     let content_length = header_str(headers, "content-length")
         .and_then(|v| v.parse::<i64>().ok())
         .ok_or_else(|| {
@@ -70,7 +78,6 @@ pub(super) async fn put_object(
 
     let spec = CreateSpec {
         client_id,
-        intent: bucket,
         declared_size: content_length,
         content_type,
         declared_md5: None,
@@ -82,11 +89,12 @@ pub(super) async fn put_object(
         .map_err(|e| xml_internal("create", e))?
     {
         CreateOutcome::Created(created) => *created,
-        CreateOutcome::NoBinding => {
+        // 인증된 클라이언트는 등록부에 있다 (자격증명 FK) — 도달하지 않는다.
+        CreateOutcome::NoClient => {
             return Err(xml_error(
-                StatusCode::NOT_FOUND,
-                "NoSuchBucket",
-                "the specified bucket does not exist",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                "the authenticated client has no storage",
             ));
         }
     };
@@ -172,7 +180,7 @@ pub(super) async fn put_object(
 
     // overwrite — 매핑 교체와 밀려난 옛 file의 detach는 upsert_key가 한
     // 트랜잭션에서 한다 (도달 불가 고아 방지). 반환값은 로깅용이다.
-    let displaced = s3reg::upsert_key(&state.pool, client_id, bucket, key, created.file_id)
+    let displaced = s3reg::upsert_key(&state.pool, client_id, key, created.file_id)
         .await
         .map_err(|e| xml_internal("key mapping", e))?;
     if let Some(old) = displaced {
@@ -219,10 +227,9 @@ fn spool_error_to_xml(error: spool::SpoolError) -> Response {
 async fn resolve(
     state: &AppState,
     client_id: &str,
-    bucket: &str,
     key: &str,
 ) -> Result<(Uuid, files::FileAccess), Response> {
-    let file_id = s3reg::get_key(&state.pool, client_id, bucket, key)
+    let file_id = s3reg::get_key(&state.pool, client_id, key)
         .await
         .map_err(|e| xml_internal("key lookup", e))?
         .ok_or_else(no_such_key)?;
@@ -290,7 +297,7 @@ pub(super) async fn get_object(
     key: &str,
     headers: &HeaderMap,
 ) -> S3Result {
-    let (file_id, file) = resolve(state, client_id, bucket, key).await?;
+    let (file_id, file) = resolve(state, client_id, key).await?;
     let backend =
         backend_from_row(&state.crypto, &file.storage).map_err(|e| xml_internal("backend", e))?;
     let total = file.declared_size;
@@ -359,13 +366,8 @@ pub(super) async fn get_object(
     Ok(response)
 }
 
-pub(super) async fn head_object(
-    state: &AppState,
-    client_id: &str,
-    bucket: &str,
-    key: &str,
-) -> S3Result {
-    let (_, file) = resolve(state, client_id, bucket, key).await?;
+pub(super) async fn head_object(state: &AppState, client_id: &str, key: &str) -> S3Result {
+    let (_, file) = resolve(state, client_id, key).await?;
     let mut response = StatusCode::OK.into_response();
     object_headers(response.headers_mut(), &file, file.declared_size);
     Ok(response)
@@ -398,7 +400,7 @@ pub(super) async fn delete_object(
     bucket: &str,
     key: &str,
 ) -> S3Result {
-    let removed = s3reg::delete_key(&state.pool, client_id, bucket, key)
+    let removed = s3reg::delete_key(&state.pool, client_id, key)
         .await
         .map_err(|e| xml_internal("key remove", e))?;
     if let Some(file_id) = removed {

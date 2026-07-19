@@ -1,7 +1,7 @@
 //! S3 호환 표면 (spec 03, ADR 006) — 무수정 S3 SDK를 받는 온보딩 계층.
 //!
-//! path-style `/{bucket}/{key}`. bucket = intent, key = 서비스 소유
-//! 논리키(s3_keys). 바이트는 업로드·다운로드 모두 filegate를 지난다 —
+//! path-style `/{bucket}/{key}`. bucket = client_id(자기 버킷), key = 서비스
+//! 소유 논리키(s3_keys). 바이트는 업로드·다운로드 모두 filegate를 지난다 —
 //! ADR 006이 수용한 비용이다. 파일·lease·회계는 네이티브 표면과 한 장부다.
 //!
 //! 인증은 SigV4다 (auth) — header-signed와 query-signed(presigned)를 모두
@@ -51,7 +51,7 @@ async fn dispatch(
         Method::GET => {
             handlers::get_object(&state, &client_id, &bucket, &key, &parts.headers).await
         }
-        Method::HEAD => handlers::head_object(&state, &client_id, &bucket, &key).await,
+        Method::HEAD => handlers::head_object(&state, &client_id, &key).await,
         Method::DELETE => handlers::delete_object(&state, &client_id, &bucket, &key).await,
         _ => Err(xml::xml_error(
             StatusCode::METHOD_NOT_ALLOWED,

@@ -84,7 +84,7 @@ impl IntoResponse for ApiError {
                 }
                 Some(WriteViolation::InUse) => payload(
                     StatusCode::CONFLICT,
-                    "still referenced — delete bindings/files first",
+                    "still referenced — delete dependent clients/files first",
                 ),
                 Some(WriteViolation::Invalid) => payload(
                     StatusCode::BAD_REQUEST,

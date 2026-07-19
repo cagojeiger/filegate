@@ -4,7 +4,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use filegate_db::registry::{self, BindingRow, StorageRow, WriteOp, WriteViolation};
+use filegate_db::registry::{self, StorageRow, WriteOp, WriteViolation};
 use sqlx::PgPool;
 
 // ── 픽스처 ──────────────────────────────────────────────────
@@ -52,6 +52,14 @@ fn s3_row(id: &str, capacity: i64) -> StorageRow {
     }
 }
 
+/// storage "s"를 먼저 등록하고 그것을 소유하는 client를 만든다.
+async fn storage_and_client(pool: &PgPool, client: &str) {
+    registry::insert_storage(pool, &s3_row("s", 1000))
+        .await
+        .unwrap();
+    registry::insert_client(pool, client, "s").await.unwrap();
+}
+
 // ── 인프라 검증용 최소 테스트 ────────────────────────────────
 
 #[sqlx::test(migrations = "./migrations")]
@@ -77,20 +85,10 @@ async fn duplicate_storage_id_is_a_duplicate_violation(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn binding_to_missing_client_is_missing_ref(pool: PgPool) {
-    registry::insert_storage(&pool, &s3_row("st", 1000))
+async fn client_to_missing_storage_is_missing_ref(pool: PgPool) {
+    let err = registry::insert_client(&pool, "c", "ghost")
         .await
-        .unwrap();
-    let err = registry::insert_binding(
-        &pool,
-        &BindingRow {
-            client_id: "ghost".to_owned(),
-            intent: "att".to_owned(),
-            storage_id: "st".to_owned(),
-        },
-    )
-    .await
-    .unwrap_err();
+        .unwrap_err();
     assert!(matches!(
         registry::write_violation(&err, WriteOp::Insert),
         Some(WriteViolation::MissingRef(_))
@@ -145,7 +143,7 @@ async fn s3_without_bucket_is_invalid(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn bad_key_hash_format_is_invalid(pool: PgPool) {
-    registry::insert_client(&pool, "c").await.unwrap();
+    storage_and_client(&pool, "c").await;
     let err = registry::insert_client_key(&pool, "c", "nothash")
         .await
         .unwrap_err();
@@ -157,8 +155,8 @@ async fn bad_key_hash_format_is_invalid(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn duplicate_client_id_is_a_duplicate_violation(pool: PgPool) {
-    registry::insert_client(&pool, "c").await.unwrap();
-    let err = registry::insert_client(&pool, "c").await.unwrap_err();
+    storage_and_client(&pool, "c").await;
+    let err = registry::insert_client(&pool, "c", "s").await.unwrap_err();
     assert_eq!(
         registry::write_violation(&err, WriteOp::Insert),
         Some(WriteViolation::Duplicate)
@@ -169,7 +167,7 @@ async fn duplicate_client_id_is_a_duplicate_violation(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn key_hash_resolves_to_owning_client(pool: PgPool) {
-    registry::insert_client(&pool, "c").await.unwrap();
+    storage_and_client(&pool, "c").await;
     registry::insert_client_key(&pool, "c", HASH).await.unwrap();
     assert_eq!(
         registry::client_id_for_key_hash(&pool, HASH).await.unwrap(),
@@ -190,8 +188,11 @@ async fn key_for_missing_client_is_missing_ref(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn client_key_exists_checks_ownership(pool: PgPool) {
-    registry::insert_client(&pool, "owner").await.unwrap();
-    registry::insert_client(&pool, "other").await.unwrap();
+    registry::insert_storage(&pool, &s3_row("s", 1000))
+        .await
+        .unwrap();
+    registry::insert_client(&pool, "owner", "s").await.unwrap();
+    registry::insert_client(&pool, "other", "s").await.unwrap();
     registry::insert_client_key(&pool, "owner", HASH)
         .await
         .unwrap();
@@ -209,7 +210,7 @@ async fn client_key_exists_checks_ownership(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn deleting_client_cascades_its_keys(pool: PgPool) {
-    registry::insert_client(&pool, "c").await.unwrap();
+    storage_and_client(&pool, "c").await;
     registry::insert_client_key(&pool, "c", HASH).await.unwrap();
     registry::delete_client(&pool, "c").await.unwrap();
     assert!(
@@ -221,131 +222,28 @@ async fn deleting_client_cascades_its_keys(pool: PgPool) {
     assert!(!registry::client_key_exists(&pool, "c", HASH).await.unwrap());
 }
 
-// ── bindings / FK ────────────────────────────────────────────
+// ── client ↔ storage 소유 / FK ───────────────────────────────
 
 #[sqlx::test(migrations = "./migrations")]
-async fn binding_to_missing_storage_is_missing_ref(pool: PgPool) {
-    registry::insert_client(&pool, "c").await.unwrap();
-    let err = registry::insert_binding(
-        &pool,
-        &BindingRow {
-            client_id: "c".to_owned(),
-            intent: "att".to_owned(),
-            storage_id: "ghost".to_owned(),
-        },
-    )
-    .await
-    .unwrap_err();
-    assert!(matches!(
-        registry::write_violation(&err, WriteOp::Insert),
-        Some(WriteViolation::MissingRef(_))
-    ));
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn binding_round_trip_and_repoint(pool: PgPool) {
-    registry::insert_client(&pool, "c").await.unwrap();
-    registry::insert_storage(&pool, &s3_row("s1", 1000))
-        .await
-        .unwrap();
-    registry::insert_storage(&pool, &s3_row("s2", 1000))
-        .await
-        .unwrap();
-    let mut binding = BindingRow {
-        client_id: "c".to_owned(),
-        intent: "att".to_owned(),
-        storage_id: "s1".to_owned(),
-    };
-    registry::insert_binding(&pool, &binding).await.unwrap();
+async fn client_reports_its_owned_storage(pool: PgPool) {
+    storage_and_client(&pool, "c").await;
     assert_eq!(
-        registry::get_binding(&pool, "c", "att")
+        registry::client_storage(&pool, "c").await.unwrap(),
+        Some("s".to_owned())
+    );
+    assert!(
+        registry::client_storage(&pool, "ghost")
             .await
             .unwrap()
-            .unwrap()
-            .storage_id,
-        "s1"
+            .is_none()
     );
-
-    binding.storage_id = "s2".to_owned();
-    assert!(registry::update_binding(&pool, &binding).await.unwrap());
-    assert_eq!(
-        registry::get_binding(&pool, "c", "att")
-            .await
-            .unwrap()
-            .unwrap()
-            .storage_id,
-        "s2"
-    );
-
-    let absent = BindingRow {
-        client_id: "c".to_owned(),
-        intent: "nope".to_owned(),
-        storage_id: "s2".to_owned(),
-    };
-    assert!(!registry::update_binding(&pool, &absent).await.unwrap());
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn repointing_binding_to_missing_storage_is_missing_ref(pool: PgPool) {
-    registry::insert_client(&pool, "c").await.unwrap();
-    registry::insert_storage(&pool, &s3_row("s1", 1000))
-        .await
-        .unwrap();
-    let mut binding = BindingRow {
-        client_id: "c".to_owned(),
-        intent: "att".to_owned(),
-        storage_id: "s1".to_owned(),
-    };
-    registry::insert_binding(&pool, &binding).await.unwrap();
-    binding.storage_id = "ghost".to_owned();
-    let err = registry::update_binding(&pool, &binding).await.unwrap_err();
-    assert!(matches!(
-        registry::write_violation(&err, WriteOp::Insert),
-        Some(WriteViolation::MissingRef(_))
-    ));
 }
 
 // ── delete 가드 (RESTRICT) ───────────────────────────────────
 
 #[sqlx::test(migrations = "./migrations")]
-async fn client_with_binding_cannot_be_deleted(pool: PgPool) {
-    registry::insert_client(&pool, "c").await.unwrap();
-    registry::insert_storage(&pool, &s3_row("s", 1000))
-        .await
-        .unwrap();
-    registry::insert_binding(
-        &pool,
-        &BindingRow {
-            client_id: "c".to_owned(),
-            intent: "att".to_owned(),
-            storage_id: "s".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
-    let err = registry::delete_client(&pool, "c").await.unwrap_err();
-    assert_eq!(
-        registry::write_violation(&err, WriteOp::Delete),
-        Some(WriteViolation::InUse)
-    );
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn storage_with_binding_cannot_be_deleted(pool: PgPool) {
-    registry::insert_client(&pool, "c").await.unwrap();
-    registry::insert_storage(&pool, &s3_row("s", 1000))
-        .await
-        .unwrap();
-    registry::insert_binding(
-        &pool,
-        &BindingRow {
-            client_id: "c".to_owned(),
-            intent: "att".to_owned(),
-            storage_id: "s".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+async fn storage_owned_by_client_cannot_be_deleted(pool: PgPool) {
+    storage_and_client(&pool, "c").await;
     let err = registry::delete_storage(&pool, "s").await.unwrap_err();
     assert_eq!(
         registry::write_violation(&err, WriteOp::Delete),
@@ -354,24 +252,10 @@ async fn storage_with_binding_cannot_be_deleted(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn deleting_binding_frees_both_nodes(pool: PgPool) {
-    registry::insert_client(&pool, "c").await.unwrap();
-    registry::insert_storage(&pool, &s3_row("s", 1000))
-        .await
-        .unwrap();
-    registry::insert_binding(
-        &pool,
-        &BindingRow {
-            client_id: "c".to_owned(),
-            intent: "att".to_owned(),
-            storage_id: "s".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
-    registry::delete_binding(&pool, "c", "att").await.unwrap();
-    registry::delete_storage(&pool, "s").await.unwrap();
+async fn deleting_client_frees_its_storage(pool: PgPool) {
+    storage_and_client(&pool, "c").await;
     registry::delete_client(&pool, "c").await.unwrap();
+    registry::delete_storage(&pool, "s").await.unwrap();
     assert!(registry::get_storage(&pool, "s").await.unwrap().is_none());
     assert!(!registry::client_exists(&pool, "c").await.unwrap());
 }

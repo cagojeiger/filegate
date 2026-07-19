@@ -10,11 +10,11 @@
 )]
 
 use filegate_db::files::{self, CreateOutcome, CreateSpec, CreatedFile};
-use filegate_db::registry::{self, BindingRow, StorageRow};
+use filegate_db::registry::{self, StorageRow};
 use filegate_db::usage;
 use sqlx::PgPool;
 
-// ── 픽스처 (accounting.rs와 같은 형태) ──────────────────────
+// ── 픽스처 ──────────────────────────────────────────────────
 
 fn s3_row(id: &str, capacity: i64) -> StorageRow {
     StorageRow {
@@ -35,23 +35,16 @@ fn s3_row(id: &str, capacity: i64) -> StorageRow {
     }
 }
 
-async fn bind(pool: &PgPool, client: &str, intent: &str, storage: &str) {
-    registry::insert_binding(
-        pool,
-        &BindingRow {
-            client_id: client.to_owned(),
-            intent: intent.to_owned(),
-            storage_id: storage.to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+/// storage를 소유하는 client를 등록한다.
+async fn client_on(pool: &PgPool, client: &str, storage: &str) {
+    registry::insert_client(pool, client, storage)
+        .await
+        .unwrap();
 }
 
-fn spec<'a>(client: &'a str, intent: &'a str, size: i64) -> CreateSpec<'a> {
+fn spec<'a>(client: &'a str, size: i64) -> CreateSpec<'a> {
     CreateSpec {
         client_id: client,
-        intent,
         declared_size: size,
         content_type: None,
         declared_md5: None,
@@ -60,19 +53,16 @@ fn spec<'a>(client: &'a str, intent: &'a str, size: i64) -> CreateSpec<'a> {
     }
 }
 
-async fn create_ok(pool: &PgPool, client: &str, intent: &str, size: i64) -> CreatedFile {
-    match files::create(pool, spec(client, intent, size))
-        .await
-        .unwrap()
-    {
+async fn create_ok(pool: &PgPool, client: &str, size: i64) -> CreatedFile {
+    match files::create(pool, spec(client, size)).await.unwrap() {
         CreateOutcome::Created(created) => *created,
-        CreateOutcome::NoBinding => panic!("expected Created, got NoBinding"),
+        CreateOutcome::NoClient => panic!("expected Created, got NoClient"),
     }
 }
 
 /// create → commit 으로 active 파일을 만든다.
-async fn commit_one(pool: &PgPool, client: &str, intent: &str, size: i64) {
-    let file = create_ok(pool, client, intent, size).await;
+async fn commit_one(pool: &PgPool, client: &str, size: i64) {
+    let file = create_ok(pool, client, size).await;
     assert!(
         files::finalize_commit(pool, file.file_id, "etag")
             .await
@@ -106,17 +96,16 @@ async fn by_storage_lists_every_storage_with_ledger(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn by_storage_pairs_bucket_bytes_with_file_counts(pool: PgPool) {
-    registry::insert_client(&pool, "c").await.unwrap();
     registry::insert_storage(&pool, &s3_row("s", 10_000))
         .await
         .unwrap();
-    bind(&pool, "c", "att", "s").await;
+    client_on(&pool, "c", "s").await;
 
     // active 둘(100, 200), pending 하나(50), deleted 하나(300).
-    commit_one(&pool, "c", "att", 100).await;
-    commit_one(&pool, "c", "att", 200).await;
-    create_ok(&pool, "c", "att", 50).await; // 예약만 (pending)
-    let to_delete = create_ok(&pool, "c", "att", 300).await;
+    commit_one(&pool, "c", 100).await;
+    commit_one(&pool, "c", 200).await;
+    create_ok(&pool, "c", 50).await; // 예약만 (pending)
+    let to_delete = create_ok(&pool, "c", 300).await;
     files::finalize_commit(&pool, to_delete.file_id, "etag")
         .await
         .unwrap();
@@ -142,19 +131,17 @@ async fn by_storage_pairs_bucket_bytes_with_file_counts(pool: PgPool) {
 async fn by_client_splits_a_shared_storage_between_clients(pool: PgPool) {
     // 두 client가 같은 storage "s"를 공유 — by_storage는 못 가르지만
     // by_client는 각자의 몫을 가른다.
-    registry::insert_client(&pool, "a").await.unwrap();
-    registry::insert_client(&pool, "b").await.unwrap();
     registry::insert_storage(&pool, &s3_row("s", 100_000))
         .await
         .unwrap();
-    bind(&pool, "a", "att", "s").await;
-    bind(&pool, "b", "att", "s").await;
+    client_on(&pool, "a", "s").await;
+    client_on(&pool, "b", "s").await;
 
-    commit_one(&pool, "a", "att", 100).await;
-    commit_one(&pool, "a", "att", 200).await; // a: 2파일 300
-    commit_one(&pool, "b", "att", 500).await; // b: 1파일 500
+    commit_one(&pool, "a", 100).await;
+    commit_one(&pool, "a", 200).await; // a: 2파일 300
+    commit_one(&pool, "b", 500).await; // b: 1파일 500
     // b의 pending 하나는 active가 아니라 리포트에 안 잡힌다.
-    create_ok(&pool, "b", "att", 999).await;
+    create_ok(&pool, "b", 999).await;
 
     let rows = usage::by_client(&pool).await.unwrap();
     assert_eq!(rows.len(), 2, "(a,s)와 (b,s) 두 행");
@@ -172,11 +159,10 @@ async fn by_client_splits_a_shared_storage_between_clients(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn by_client_is_empty_without_active_files(pool: PgPool) {
-    registry::insert_client(&pool, "c").await.unwrap();
     registry::insert_storage(&pool, &s3_row("s", 1000))
         .await
         .unwrap();
-    bind(&pool, "c", "att", "s").await;
-    create_ok(&pool, "c", "att", 100).await; // pending only
+    client_on(&pool, "c", "s").await;
+    create_ok(&pool, "c", 100).await; // pending only
     assert!(usage::by_client(&pool).await.unwrap().is_empty());
 }

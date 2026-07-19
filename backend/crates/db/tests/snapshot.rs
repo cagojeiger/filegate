@@ -11,11 +11,11 @@
 
 use chrono::{Days, NaiveDate, Utc};
 use filegate_db::files::{self, CreateOutcome, CreateSpec, CreatedFile};
-use filegate_db::registry::{self, BindingRow, StorageRow};
+use filegate_db::registry::{self, StorageRow};
 use filegate_db::usage;
 use sqlx::PgPool;
 
-// ── 픽스처 (usage.rs와 같은 형태) ───────────────────────────
+// ── 픽스처 ──────────────────────────────────────────────────
 
 fn s3_row(id: &str, capacity: i64) -> StorageRow {
     StorageRow {
@@ -36,23 +36,16 @@ fn s3_row(id: &str, capacity: i64) -> StorageRow {
     }
 }
 
-async fn bind(pool: &PgPool, client: &str, intent: &str, storage: &str) {
-    registry::insert_binding(
-        pool,
-        &BindingRow {
-            client_id: client.to_owned(),
-            intent: intent.to_owned(),
-            storage_id: storage.to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+/// storage를 소유하는 client를 등록한다.
+async fn client_on(pool: &PgPool, client: &str, storage: &str) {
+    registry::insert_client(pool, client, storage)
+        .await
+        .unwrap();
 }
 
-fn spec<'a>(client: &'a str, intent: &'a str, size: i64) -> CreateSpec<'a> {
+fn spec<'a>(client: &'a str, size: i64) -> CreateSpec<'a> {
     CreateSpec {
         client_id: client,
-        intent,
         declared_size: size,
         content_type: None,
         declared_md5: None,
@@ -61,19 +54,16 @@ fn spec<'a>(client: &'a str, intent: &'a str, size: i64) -> CreateSpec<'a> {
     }
 }
 
-async fn create_ok(pool: &PgPool, client: &str, intent: &str, size: i64) -> CreatedFile {
-    match files::create(pool, spec(client, intent, size))
-        .await
-        .unwrap()
-    {
+async fn create_ok(pool: &PgPool, client: &str, size: i64) -> CreatedFile {
+    match files::create(pool, spec(client, size)).await.unwrap() {
         CreateOutcome::Created(created) => *created,
-        CreateOutcome::NoBinding => panic!("expected Created, got NoBinding"),
+        CreateOutcome::NoClient => panic!("expected Created, got NoClient"),
     }
 }
 
 /// create → commit 으로 active 파일을 만든다.
-async fn commit_one(pool: &PgPool, client: &str, intent: &str, size: i64) {
-    let file = create_ok(pool, client, intent, size).await;
+async fn commit_one(pool: &PgPool, client: &str, size: i64) {
+    let file = create_ok(pool, client, size).await;
     assert!(
         files::finalize_commit(pool, file.file_id, "etag")
             .await
@@ -89,18 +79,16 @@ fn today() -> NaiveDate {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn record_snapshot_captures_active_per_storage_and_client(pool: PgPool) {
-    registry::insert_client(&pool, "a").await.unwrap();
-    registry::insert_client(&pool, "b").await.unwrap();
     registry::insert_storage(&pool, &s3_row("s", 100_000))
         .await
         .unwrap();
-    bind(&pool, "a", "att", "s").await;
-    bind(&pool, "b", "att", "s").await;
+    client_on(&pool, "a", "s").await;
+    client_on(&pool, "b", "s").await;
 
-    commit_one(&pool, "a", "att", 100).await;
-    commit_one(&pool, "a", "att", 200).await; // a: 2파일 300
-    commit_one(&pool, "b", "att", 500).await; // b: 1파일 500
-    create_ok(&pool, "b", "att", 999).await; // pending은 stock이 아니다
+    commit_one(&pool, "a", 100).await;
+    commit_one(&pool, "a", 200).await; // a: 2파일 300
+    commit_one(&pool, "b", 500).await; // b: 1파일 500
+    create_ok(&pool, "b", 999).await; // pending은 stock이 아니다
 
     // 오늘 날짜의 스냅샷 — 종점(내일 자정) 이전 생성분이므로 전부 잡힌다.
     assert_eq!(usage::record_snapshot(&pool, today()).await.unwrap(), 2);
@@ -121,16 +109,15 @@ async fn record_snapshot_captures_active_per_storage_and_client(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn record_snapshot_is_idempotent_and_frozen(pool: PgPool) {
-    registry::insert_client(&pool, "c").await.unwrap();
     registry::insert_storage(&pool, &s3_row("s", 1000))
         .await
         .unwrap();
-    bind(&pool, "c", "att", "s").await;
-    commit_one(&pool, "c", "att", 100).await;
+    client_on(&pool, "c", "s").await;
+    commit_one(&pool, "c", 100).await;
 
     assert_eq!(usage::record_snapshot(&pool, today()).await.unwrap(), 1);
     // 같은 날 재기록은 no-op — 이후 상태가 변해도 이미 찍힌 날은 불변이다.
-    commit_one(&pool, "c", "att", 200).await;
+    commit_one(&pool, "c", 200).await;
     assert_eq!(usage::record_snapshot(&pool, today()).await.unwrap(), 0);
 
     let rows = usage::snapshot_history(&pool, 7).await.unwrap();
@@ -140,12 +127,11 @@ async fn record_snapshot_is_idempotent_and_frozen(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn record_snapshot_excludes_files_created_after_day_end(pool: PgPool) {
-    registry::insert_client(&pool, "c").await.unwrap();
     registry::insert_storage(&pool, &s3_row("s", 1000))
         .await
         .unwrap();
-    bind(&pool, "c", "att", "s").await;
-    commit_one(&pool, "c", "att", 100).await; // 지금(오늘) 생성
+    client_on(&pool, "c", "s").await;
+    commit_one(&pool, "c", 100).await; // 지금(오늘) 생성
 
     // 어제의 종점(오늘 자정)은 오늘 생성분을 모른다 — 빈 스냅샷.
     let yesterday = today() - Days::new(1);

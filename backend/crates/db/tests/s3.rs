@@ -9,7 +9,7 @@
 )]
 
 use filegate_db::files::{self, CreateOutcome, CreateSpec, CreatedFile};
-use filegate_db::registry::{self, BindingRow, StorageRow};
+use filegate_db::registry::{self, StorageRow};
 use filegate_db::s3_registry as s3;
 
 // db 계층은 암호문을 저장만 한다 (복호는 core::Crypto). 더미 암호 재료.
@@ -21,9 +21,7 @@ async fn add_cred(pool: &PgPool, access_key_id: &str, client_id: &str) -> Result
 }
 use sqlx::PgPool;
 
-// ── 픽스처 (lifecycle.rs와 같은 형태) ───────────────────────
-
-const INTENT: &str = "att";
+// ── 픽스처 ──────────────────────────────────────────────────
 
 fn s3_row(id: &str) -> StorageRow {
     StorageRow {
@@ -45,24 +43,13 @@ fn s3_row(id: &str) -> StorageRow {
 }
 
 async fn wire(pool: &PgPool) {
-    registry::insert_client(pool, "c").await.unwrap();
     registry::insert_storage(pool, &s3_row("s")).await.unwrap();
-    registry::insert_binding(
-        pool,
-        &BindingRow {
-            client_id: "c".to_owned(),
-            intent: INTENT.to_owned(),
-            storage_id: "s".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+    registry::insert_client(pool, "c", "s").await.unwrap();
 }
 
 async fn create_ok(pool: &PgPool) -> CreatedFile {
     let spec = CreateSpec {
         client_id: "c",
-        intent: INTENT,
         declared_size: 100,
         content_type: None,
         declared_md5: None,
@@ -71,7 +58,7 @@ async fn create_ok(pool: &PgPool) -> CreatedFile {
     };
     match files::create(pool, spec).await.unwrap() {
         CreateOutcome::Created(created) => *created,
-        CreateOutcome::NoBinding => panic!("expected Created, got NoBinding"),
+        CreateOutcome::NoClient => panic!("expected Created, got NoClient"),
     }
 }
 
@@ -137,38 +124,36 @@ async fn key_overwrite_returns_displaced_file(pool: PgPool) {
     let second = create_ok(&pool).await;
     // 첫 매핑 — 밀려난 파일 없음.
     assert!(
-        s3::upsert_key(&pool, "c", INTENT, "dir/a.bin", first.file_id)
+        s3::upsert_key(&pool, "c", "dir/a.bin", first.file_id)
             .await
             .unwrap()
             .is_none()
     );
     // 같은 file_id 재기록은 덮어쓰기가 아니다 — None.
     assert!(
-        s3::upsert_key(&pool, "c", INTENT, "dir/a.bin", first.file_id)
+        s3::upsert_key(&pool, "c", "dir/a.bin", first.file_id)
             .await
             .unwrap()
             .is_none()
     );
     // 다른 file로 교체 — 밀려난 옛 file_id가 돌아온다 (delete 결정의 재료).
     assert_eq!(
-        s3::upsert_key(&pool, "c", INTENT, "dir/a.bin", second.file_id)
+        s3::upsert_key(&pool, "c", "dir/a.bin", second.file_id)
             .await
             .unwrap(),
         Some(first.file_id)
     );
     assert_eq!(
-        s3::get_key(&pool, "c", INTENT, "dir/a.bin").await.unwrap(),
+        s3::get_key(&pool, "c", "dir/a.bin").await.unwrap(),
         Some(second.file_id)
     );
     // 제거 — 지워진 file_id 반환, 멱등.
     assert_eq!(
-        s3::delete_key(&pool, "c", INTENT, "dir/a.bin")
-            .await
-            .unwrap(),
+        s3::delete_key(&pool, "c", "dir/a.bin").await.unwrap(),
         Some(second.file_id)
     );
     assert!(
-        s3::delete_key(&pool, "c", INTENT, "dir/a.bin")
+        s3::delete_key(&pool, "c", "dir/a.bin")
             .await
             .unwrap()
             .is_none()
@@ -189,21 +174,17 @@ async fn overwrite_and_delete_detach_the_active_file(pool: PgPool) {
         .await
         .unwrap();
 
-    s3::upsert_key(&pool, "c", INTENT, "k", a.file_id)
-        .await
-        .unwrap();
+    s3::upsert_key(&pool, "c", "k", a.file_id).await.unwrap();
     // A를 B로 덮어쓰면 A가 detach된다 (B는 그대로 active).
     assert_eq!(
-        s3::upsert_key(&pool, "c", INTENT, "k", b.file_id)
-            .await
-            .unwrap(),
+        s3::upsert_key(&pool, "c", "k", b.file_id).await.unwrap(),
         Some(a.file_id)
     );
     assert_eq!(file_state(&pool, a.file_id).await, "deleted");
     assert_eq!(file_state(&pool, b.file_id).await, "active");
     // 키를 지우면 B도 detach된다.
     assert_eq!(
-        s3::delete_key(&pool, "c", INTENT, "k").await.unwrap(),
+        s3::delete_key(&pool, "c", "k").await.unwrap(),
         Some(b.file_id)
     );
     assert_eq!(file_state(&pool, b.file_id).await, "deleted");
@@ -223,7 +204,7 @@ async fn key_mapping_dies_with_the_file_row(pool: PgPool) {
     // — 매달린 매핑이 남지 않는다 (마이그레이션 0004).
     wire(&pool).await;
     let file = create_ok(&pool).await;
-    s3::upsert_key(&pool, "c", INTENT, "dir/b.bin", file.file_id)
+    s3::upsert_key(&pool, "c", "dir/b.bin", file.file_id)
         .await
         .unwrap();
     // reclaim → lease GC → 보존 경과 → prune (lifecycle.rs와 같은 절차).
@@ -251,7 +232,7 @@ async fn key_mapping_dies_with_the_file_row(pool: PgPool) {
         1
     );
     assert!(
-        s3::get_key(&pool, "c", INTENT, "dir/b.bin")
+        s3::get_key(&pool, "c", "dir/b.bin")
             .await
             .unwrap()
             .is_none()

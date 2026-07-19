@@ -10,7 +10,6 @@
 CREATE TABLE files (
     id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     client_id     text NOT NULL,
-    intent        text NOT NULL,
     state         text NOT NULL DEFAULT 'pending'
                   CHECK (state IN ('pending', 'active', 'deleted', 'reclaimed')),
     declared_size bigint NOT NULL CHECK (declared_size >= 0),

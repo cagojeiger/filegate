@@ -11,13 +11,11 @@
 )]
 
 use filegate_db::files::{self, CreateOutcome, CreateSpec, CreatedFile, DeleteOutcome};
-use filegate_db::registry::{self, BindingRow, StorageRow, WriteOp, WriteViolation};
+use filegate_db::registry::{self, StorageRow, WriteOp, WriteViolation};
 use filegate_db::usage;
 use sqlx::PgPool;
 
 // ── 픽스처 ──────────────────────────────────────────────────
-
-const INTENT: &str = "att";
 
 fn s3_row(id: &str, capacity: i64) -> StorageRow {
     StorageRow {
@@ -38,28 +36,17 @@ fn s3_row(id: &str, capacity: i64) -> StorageRow {
     }
 }
 
-/// client "c" + storage "s"(capacity) + binding(c, att → s).
+/// storage "s"(capacity)를 소유하는 client "c".
 async fn wire(pool: &PgPool, capacity: i64) {
-    registry::insert_client(pool, "c").await.unwrap();
     registry::insert_storage(pool, &s3_row("s", capacity))
         .await
         .unwrap();
-    registry::insert_binding(
-        pool,
-        &BindingRow {
-            client_id: "c".to_owned(),
-            intent: INTENT.to_owned(),
-            storage_id: "s".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+    registry::insert_client(pool, "c", "s").await.unwrap();
 }
 
 fn spec(declared_size: i64) -> CreateSpec<'static> {
     CreateSpec {
         client_id: "c",
-        intent: INTENT,
         declared_size,
         content_type: None,
         declared_md5: None,
@@ -72,7 +59,7 @@ fn spec(declared_size: i64) -> CreateSpec<'static> {
 async fn create_ok(pool: &PgPool, declared_size: i64) -> CreatedFile {
     match files::create(pool, spec(declared_size)).await.unwrap() {
         CreateOutcome::Created(created) => *created,
-        CreateOutcome::NoBinding => panic!("expected Created, got NoBinding"),
+        CreateOutcome::NoClient => panic!("expected Created, got NoClient"),
     }
 }
 
@@ -86,15 +73,14 @@ async fn observed(pool: &PgPool) -> (i64, i64, i64) {
 // ── create ───────────────────────────────────────────────────
 
 #[sqlx::test(migrations = "./migrations")]
-async fn create_without_binding_is_no_binding(pool: PgPool) {
-    // binding 없이 client·storage만 — 선언되지 않은 어휘.
-    registry::insert_client(&pool, "c").await.unwrap();
+async fn create_for_unregistered_client_is_no_client(pool: PgPool) {
+    // 소유 storage가 있어도 client가 없으면 해석 불가.
     registry::insert_storage(&pool, &s3_row("s", 1000))
         .await
         .unwrap();
     assert!(matches!(
         files::create(&pool, spec(100)).await.unwrap(),
-        CreateOutcome::NoBinding
+        CreateOutcome::NoClient
     ));
 }
 
@@ -279,7 +265,6 @@ async fn prune_terminal_files_after_retention_frees_client(pool: PgPool) {
         1
     );
     // 행이 모두 정리됐으니 client 삭제가 성립한다.
-    registry::delete_binding(&pool, "c", INTENT).await.unwrap();
     registry::delete_client(&pool, "c").await.unwrap();
     assert!(!registry::client_exists(&pool, "c").await.unwrap());
 }
@@ -347,8 +332,7 @@ async fn prune_terminal_files_keeps_occupied_and_leased_rows(pool: PgPool) {
 async fn occupied_storage_cannot_be_deleted(pool: PgPool) {
     wire(&pool, 1000).await;
     create_ok(&pool, 100).await;
-    // 실물(location)이 남아 있으면 FK가 storages 삭제를 거부한다.
-    registry::delete_binding(&pool, "c", INTENT).await.unwrap();
+    // 클라이언트·실물(location)이 남아 있으면 FK가 storages 삭제를 거부한다.
     let err = registry::delete_storage(&pool, "s").await.unwrap_err();
     assert_eq!(
         registry::write_violation(&err, WriteOp::Delete),

@@ -4,12 +4,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use filegate_db::files::{self, CreateOutcome, CreateSpec, CreatedFile};
-use filegate_db::registry::{self, BindingRow, StorageRow};
+use filegate_db::registry::{self, StorageRow};
 use sqlx::PgPool;
 
-// ── 픽스처 (accounting.rs와 같은 형태) ──────────────────────
-
-const INTENT: &str = "att";
+// ── 픽스처 ──────────────────────────────────────────────────
 
 fn s3_row(id: &str, capacity: i64) -> StorageRow {
     StorageRow {
@@ -31,26 +29,15 @@ fn s3_row(id: &str, capacity: i64) -> StorageRow {
 }
 
 async fn wire(pool: &PgPool) {
-    registry::insert_client(pool, "c").await.unwrap();
     registry::insert_storage(pool, &s3_row("s", 100_000))
         .await
         .unwrap();
-    registry::insert_binding(
-        pool,
-        &BindingRow {
-            client_id: "c".to_owned(),
-            intent: INTENT.to_owned(),
-            storage_id: "s".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+    registry::insert_client(pool, "c", "s").await.unwrap();
 }
 
 async fn create_ok(pool: &PgPool, size: i64) -> CreatedFile {
     let spec = CreateSpec {
         client_id: "c",
-        intent: INTENT,
         declared_size: size,
         content_type: None,
         declared_md5: None,
