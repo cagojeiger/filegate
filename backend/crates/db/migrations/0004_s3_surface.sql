@@ -17,7 +17,8 @@ CREATE TABLE s3_credentials (
 );
 CREATE INDEX s3_credentials_client_idx ON s3_credentials (client_id);
 
--- s3_keys: S3 표면의 논리 이름공간 — (client, bucket=intent, key) → file.
+-- s3_keys: S3 표면의 논리 이름공간 — (client, key) → file. 버킷은
+-- client_id와 같으므로(0.3.0: client == bucket) 별도 컬럼이 없다.
 -- 서비스가 정한 이름(논리키)은 서비스 소유다 (ADR 003). 물리 배치와
 -- 무관하다 (물리는 locations 소유 — tiering이 위치를 옮겨도 매핑 불변).
 -- overwrite(같은 키 재PUT)는 매핑을 새 file로 갈아끼우고 옛 file은 delete
@@ -26,11 +27,10 @@ CREATE INDEX s3_credentials_client_idx ON s3_credentials (client_id);
 -- 매핑도 함께 사라진다 — 매달린 매핑이 남지 않는다.
 CREATE TABLE s3_keys (
     client_id  text NOT NULL REFERENCES clients (id) ON DELETE CASCADE,
-    bucket     text NOT NULL,
     key        text NOT NULL,
     file_id    uuid NOT NULL REFERENCES files (id) ON DELETE CASCADE,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (client_id, bucket, key)
+    PRIMARY KEY (client_id, key)
 );
 CREATE INDEX s3_keys_file_idx ON s3_keys (file_id);

@@ -24,10 +24,6 @@ use crate::validation::{classify_upload, content_type_ok, declared_md5_format_ok
 
 #[derive(Deserialize)]
 pub(super) struct CreateBody {
-    /// 최초 업로드 위치 (= 바인딩 intent). S3 표면의 bucket과 같은 개념이라
-    /// `bucket`으로도 받는다 — 기존 `intent`는 그대로 (하위호환 alias).
-    #[serde(alias = "bucket")]
-    intent: String,
     declared_size: i64,
     content_type: Option<String>,
     /// 선언 MD5 (lowercase hex). commit이 ETag와 대조한다 — 단일 PUT의
@@ -79,12 +75,6 @@ pub(super) async fn create(
     {
         return Err(bad_request("declared_md5 must be 32 hex chars"));
     }
-    // intent는 슬러그 어휘다 (등록부 CHECK와 같은 형태). 형태가 아니면
-    // binding이 존재할 수 없으므로 조회 없이 같은 404로 답한다 — NUL 같은
-    // 제어 문자가 DB까지 가서 500이 되는 것도 여기서 막힌다.
-    if !is_intent_slug(&body.intent) {
-        return Err(not_found("unknown intent"));
-    }
     if let Some(content_type) = &body.content_type
         && !content_type_ok(content_type)
     {
@@ -93,7 +83,6 @@ pub(super) async fn create(
 
     let spec = CreateSpec {
         client_id: &client.0,
-        intent: &body.intent,
         declared_size: body.declared_size,
         content_type: body.content_type.as_deref(),
         declared_md5: body.declared_md5.as_deref(),
@@ -102,8 +91,8 @@ pub(super) async fn create(
     };
     let created = match files::create(&state.pool, spec).await? {
         CreateOutcome::Created(created) => created,
-        // 선언되지 않은 어휘 — binding이 없다. 어느 쪽이 없는지는 말하지 않는다.
-        CreateOutcome::NoBinding => return Err(not_found("unknown intent")),
+        // 인증된 클라이언트는 등록부에 있다 (client_keys FK) — 도달하지 않는다.
+        CreateOutcome::NoClient => return Err(internal("authenticated client has no storage")),
     };
 
     // 접근 모드는 storage 선언이 정한다 (ADR 001). 직결이면 공개 주소로
@@ -379,10 +368,9 @@ struct StatOut {
     file_id: Uuid,
     state: String,
     declared_size: i64,
-    intent: String,
 }
 
-/// stat — 상태·크기·intent만 (spec 00: location·URL은 제외).
+/// stat — 상태·크기만 (spec 00: location·URL은 제외).
 pub(super) async fn stat(
     State(state): State<AppState>,
     Extension(client): Extension<ClientId>,
@@ -400,7 +388,6 @@ pub(super) async fn stat(
         file_id,
         state: stat.state,
         declared_size: stat.declared_size,
-        intent: stat.intent,
     })
     .into_response())
 }
@@ -441,16 +428,6 @@ fn deleted_response(file_id: Uuid) -> Response {
     .into_response()
 }
 
-fn is_intent_slug(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && !value.starts_with('-')
-        && !value.ends_with('-')
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-}
-
 pub(super) fn committed_response(file_id: Uuid, etag: String) -> Response {
     Json(CommitOut {
         file_id,
@@ -462,29 +439,12 @@ pub(super) fn committed_response(file_id: Uuid, etag: String) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{CreateBody, is_intent_slug};
+    use super::CreateBody;
 
     #[test]
-    fn create_body_accepts_bucket_as_alias_for_intent() {
-        // 하위호환: 기존 `intent`와 새 `bucket` 둘 다 같은 필드로 들어온다.
-        let via_intent: Result<CreateBody, _> =
-            serde_json::from_str(r#"{"intent":"avatar","declared_size":1}"#);
-        assert!(matches!(via_intent, Ok(ref b) if b.intent == "avatar"));
-        let via_bucket: Result<CreateBody, _> =
-            serde_json::from_str(r#"{"bucket":"avatar","declared_size":1}"#);
-        assert!(matches!(via_bucket, Ok(ref b) if b.intent == "avatar"));
-    }
-
-    #[test]
-    fn intent_slug_accepts_lowercase_kebab_and_rejects_the_rest() {
-        assert!(is_intent_slug("avatar"));
-        assert!(is_intent_slug("user-avatar-2"));
-        assert!(!is_intent_slug("")); // 빈 문자열
-        assert!(!is_intent_slug("-lead")); // 하이픈 시작
-        assert!(!is_intent_slug("trail-")); // 하이픈 끝
-        assert!(!is_intent_slug("Upper")); // 대문자
-        assert!(!is_intent_slug("has space")); // 공백
-        assert!(!is_intent_slug("nul\0byte")); // 제어 문자
-        assert!(!is_intent_slug(&"a".repeat(65))); // 길이 초과
+    fn create_body_needs_only_declared_size() {
+        // storage는 클라이언트 소유라 요청 본문에 위치 선언이 없다 (0.3.0).
+        let parsed: Result<CreateBody, _> = serde_json::from_str(r#"{"declared_size":1}"#);
+        assert!(matches!(parsed, Ok(ref b) if b.declared_size == 1));
     }
 }

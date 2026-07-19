@@ -89,23 +89,20 @@ pub async fn delete_credential(
     Ok(result.rows_affected())
 }
 
-// ---- 논리 키 매핑 ((client, bucket, key) → file) ----
+// ---- 논리 키 매핑 ((client, key) → file) ----
+// 버킷은 client_id와 같으므로(0.3.0: client == bucket) 키의 일부가 아니다.
 
-/// (client, bucket, key)의 현재 file_id.
+/// (client, key)의 현재 file_id.
 pub async fn get_key(
     pool: &PgPool,
     client_id: &str,
-    bucket: &str,
     key: &str,
 ) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT file_id FROM s3_keys WHERE client_id = $1 AND bucket = $2 AND key = $3",
-    )
-    .bind(client_id)
-    .bind(bucket)
-    .bind(key)
-    .fetch_optional(pool)
-    .await
+    sqlx::query_scalar("SELECT file_id FROM s3_keys WHERE client_id = $1 AND key = $2")
+        .bind(client_id)
+        .bind(key)
+        .fetch_optional(pool)
+        .await
 }
 
 /// 매핑을 새 file_id로 교체하고, 밀려난 옛 file은 **같은 트랜잭션에서**
@@ -116,27 +113,24 @@ pub async fn get_key(
 pub async fn upsert_key(
     pool: &PgPool,
     client_id: &str,
-    bucket: &str,
     key: &str,
     file_id: Uuid,
 ) -> Result<Option<Uuid>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let old: Option<Uuid> = sqlx::query_scalar(
         "SELECT file_id FROM s3_keys \
-         WHERE client_id = $1 AND bucket = $2 AND key = $3 FOR UPDATE",
+         WHERE client_id = $1 AND key = $2 FOR UPDATE",
     )
     .bind(client_id)
-    .bind(bucket)
     .bind(key)
     .fetch_optional(&mut *tx)
     .await?;
     sqlx::query(
-        "INSERT INTO s3_keys (client_id, bucket, key, file_id) VALUES ($1, $2, $3, $4) \
-         ON CONFLICT (client_id, bucket, key) \
+        "INSERT INTO s3_keys (client_id, key, file_id) VALUES ($1, $2, $3) \
+         ON CONFLICT (client_id, key) \
          DO UPDATE SET file_id = excluded.file_id, updated_at = now()",
     )
     .bind(client_id)
-    .bind(bucket)
     .bind(key)
     .bind(file_id)
     .execute(&mut *tx)
@@ -155,16 +149,14 @@ pub async fn upsert_key(
 pub async fn delete_key(
     pool: &PgPool,
     client_id: &str,
-    bucket: &str,
     key: &str,
 ) -> Result<Option<Uuid>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let removed: Option<Uuid> = sqlx::query_scalar(
-        "DELETE FROM s3_keys WHERE client_id = $1 AND bucket = $2 AND key = $3 \
+        "DELETE FROM s3_keys WHERE client_id = $1 AND key = $2 \
          RETURNING file_id",
     )
     .bind(client_id)
-    .bind(bucket)
     .bind(key)
     .fetch_optional(&mut *tx)
     .await?;

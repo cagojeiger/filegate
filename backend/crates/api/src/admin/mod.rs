@@ -7,7 +7,6 @@
 //! 이 모듈은 경로 배선과 인증만 안다. 리소스 규칙은 각 하위 모듈에,
 //! 상태 코드 번역은 error에 산다.
 
-mod bindings;
 mod clients;
 mod storages;
 mod usage;
@@ -51,13 +50,6 @@ pub fn admin_routes() -> Router<AppState> {
         .route(
             "/clients/{id}/s3-credentials/{access_key_id}",
             axum::routing::delete(clients::s3_credential_delete),
-        )
-        .route(
-            "/clients/{id}/bindings/{intent}",
-            get(bindings::get)
-                .post(bindings::create)
-                .put(bindings::update)
-                .delete(bindings::delete),
         )
 }
 

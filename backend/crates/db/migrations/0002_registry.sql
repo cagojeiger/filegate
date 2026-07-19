@@ -1,13 +1,14 @@
--- 등록부 스키마 — 독립 노드 둘과 엣지 하나 (ADR 004, spec 01).
+-- 등록부 스키마 — 노드 둘, 소유 엣지 하나 (ADR 004 개정, 0.3.0).
 --
--- storages(물리 접근 계약)와 clients(서비스 신원)는 서로를 모른다.
--- bindings(client의 intent 이름 → storage)만이 둘을 참조한다.
+-- storages(물리 접근 계약)는 clients를 모른다. clients(서비스 신원 =
+-- 버킷)는 기반 storage를 소유한다 — storage_id로 가리킨다. 업로드는 이
+-- storage로 간다.
 --
--- 참조 무결성은 쓰기 시점에 DB가 집행한다 (ADR 004): binding이 남아 있는
--- storage·client의 삭제는 FK가 거부한다 — 연결을 먼저 지워야 노드를 지운다.
--- 클라이언트의 소유물(키)만 클라이언트와 함께 사라진다. id는 운영자가
--- 정하는 안정 슬러그다 — fs 경로와 object_key에 들어가므로 슬러그 CHECK가
--- 경로 안전도 겸한다 (spec 00 물리 배치).
+-- 참조 무결성은 쓰기 시점에 DB가 집행한다 (ADR 004): 클라이언트가
+-- 가리키는 storage의 삭제는 FK가 거부한다 — 클라이언트를 먼저 지워야
+-- storage를 지운다. 클라이언트의 소유물(키)만 클라이언트와 함께 사라진다.
+-- id는 운영자가 정하는 안정 슬러그다 — fs 경로와 object_key에 들어가므로
+-- 슬러그 CHECK가 경로 안전도 겸한다 (spec 00 물리 배치).
 
 -- 물리 저장 공간 접근 계약. 행 생성은 운영자 API만 한다.
 -- 종류가 둘이다 (ADR 001: capability는 선언식):
@@ -57,12 +58,19 @@ CREATE TABLE storages (
     )
 );
 
--- 서비스 신원. 키의 소유자이자 intent 이름의 네임스페이스다.
+-- 서비스 신원. 키의 소유자이자 자기 버킷(id == S3 버킷 이름)이다.
+-- 클라이언트는 기반 storage를 소유한다 — 업로드는 이 storage로 간다
+-- (ADR 004 개정, 0.3.0). storage 포인터는 운영자가 등록 시 정한다.
 CREATE TABLE clients (
     id         text PRIMARY KEY
                CHECK (id ~ '^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$'),
+    storage_id text NOT NULL REFERENCES storages (id),
     created_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- storage 삭제 시 FK RESTRICT 검사가 이 인덱스를 탄다 — 클라이언트가
+-- 가리키는 storage는 클라이언트를 먼저 지워야 사라진다.
+CREATE INDEX clients_storage_idx ON clients (storage_id);
 
 -- 클라이언트 키 — sha256 해시만 저장한다 (spec 01: raw는 서버에 도달하지
 -- 않는다). 회전 = 행 추가·삭제. 키는 클라이언트의 소유물이라 함께 사라진다.
@@ -74,22 +82,6 @@ CREATE TABLE client_keys (
 
 -- 인증 후 클라이언트의 키 목록 조회용 (회전 시 관리).
 CREATE INDEX client_keys_client_idx ON client_keys (client_id);
-
--- 엣지: 클라이언트의 intent 이름을 storage에 잇는다 (ADR 004).
--- 서비스 계약은 intent 이름이고, storage 포인터는 운영자가 바꾼다 —
--- 배치를 바꿔도 서비스 계약은 유지된다. 양끝 노드는 이 엣지가 남아
--- 있는 동안 삭제가 거부된다 (FK 기본 = RESTRICT 동작).
-CREATE TABLE bindings (
-    client_id  text NOT NULL REFERENCES clients (id),
-    intent     text NOT NULL
-               CHECK (intent ~ '^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$'),
-    storage_id text NOT NULL REFERENCES storages (id),
-    created_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (client_id, intent)
-);
-
--- storage 삭제 시 FK RESTRICT 검사가 이 인덱스를 탄다 (PK는 client 쪽만 커버).
-CREATE INDEX bindings_storage_idx ON bindings (storage_id);
 
 -- 도메인 테이블(0001)의 느슨한 text id를 등록부에 묶는다.
 -- 파일을 가진 client, 위치(실물)가 남은 storage는 삭제가 거부된다 (ADR 004).

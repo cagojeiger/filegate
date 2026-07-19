@@ -1,4 +1,4 @@
-//! 등록부 행 접근 (마이그레이션 0002): storages / clients / client_keys / bindings.
+//! 등록부 행 접근 (마이그레이션 0002): storages / clients / client_keys.
 //!
 //! 참조 무결성은 DB FK가 집행한다 — 여기서는 위반을 분류만 하고
 //! HTTP 응답은 호출자(api)가 정한다.
@@ -115,9 +115,9 @@ pub async fn list_storages(pool: &PgPool) -> Result<Vec<StorageRow>, sqlx::Error
     .await
 }
 
-/// 멱등 삭제 — 없는 행도 성공이다 (spec 01: TF-친화). binding이 남아 있으면
-/// FK가 거부한다 — 연결을 먼저 지워야 노드를 지운다. 실물(location)이 남은
-/// storage도 FK가 거부한다 — 점유가 있는 한 등록부에서 사라질 수 없다.
+/// 멱등 삭제 — 없는 행도 성공이다 (spec 01: TF-친화). 클라이언트가
+/// 가리키거나(storage_id) 실물(location)이 남은 storage는 FK가 거부한다 —
+/// 참조가 있는 한 등록부에서 사라질 수 없다.
 pub async fn delete_storage(pool: &PgPool, id: &str) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM storages WHERE id = $1")
         .bind(id)
@@ -128,9 +128,10 @@ pub async fn delete_storage(pool: &PgPool, id: &str) -> Result<(), sqlx::Error> 
 
 // ---- clients ----
 
-pub async fn insert_client(pool: &PgPool, id: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO clients (id) VALUES ($1)")
+pub async fn insert_client(pool: &PgPool, id: &str, storage_id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO clients (id, storage_id) VALUES ($1, $2)")
         .bind(id)
+        .bind(storage_id)
         .execute(pool)
         .await
         .map(|_| ())
@@ -143,13 +144,22 @@ pub async fn client_exists(pool: &PgPool, id: &str) -> Result<bool, sqlx::Error>
         .await
 }
 
+/// 클라이언트가 소유한 storage id (없는 클라이언트면 None).
+pub async fn client_storage(pool: &PgPool, id: &str) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT storage_id FROM clients WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+}
+
 pub async fn list_clients(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
     sqlx::query_scalar("SELECT id FROM clients ORDER BY id")
         .fetch_all(pool)
         .await
 }
 
-/// 멱등 삭제. binding·file이 남아 있으면 FK가 거부한다. 키는 소유물이라 함께 진다.
+/// 멱등 삭제. file(location)이 남아 있으면 FK가 거부한다. 키·자격증명·논리
+/// 키 매핑은 소유물이라 함께 진다 (CASCADE).
 pub async fn delete_client(pool: &PgPool, id: &str) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM clients WHERE id = $1")
         .bind(id)
@@ -220,69 +230,10 @@ pub async fn delete_client_key(
         .map(|_| ())
 }
 
-// ---- bindings ----
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct BindingRow {
-    pub client_id: String,
-    pub intent: String,
-    pub storage_id: String,
-}
-
-pub async fn insert_binding(pool: &PgPool, row: &BindingRow) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO bindings (client_id, intent, storage_id) VALUES ($1, $2, $3)")
-        .bind(&row.client_id)
-        .bind(&row.intent)
-        .bind(&row.storage_id)
-        .execute(pool)
-        .await
-        .map(|_| ())
-}
-
-/// storage 포인터 교체 = 배치 변경 (spec 01). 행이 없으면 false — 생성이 아니다.
-pub async fn update_binding(pool: &PgPool, row: &BindingRow) -> Result<bool, sqlx::Error> {
-    let result =
-        sqlx::query("UPDATE bindings SET storage_id = $3 WHERE client_id = $1 AND intent = $2")
-            .bind(&row.client_id)
-            .bind(&row.intent)
-            .bind(&row.storage_id)
-            .execute(pool)
-            .await?;
-    Ok(result.rows_affected() > 0)
-}
-
-pub async fn get_binding(
-    pool: &PgPool,
-    client_id: &str,
-    intent: &str,
-) -> Result<Option<BindingRow>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT client_id, intent, storage_id FROM bindings \
-         WHERE client_id = $1 AND intent = $2",
-    )
-    .bind(client_id)
-    .bind(intent)
-    .fetch_optional(pool)
-    .await
-}
-
-pub async fn delete_binding(
-    pool: &PgPool,
-    client_id: &str,
-    intent: &str,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM bindings WHERE client_id = $1 AND intent = $2")
-        .bind(client_id)
-        .bind(intent)
-        .execute(pool)
-        .await
-        .map(|_| ())
-}
-
 // ---- 쓰기 거부 분류 ----
 
 /// 쓰기 종류 — FK 위반(23503)의 의미가 방향에 따라 다르다. 같은 제약이
-/// 양방향에서 걸리므로(예: bindings_storage_id_fkey는 INSERT와 storage DELETE
+/// 양방향에서 걸리므로(예: clients_storage_id_fkey는 INSERT와 storage DELETE
 /// 모두에서), 방향은 에러가 아니라 호출부가 안다. PG 에러 메시지는
 /// lc_messages에 따라 번역되므로 파싱하지 않는다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

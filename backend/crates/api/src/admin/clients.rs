@@ -10,17 +10,20 @@ use axum::response::{IntoResponse, Response};
 use filegate_db::registry;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ApiError, not_found};
+use crate::error::{ApiError, bad_request, not_found};
 use crate::routes::AppState;
 
 #[derive(Deserialize)]
 pub(super) struct ClientCreateBody {
     id: String,
+    /// 클라이언트가 소유하는 기반 storage — 업로드가 향하는 곳.
+    storage_id: String,
 }
 
 #[derive(Serialize)]
 struct ClientOut {
     id: String,
+    storage_id: String,
 }
 
 #[derive(Deserialize)]
@@ -38,19 +41,35 @@ pub(super) async fn create(
     State(state): State<AppState>,
     Json(body): Json<ClientCreateBody>,
 ) -> Result<Response, ApiError> {
-    registry::insert_client(&state.pool, &body.id).await?;
-    tracing::info!(event = "client.registered", client = %body.id);
-    Ok((StatusCode::CREATED, Json(ClientOut { id: body.id })).into_response())
+    // 없는 storage를 가리키는 건 잘못된 입력이다 (FK도 거부하지만 400으로).
+    if registry::get_storage(&state.pool, &body.storage_id)
+        .await?
+        .is_none()
+    {
+        return Err(bad_request(
+            "storage_id does not reference a registered storage",
+        ));
+    }
+    registry::insert_client(&state.pool, &body.id, &body.storage_id).await?;
+    tracing::info!(event = "client.registered", client = %body.id, storage = %body.storage_id);
+    Ok((
+        StatusCode::CREATED,
+        Json(ClientOut {
+            id: body.id,
+            storage_id: body.storage_id,
+        }),
+    )
+        .into_response())
 }
 
 pub(super) async fn get(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    if !registry::client_exists(&state.pool, &id).await? {
-        return Err(not_found("client not found"));
-    }
-    Ok(Json(ClientOut { id }).into_response())
+    let storage_id = registry::client_storage(&state.pool, &id)
+        .await?
+        .ok_or_else(|| not_found("client not found"))?;
+    Ok(Json(ClientOut { id, storage_id }).into_response())
 }
 
 pub(super) async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {

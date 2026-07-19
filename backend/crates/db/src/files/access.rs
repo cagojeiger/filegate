@@ -211,12 +211,11 @@ pub async fn recorded_upload(
     .await
 }
 
-/// stat (spec 00): 상태·크기·intent만 — location·URL은 내보내지 않는다.
+/// stat (spec 00): 상태·크기만 — location·URL은 내보내지 않는다.
 /// purge 후에도 행은 deleted로 남아 계속 답한다.
 pub struct FileStat {
     pub state: String,
     pub declared_size: i64,
-    pub intent: String,
 }
 
 pub async fn stat(
@@ -224,16 +223,14 @@ pub async fn stat(
     client_id: &str,
     file_id: Uuid,
 ) -> Result<Option<FileStat>, sqlx::Error> {
-    let row: Option<(String, i64, String)> = sqlx::query_as(
-        "SELECT state, declared_size, intent FROM files WHERE id = $1 AND client_id = $2",
-    )
-    .bind(file_id)
-    .bind(client_id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|(state, declared_size, intent)| FileStat {
+    let row: Option<(String, i64)> =
+        sqlx::query_as("SELECT state, declared_size FROM files WHERE id = $1 AND client_id = $2")
+            .bind(file_id)
+            .bind(client_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|(state, declared_size)| FileStat {
         state,
         declared_size,
-        intent,
     }))
 }

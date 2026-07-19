@@ -9,10 +9,10 @@ use uuid::Uuid;
 
 use crate::registry::{STORAGE_COLUMNS, StorageRow};
 
-/// create 요청의 선언 (spec 00: intent, 크기, 선택 항목들).
+/// create 요청의 선언. 업로드 대상 storage는 클라이언트가 소유한 것으로
+/// 해석된다 — 선언에 들어오지 않는다.
 pub struct CreateSpec<'a> {
     pub client_id: &'a str,
-    pub intent: &'a str,
     pub declared_size: i64,
     pub content_type: Option<&'a str>,
     pub declared_md5: Option<&'a str>,
@@ -32,8 +32,8 @@ pub struct CreatedFile {
 
 pub enum CreateOutcome {
     Created(Box<CreatedFile>),
-    /// (client, intent)에 binding이 없다 — 선언되지 않은 어휘.
-    NoBinding,
+    /// 클라이언트가 등록부에 없어 소유 storage를 해석할 수 없다.
+    NoClient,
 }
 
 /// 선언 해석 → pending 파일 기록. 전부 한 트랜잭션 — 새 행 INSERT만이라
@@ -41,27 +41,29 @@ pub enum CreateOutcome {
 pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
 
-    // binding 해석과 storage 로드를 한 왕복으로 — 컬럼 이름이 겹치지 않아
-    // 접두 없이 안전하다 (bindings: client_id·intent·storage_id·created_at).
+    // storages와 clients가 id 컬럼을 겹치므로 storage 컬럼은 s. 접두로 뽑는다.
+    let storage_cols = STORAGE_COLUMNS
+        .split(", ")
+        .map(|c| format!("s.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let storage: Option<StorageRow> = sqlx::query_as(&format!(
-        "SELECT {STORAGE_COLUMNS} FROM storages s \
-         JOIN bindings b ON b.storage_id = s.id \
-         WHERE b.client_id = $1 AND b.intent = $2"
+        "SELECT {storage_cols} FROM storages s \
+         JOIN clients c ON c.storage_id = s.id \
+         WHERE c.id = $1"
     ))
     .bind(spec.client_id)
-    .bind(spec.intent)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(storage) = storage else {
-        return Ok(CreateOutcome::NoBinding);
+        return Ok(CreateOutcome::NoClient);
     };
 
     let file_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO files (client_id, intent, declared_size, content_type, declared_md5, \
-         part_size) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+        "INSERT INTO files (client_id, declared_size, content_type, declared_md5, \
+         part_size) VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
     .bind(spec.client_id)
-    .bind(spec.intent)
     .bind(spec.declared_size)
     .bind(spec.content_type)
     .bind(spec.declared_md5)
