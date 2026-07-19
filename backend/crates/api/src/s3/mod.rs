@@ -4,9 +4,10 @@
 //! 논리키(s3_keys). 바이트는 업로드·다운로드 모두 filegate를 지난다 —
 //! ADR 006이 수용한 비용이다. 파일·lease·회계는 네이티브 표면과 한 장부다.
 //!
-//! 인증은 header-signed SigV4다 (auth). 확정은 스트림 실측 관찰이다 — S3에
-//! commit이 없으므로 이 표면에도 없다. 에러는 S3 XML 최소형 — SDK가 파싱하는
-//! 모양이다 (HEAD의 본문은 hyper가 떨군다).
+//! 인증은 SigV4다 (auth) — header-signed와 query-signed(presigned)를 모두
+//! 검증한다. 확정은 스트림 실측 관찰이다 — S3에 commit이 없으므로 이 표면에도
+//! 없다. 에러는 S3 XML 최소형 — SDK가 파싱하는 모양이다 (HEAD의 본문은 hyper가
+//! 떨군다).
 //!
 //! 모듈 구성: 라우팅·디스패치(여기) · SigV4 인증(auth) · 오퍼레이션
 //! 핸들러(handlers) · XML 에러 빌더(xml).
