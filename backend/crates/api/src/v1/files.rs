@@ -24,6 +24,9 @@ use crate::validation::{classify_upload, content_type_ok, declared_md5_format_ok
 
 #[derive(Deserialize)]
 pub(super) struct CreateBody {
+    /// 최초 업로드 위치 (= 바인딩 intent). S3 표면의 bucket과 같은 개념이라
+    /// `bucket`으로도 받는다 — 기존 `intent`는 그대로 (하위호환 alias).
+    #[serde(alias = "bucket")]
     intent: String,
     declared_size: i64,
     content_type: Option<String>,
@@ -459,7 +462,18 @@ pub(super) fn committed_response(file_id: Uuid, etag: String) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::is_intent_slug;
+    use super::{is_intent_slug, CreateBody};
+
+    #[test]
+    fn create_body_accepts_bucket_as_alias_for_intent() {
+        // 하위호환: 기존 `intent`와 새 `bucket` 둘 다 같은 필드로 들어온다.
+        let via_intent: Result<CreateBody, _> =
+            serde_json::from_str(r#"{"intent":"avatar","declared_size":1}"#);
+        assert!(matches!(via_intent, Ok(ref b) if b.intent == "avatar"));
+        let via_bucket: Result<CreateBody, _> =
+            serde_json::from_str(r#"{"bucket":"avatar","declared_size":1}"#);
+        assert!(matches!(via_bucket, Ok(ref b) if b.intent == "avatar"));
+    }
 
     #[test]
     fn intent_slug_accepts_lowercase_kebab_and_rejects_the_rest() {
