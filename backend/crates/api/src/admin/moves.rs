@@ -6,7 +6,7 @@
 //! 같은 종류(s3↔s3, fs↔fs) 안에서만 성립한다 (키 규칙이 종류에 묶인다).
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
@@ -124,5 +124,104 @@ pub(super) async fn request_move(
 pub(super) async fn list(State(state): State<AppState>) -> Result<Response, ApiError> {
     let rows = moves::list_moves(&state.pool).await?;
     let out: Vec<MoveOut> = rows.into_iter().map(MoveOut::from).collect();
+    Ok(Json(out).into_response())
+}
+
+/// 저널 단건 조회 — 없으면 404.
+pub(super) async fn get(
+    State(state): State<AppState>,
+    Path(file_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let row = moves::get_move(&state.pool, file_id)
+        .await?
+        .ok_or_else(|| not_found("move not found"))?;
+    Ok(Json(MoveOut::from(row)).into_response())
+}
+
+#[derive(Serialize)]
+struct CancelAccepted {
+    file_id: Uuid,
+    state: &'static str,
+}
+
+/// 이동 취소 — 결정만 기록한다: canceled로 전이하면 reconciler가 dest stray를
+/// 치우고 종결한다 (결정·집행 분리). 저널이 없으면 404, 이미 swapped면 409
+/// (포인터가 dest로 넘어가 old 실물 지연삭제만 남았다 — 취소 대상이 아니다).
+pub(super) async fn cancel(
+    State(state): State<AppState>,
+    Path(file_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let row = moves::get_move(&state.pool, file_id)
+        .await?
+        .ok_or_else(|| not_found("move not found"))?;
+    if row.state == "swapped" {
+        return Err(conflict(
+            "already swapped; deletion of the old copy is pending",
+        ));
+    }
+    // requested·failed면 canceled로 전이한다. 위 조회와 이 전이 사이의 경합은
+    // 조건부 WHERE가 끊는다 — swapped로 넘어갔으면 0행이라 취소가 실패한다.
+    if !moves::cancel_move(&state.pool, file_id).await? {
+        return Err(conflict(
+            "already swapped; deletion of the old copy is pending",
+        ));
+    }
+    tracing::info!(event = "move.cancel_requested", file = %file_id);
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(CancelAccepted {
+            file_id,
+            state: "canceled",
+        }),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+pub(super) struct HistoryParams {
+    file_id: Option<Uuid>,
+    limit: Option<i64>,
+}
+
+/// 이동 결과 원장의 운영자 표현 — object_key는 내부 배치라 내보내지 않는다.
+#[derive(Serialize)]
+struct MoveHistoryOut {
+    file_id: Uuid,
+    client_id: String,
+    source_storage_id: String,
+    dest_storage_id: String,
+    size_bytes: i64,
+    outcome: String,
+    attempts: i32,
+    last_error: Option<String>,
+    requested_at: DateTime<Utc>,
+    finished_at: DateTime<Utc>,
+}
+
+impl From<moves::MoveHistoryRow> for MoveHistoryOut {
+    fn from(row: moves::MoveHistoryRow) -> Self {
+        Self {
+            file_id: row.file_id,
+            client_id: row.client_id,
+            source_storage_id: row.source_storage_id,
+            dest_storage_id: row.dest_storage_id,
+            size_bytes: row.size_bytes,
+            outcome: row.outcome,
+            attempts: row.attempts,
+            last_error: row.last_error,
+            requested_at: row.requested_at,
+            finished_at: row.finished_at,
+        }
+    }
+}
+
+/// 이동 이력 조회 — file_id로 좁히거나 전체, 최근순.
+pub(super) async fn history(
+    State(state): State<AppState>,
+    Query(params): Query<HistoryParams>,
+) -> Result<Response, ApiError> {
+    let limit = params.limit.unwrap_or(100).clamp(1, 1000);
+    let rows = moves::history(&state.pool, params.file_id, limit).await?;
+    let out: Vec<MoveHistoryOut> = rows.into_iter().map(MoveHistoryOut::from).collect();
     Ok(Json(out).into_response())
 }

@@ -238,7 +238,9 @@ async fn run_jobs(
                                     %error,
                                 );
                             }
-                            match moves::finish_move(pool, candidate.file_id).await {
+                            match moves::finish_move_with_history(pool, candidate.file_id, "lost")
+                                .await
+                            {
                                 Ok(()) => {
                                     tracing::info!(event = "move.lost", file = %candidate.file_id)
                                 }
@@ -287,17 +289,21 @@ async fn run_jobs(
                 )
                 .await
                 {
-                    Ok(()) => match moves::finish_move(pool, candidate.file_id).await {
-                        Ok(()) => {
-                            tracing::info!(event = "move.swept", file = %candidate.file_id)
+                    Ok(()) => {
+                        match moves::finish_move_with_history(pool, candidate.file_id, "moved")
+                            .await
+                        {
+                            Ok(()) => {
+                                tracing::info!(event = "move.swept", file = %candidate.file_id)
+                            }
+                            Err(error) => tracing::error!(
+                                event = "reconciler.move_failed",
+                                file = %candidate.file_id,
+                                stage = "sweep_finish",
+                                %error,
+                            ),
                         }
-                        Err(error) => tracing::error!(
-                            event = "reconciler.move_failed",
-                            file = %candidate.file_id,
-                            stage = "sweep_finish",
-                            %error,
-                        ),
-                    },
+                    }
                     Err(error) => {
                         mark_move_attempt(pool, candidate.file_id, &error.to_string(), move_policy)
                             .await
@@ -323,18 +329,21 @@ async fn run_jobs(
                 )
                 .await
                 {
-                    Ok(()) => match moves::finish_move(pool, candidate.file_id).await {
-                        Ok(()) => tracing::info!(
-                            event = "move.stale_cleaned",
-                            file = %candidate.file_id,
-                        ),
-                        Err(error) => tracing::error!(
-                            event = "reconciler.move_failed",
-                            file = %candidate.file_id,
-                            stage = "stale_finish",
-                            %error,
-                        ),
-                    },
+                    Ok(()) => {
+                        match moves::finish_move_with_history(pool, candidate.file_id, "lost").await
+                        {
+                            Ok(()) => tracing::info!(
+                                event = "move.stale_cleaned",
+                                file = %candidate.file_id,
+                            ),
+                            Err(error) => tracing::error!(
+                                event = "reconciler.move_failed",
+                                file = %candidate.file_id,
+                                stage = "stale_finish",
+                                %error,
+                            ),
+                        }
+                    }
                     Err(error) => {
                         mark_move_attempt(pool, candidate.file_id, &error.to_string(), move_policy)
                             .await
@@ -343,6 +352,51 @@ async fn run_jobs(
             }
         }
         Err(error) => tracing::error!(event = "reconciler.scan_failed", job = "move_stale", %error),
+    }
+
+    // 잡 M4: move.canceled — 운영자가 취소한 이동을 치운다. dest에 복사가
+    // 남았을 수 있으니(없어도 무해) 지우고 'canceled'로 박제·종결한다. 취소는
+    // requested·failed에서만 오므로 포인터는 아직 source다 — old 실물은
+    // 건드리지 않는다. 정리 실패는 mark_attempt로 backoff하되 park하지 않는다
+    // (canceled는 정리가 성공할 때까지 재시도한다).
+    match moves::canceled_moves(pool, BATCH_LIMIT).await {
+        Ok(candidates) => {
+            for candidate in candidates {
+                match crate::storage_access::delete_object_at(
+                    pool,
+                    crypto,
+                    s3_clients,
+                    &candidate.dest_storage_id,
+                    &candidate.object_key,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        match moves::finish_move_with_history(pool, candidate.file_id, "canceled")
+                            .await
+                        {
+                            Ok(()) => tracing::info!(
+                                event = "move.canceled_cleaned",
+                                file = %candidate.file_id,
+                            ),
+                            Err(error) => tracing::error!(
+                                event = "reconciler.move_failed",
+                                file = %candidate.file_id,
+                                stage = "canceled_finish",
+                                %error,
+                            ),
+                        }
+                    }
+                    Err(error) => {
+                        mark_move_attempt(pool, candidate.file_id, &error.to_string(), move_policy)
+                            .await
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", job = "move_canceled", %error)
+        }
     }
 
     // 잡 3: 만료된 read lease의 원장 정리 — 회계 무관, issued가 무한히
@@ -374,6 +428,18 @@ async fn run_jobs(
         Ok(count) => tracing::info!(event = "reconciler.history_pruned", count),
         Err(error) => {
             tracing::error!(event = "reconciler.scan_failed", job = "prune_history", %error)
+        }
+    }
+
+    // 잡 M5: 이동 이력 보존 정리 — 3개월 지난 move_history를 배치 삭제한다
+    // (lease_history와 같은 보존 기준). 종결된 이동의 관찰 로그 성장 상한이다.
+    let move_cutoff =
+        chrono::Utc::now() - chrono::Duration::seconds(HISTORY_RETENTION.as_secs() as i64);
+    match moves::prune_move_history(pool, move_cutoff, BATCH_LIMIT).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(event = "move_history.pruned", count),
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", job = "prune_move_history", %error)
         }
     }
 

@@ -65,6 +65,69 @@ pub struct DueDelete {
     pub object_key: String,
 }
 
+/// 취소된 이동의 정리 대상 — dest에 남았을 stray를 치우고 종결한다.
+#[derive(Debug, sqlx::FromRow)]
+pub struct CanceledMove {
+    pub file_id: Uuid,
+    pub dest_storage_id: String,
+    pub object_key: String,
+}
+
+/// 이동 결과 원장 한 줄 — 종결된 이동의 박제 (운영자 이력 조회용).
+#[derive(Debug, sqlx::FromRow)]
+pub struct MoveHistoryRow {
+    pub file_id: Uuid,
+    pub client_id: String,
+    pub source_storage_id: String,
+    pub dest_storage_id: String,
+    pub object_key: String,
+    pub size_bytes: i64,
+    pub outcome: String,
+    pub attempts: i32,
+    pub last_error: Option<String>,
+    pub requested_at: DateTime<Utc>,
+    pub finished_at: DateTime<Utc>,
+}
+
+/// status CLI용 이동 요약 — 상태별 집계와 실패 행 상세.
+#[derive(Debug)]
+pub struct MoveStatusSummary {
+    /// 진행 중 (requested + canceled + swapped).
+    pub active: i64,
+    /// 멈춘 이동 (failed).
+    pub failed: i64,
+}
+
+/// 운영자 파일 목록 한 줄 — files+locations 조인 (admin files API).
+#[derive(Debug, sqlx::FromRow)]
+pub struct AdminFileRow {
+    pub file_id: Uuid,
+    pub client_id: String,
+    pub state: String,
+    pub declared_size: i64,
+    pub content_type: Option<String>,
+    /// location이 사라진 종착 파일이면 None.
+    pub storage_id: Option<String>,
+    pub object_key: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// 운영자 파일 단건 상세 — files 전체 + 위치 + 진행 중 이동 (admin files API).
+#[derive(Debug, sqlx::FromRow)]
+pub struct AdminFileDetail {
+    pub file_id: Uuid,
+    pub client_id: String,
+    pub state: String,
+    pub declared_size: i64,
+    pub content_type: Option<String>,
+    pub etag: Option<String>,
+    pub storage_id: Option<String>,
+    pub object_key: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub committed_at: Option<DateTime<Utc>>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
 /// 이동 요청 기록 — 진행 중이 없으면 새로 만들고, failed면 재무장한다.
 /// 새 삽입은 1행, failed 재무장은 1행, 그 외(requested·swapped 진행 중)는
 /// WHERE가 걸러 0행이다 — false면 API가 409로 번역한다.
@@ -191,8 +254,10 @@ pub async fn finalize_swap(
 }
 
 /// 시도 실패 기록 — 횟수·마지막 오류를 남기고 backoff로 다음 시도를 민다.
-/// max에 닿으면 failed로 멈춘다 (운영자 재요청이 재무장한다). requested와
-/// swapped 둘 다에 쓴다 — sweep 실패도 park해 STUCK 가시성을 준다.
+/// requested만 max에 닿으면 failed로 멈춘다 (운영자 재요청이 재무장한다).
+/// swapped·canceled는 park하지 않는다 — 정리(삭제)는 멱등·저렴해 영원히
+/// backoff로 재시도해도 안전하고, STUCK 가시성은 status의 attempts가 준다.
+/// 세 이동 잡이 공유하는 실패 경로다.
 pub async fn mark_attempt(
     pool: &PgPool,
     file_id: Uuid,
@@ -203,7 +268,8 @@ pub async fn mark_attempt(
     sqlx::query(
         "UPDATE object_moves SET attempts = attempts + 1, last_error = $2, \
          next_attempt_at = now() + make_interval(secs => $3 * (attempts + 1)), \
-         state = CASE WHEN attempts + 1 >= $4 THEN 'failed' ELSE state END \
+         state = CASE WHEN state = 'requested' AND attempts + 1 >= $4 \
+         THEN 'failed' ELSE state END \
          WHERE file_id = $1",
     )
     .bind(file_id)
@@ -227,16 +293,6 @@ pub async fn due_deletes(pool: &PgPool, limit: i64) -> Result<Vec<DueDelete>, sq
     .await
 }
 
-/// 이동 완료 — 저널 행을 지운다. 완료는 행 삭제다 (dest key == source key라
-/// 재실행은 멱등 덮어쓰기이므로 크래시가 언제 끊겨도 이 삭제가 종착이다).
-pub async fn finish_move(pool: &PgPool, file_id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM object_moves WHERE file_id = $1")
-        .bind(file_id)
-        .execute(pool)
-        .await
-        .map(|_| ())
-}
-
 /// 저널 전체 조회 (운영자 목록) — 소수 행이라 무계 조회다.
 pub async fn list_moves(pool: &PgPool) -> Result<Vec<MoveRow>, sqlx::Error> {
     sqlx::query_as(
@@ -245,5 +301,177 @@ pub async fn list_moves(pool: &PgPool) -> Result<Vec<MoveRow>, sqlx::Error> {
          FROM object_moves ORDER BY created_at",
     )
     .fetch_all(pool)
+    .await
+}
+
+/// 저널 단건 조회 (운영자) — 없으면 None.
+pub async fn get_move(pool: &PgPool, file_id: Uuid) -> Result<Option<MoveRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT file_id, source_storage_id, dest_storage_id, object_key, state, attempts, \
+         next_attempt_at, delete_after, last_error, created_at \
+         FROM object_moves WHERE file_id = $1",
+    )
+    .bind(file_id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// 이동 취소 결정 — requested·failed만 canceled로 전이해 즉시 정리 대상으로
+/// 민다. swapped는 이미 포인터가 dest로 넘어가 old 실물 지연삭제만 남았으니
+/// 취소 불가다 (API가 409로 번역). 결정만 여기서: dest stray 정리는
+/// reconciler의 move.canceled 잡이 집행한다 (결정·집행 분리).
+pub async fn cancel_move(pool: &PgPool, file_id: Uuid) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE object_moves SET state = 'canceled', next_attempt_at = now() \
+         WHERE file_id = $1 AND state IN ('requested', 'failed')",
+    )
+    .bind(file_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// 취소된 이동의 정리 대상 — canceled이고 due인 행. dest에 남았을 stray를
+/// 치우고 종결해야 한다. 정리 실패는 mark_attempt가 backoff로 미룬다
+/// (canceled는 park하지 않아 정리가 성공할 때까지 재시도한다).
+pub async fn canceled_moves(pool: &PgPool, limit: i64) -> Result<Vec<CanceledMove>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT file_id, dest_storage_id, object_key FROM object_moves \
+         WHERE state = 'canceled' AND next_attempt_at <= now() \
+         ORDER BY next_attempt_at LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// 이동 종결 + 결과 박제 — 한 tx로 move_history에 박고 저널 행을 지운다
+/// (lease_history와 같은 원칙: 종결 전이와 같은 트랜잭션의 durable 로그).
+/// client_id·size_bytes는 files에서 스냅샷한다 (object_moves의 FK가 files
+/// 행 존재를 보장한다). outcome은 잡별로: sweep 후 'moved', 경합·stale
+/// 패배는 'lost', 취소 정리는 'canceled'.
+pub async fn finish_move_with_history(
+    pool: &PgPool,
+    file_id: Uuid,
+    outcome: &str,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO move_history (file_id, client_id, source_storage_id, dest_storage_id, \
+         object_key, size_bytes, outcome, attempts, last_error, requested_at) \
+         SELECT m.file_id, f.client_id, m.source_storage_id, m.dest_storage_id, \
+         m.object_key, f.declared_size, $2, m.attempts, m.last_error, m.created_at \
+         FROM object_moves m JOIN files f ON f.id = m.file_id \
+         WHERE m.file_id = $1",
+    )
+    .bind(file_id)
+    .bind(outcome)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM object_moves WHERE file_id = $1")
+        .bind(file_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// 이동 이력 보존 정리 — 보존 기간을 지난 move_history를 배치 삭제한다
+/// (files/sweep.rs::prune_history와 같은 결). 관찰 로그의 성장 상한이다.
+pub async fn prune_move_history(
+    pool: &PgPool,
+    cutoff: DateTime<Utc>,
+    limit: i64,
+) -> Result<u64, sqlx::Error> {
+    let deleted = sqlx::query(
+        "DELETE FROM move_history WHERE id IN ( \
+         SELECT id FROM move_history WHERE finished_at < $1 LIMIT $2)",
+    )
+    .bind(cutoff)
+    .bind(limit)
+    .execute(pool)
+    .await?;
+    Ok(deleted.rows_affected())
+}
+
+/// 이동 이력 조회 (운영자) — file_id가 있으면 그 파일만, 없으면 전체.
+/// 최근순(finished_at DESC).
+pub async fn history(
+    pool: &PgPool,
+    file_id: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<MoveHistoryRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT file_id, client_id, source_storage_id, dest_storage_id, object_key, \
+         size_bytes, outcome, attempts, last_error, requested_at, finished_at \
+         FROM move_history WHERE ($1::uuid IS NULL OR file_id = $1) \
+         ORDER BY finished_at DESC LIMIT $2",
+    )
+    .bind(file_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// status CLI용 이동 요약 — 상태별 집계만 (상세는 admin GET /moves가 담당).
+/// failed가 하나라도 있으면 배포를 unhealthy로 본다 (status가 exit 1).
+pub async fn status_summary(pool: &PgPool) -> Result<MoveStatusSummary, sqlx::Error> {
+    let (active, failed): (i64, i64) = sqlx::query_as(
+        "SELECT \
+         count(*) FILTER (WHERE state IN ('requested', 'canceled', 'swapped')), \
+         count(*) FILTER (WHERE state = 'failed') \
+         FROM object_moves",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(MoveStatusSummary { active, failed })
+}
+
+/// 운영자 파일 목록 — files+locations 조인, keyset 페이지네이션. location은
+/// LEFT JOIN이라 종착 파일(purge 완료)도 상태 필터가 부르면 뜬다. after가
+/// 있으면 그 파일의 (created_at, id) 뒤부터, (created_at, id) 오름차순.
+pub async fn admin_list_files(
+    pool: &PgPool,
+    storage_id: Option<&str>,
+    client_id: Option<&str>,
+    state: Option<&str>,
+    after: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<AdminFileRow>, sqlx::Error> {
+    let state = state.unwrap_or("active");
+    sqlx::query_as(
+        "SELECT f.id AS file_id, f.client_id, f.state, f.declared_size, f.content_type, \
+         l.storage_id, l.object_key, f.created_at \
+         FROM files f LEFT JOIN locations l ON l.file_id = f.id \
+         WHERE f.state = $1 \
+         AND ($2::text IS NULL OR l.storage_id = $2) \
+         AND ($3::text IS NULL OR f.client_id = $3) \
+         AND ($4::uuid IS NULL OR (f.created_at, f.id) > \
+         (SELECT created_at, id FROM files WHERE id = $4)) \
+         ORDER BY f.created_at, f.id LIMIT $5",
+    )
+    .bind(state)
+    .bind(storage_id)
+    .bind(client_id)
+    .bind(after)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// 운영자 파일 단건 상세 — files 전체 + 위치. location은 LEFT JOIN이라
+/// 종착 파일도 뜬다 (storage_id·object_key는 None). 없으면 None.
+pub async fn admin_file_detail(
+    pool: &PgPool,
+    file_id: Uuid,
+) -> Result<Option<AdminFileDetail>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT f.id AS file_id, f.client_id, f.state, f.declared_size, f.content_type, \
+         f.etag, l.storage_id, l.object_key, f.created_at, f.committed_at, f.deleted_at \
+         FROM files f LEFT JOIN locations l ON l.file_id = f.id \
+         WHERE f.id = $1",
+    )
+    .bind(file_id)
+    .fetch_optional(pool)
     .await
 }
