@@ -12,7 +12,7 @@ mod clients;
 mod storages;
 mod usage;
 
-pub use storages::verify_registered;
+pub use storages::{check_registered, verify_registered};
 
 use axum::extract::{Request, State};
 use axum::middleware::Next;

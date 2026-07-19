@@ -256,27 +256,57 @@ fn require(value: Option<String>, field: &str) -> Result<String, ApiError> {
         .ok_or_else(|| bad_request(&format!("s3 storage requires {field}")))
 }
 
+/// 한 storage의 접근 재검증 결과. status 서브커맨드가 storage별로 보고할 수
+/// 있게, 첫 실패에 멈추지 않고 전부 모으는 check_registered가 돌려준다.
+pub struct StorageCheck {
+    pub id: String,
+    pub kind: String,
+    /// 접근 실패 사유. ok면 None.
+    pub detail: Option<String>,
+}
+
+impl StorageCheck {
+    pub fn ok(&self) -> bool {
+        self.detail.is_none()
+    }
+}
+
+/// 등록된 모든 storage의 접근을 재검증하되, 첫 실패에 멈추지 않고 결과를
+/// 전부 모은다 (부팅용 strict 래퍼는 verify_registered).
+pub async fn check_registered(pool: &PgPool, crypto: &Crypto) -> anyhow::Result<Vec<StorageCheck>> {
+    let mut checks = Vec::new();
+    for row in registry::list_storages(pool).await? {
+        let detail = match backend_from_row(crypto, &row) {
+            Err(error) => Some(error.to_string()),
+            Ok(StorageBackend::S3 { spec, .. }) => {
+                s3_connect(&spec).await.err().map(|e| e.to_string())
+            }
+            Ok(StorageBackend::Fs { root }) => filegate_infra::fs::connect(&root.to_string_lossy())
+                .await
+                .err()
+                .map(|e| e.to_string()),
+        };
+        checks.push(StorageCheck {
+            id: row.id,
+            kind: row.kind,
+            detail,
+        });
+    }
+    Ok(checks)
+}
+
 /// 부팅 재검증 — 등록된 모든 storage의 접근을 확인한다 (ADR 001).
 /// 실패하면 부팅 중단. 잘못된 마스터 키 설정도 여기서 잡힌다 (spec 01).
 pub async fn verify_registered(pool: &PgPool, crypto: &Crypto) -> anyhow::Result<()> {
-    for row in registry::list_storages(pool).await? {
-        let backend = backend_from_row(crypto, &row)
-            .map_err(|error| anyhow::anyhow!("storage '{}': {error}", row.id))?;
-        match &backend {
-            StorageBackend::S3 { spec, .. } => {
-                s3_connect(spec).await.map_err(|error| {
-                    anyhow::anyhow!("storage '{}' re-verification: {error}", row.id)
-                })?;
+    for check in check_registered(pool, crypto).await? {
+        match check.detail {
+            Some(detail) => {
+                anyhow::bail!("storage '{}' re-verification: {detail}", check.id)
             }
-            StorageBackend::Fs { root } => {
-                filegate_infra::fs::connect(&root.to_string_lossy())
-                    .await
-                    .map_err(|error| {
-                        anyhow::anyhow!("storage '{}' re-verification: {error}", row.id)
-                    })?;
+            None => {
+                tracing::info!(event = "storage.connected", storage = %check.id, kind = %check.kind)
             }
         }
-        tracing::info!(event = "storage.connected", storage = %row.id, kind = %row.kind);
     }
     Ok(())
 }
