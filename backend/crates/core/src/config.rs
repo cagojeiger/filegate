@@ -71,6 +71,9 @@ pub struct ServerConfig {
     /// multipart part 크기 (균일, 마지막만 나머지). 업로드별로 동결된다 —
     /// 설정 변경은 새 업로드부터다 (spec 02). 벤더 규칙상 5MiB..=5GiB.
     pub part_size_bytes: i64,
+    /// S3 표면 CORS 허용 origin (FILEGATE_S3_CORS_ALLOWED_ORIGINS, 콤마구분).
+    /// 비면 CORS 미적용 — 브라우저 직접 업로드는 이 목록의 origin에만 열린다.
+    pub s3_cors_allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -135,6 +138,15 @@ impl Config {
                 .transpose()
                 .map_err(|e| Error::config(format!("FILEGATE_PART_SIZE_BYTES: {e}")))?
                 .unwrap_or(64 * 1024 * 1024),
+            s3_cors_allowed_origins: env("FILEGATE_S3_CORS_ALLOWED_ORIGINS")
+                .map(|v| {
+                    v.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
         };
         // 벤더 규칙 (S3 multipart): part는 5MiB 이상(마지막 제외), 5GiB 이하.
         if !(5 * 1024 * 1024..=5 * 1024 * 1024 * 1024).contains(&server.part_size_bytes) {

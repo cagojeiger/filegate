@@ -60,7 +60,7 @@ pub(crate) fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
         .and_then(|(scheme, token)| scheme.eq_ignore_ascii_case("bearer").then_some(token))
 }
 
-pub fn app(state: AppState) -> Router {
+pub fn app(state: AppState, s3_cors_allowed_origins: &[String]) -> Router {
     // 표면이 둘이다: 컨트롤(JSON, 본문 상한·타임아웃)과 바이트(/blobs, 스트리밍 —
     // 요청 전체 타임아웃 없음: 크기는 스트림 차단이, 진행 중 연결의 수명은
     // blobs의 청크 유휴 타임아웃이 다스린다. lease 만료는 진입 시에만 검사된다.
@@ -84,7 +84,7 @@ pub fn app(state: AppState) -> Router {
     let app = Router::new()
         .merge(control)
         .nest("/blobs", crate::blobs::routes())
-        .merge(crate::s3::routes())
+        .merge(crate::s3::routes(s3_cors_allowed_origins))
         .with_state(state);
     with_telemetry(app)
 }
