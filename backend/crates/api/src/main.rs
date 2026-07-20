@@ -89,6 +89,11 @@ async fn serve() -> anyhow::Result<()> {
         crypto.clone(),
         s3_clients.clone(),
         std::time::Duration::from_secs(config.server.reconciler_interval_secs),
+        reconciler::MovePolicy {
+            max_attempts: config.server.move_max_attempts,
+            delete_delay_secs: config.server.move_delete_delay_secs,
+            retry_backoff_secs: config.server.move_retry_backoff_secs,
+        },
         shutdown.clone(),
     );
 
