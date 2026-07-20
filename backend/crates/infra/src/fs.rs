@@ -215,6 +215,16 @@ pub async fn write_part_at(target: &Path, offset: u64, source: &Path) -> anyhow:
     Ok(())
 }
 
+/// 조립 임시를 정확한 길이로 자른다 — 조립은 결정적 이름을 truncate 없이
+/// 쓰므로, 실패한 이전 시도가 더 긴 꼬리를 남겼을 수 있다. 확정 직전 실측
+/// 합으로 잘라 그 꼬리가 객체로 새는 것을 막는다.
+pub async fn truncate_to(target: &Path, len: u64) -> anyhow::Result<()> {
+    let file = fs::OpenOptions::new().write(true).open(target).await?;
+    file.set_len(len).await?;
+    file.sync_all().await?;
+    Ok(())
+}
+
 /// 경로 기반 확정 — multipart 대상 임시 파일을 실체 경로로 rename.
 /// (단일 PUT의 commit_write와 같은 계약, 핸들 대신 경로를 받는 변형.)
 pub async fn commit_path(root: &Path, temp: &Path, object_key: &str) -> anyhow::Result<()> {
@@ -267,6 +277,21 @@ mod tests {
         write_part_at(&assembly, 0, &p1).await.unwrap();
         let assembled = fs::read(&assembly).await.unwrap();
         assert_eq!(assembled, b"AAABBCCCC");
+        fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn truncate_to_drops_stale_tail_from_a_prior_attempt() {
+        // 이전 실패 시도가 더 긴 꼬리를 남겼다 — 짧은 재시도가 앞부분만
+        // 덮어써도 truncate_to가 실측 합으로 잘라 꼬리가 새지 않는다.
+        let dir = scratch("truncate").await;
+        let assembly = multipart_temp(&dir, "lease1");
+        fs::write(&assembly, b"OLDLONGTAIL").await.unwrap(); // 11바이트 잔재
+        let p1 = dir.join("src-p1");
+        fs::write(&p1, b"NEW").await.unwrap();
+        write_part_at(&assembly, 0, &p1).await.unwrap(); // 앞 3바이트만 갱신
+        truncate_to(&assembly, 3).await.unwrap();
+        assert_eq!(fs::read(&assembly).await.unwrap(), b"NEW");
         fs::remove_dir_all(&dir).await.ok();
     }
 

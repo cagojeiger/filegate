@@ -370,6 +370,11 @@ pub(super) async fn complete_multipart(
                 }
                 offset = offset.saturating_add(*size as u64);
             }
+            // 실측 합으로 자른다 — 이전 실패 시도가 더 긴 꼬리를 남겼어도
+            // 확정 객체는 정확히 total 바이트다.
+            if let Err(error) = fs_backend::truncate_to(&assembly, offset).await {
+                return Err(xml_internal("truncate assembly", error));
+            }
             if let Err(error) = fs_backend::commit_path(root, &assembly, &file.object_key).await {
                 return Err(xml_internal("fs commit", error));
             }
@@ -512,7 +517,16 @@ fn reconcile(
     ledger: &[(i32, i64, String)],
 ) -> Result<Vec<(i32, i64, String)>, Response> {
     let mut completion = Vec::with_capacity(client_parts.len());
+    let mut prev = 0_i32;
     for (n, client_etag) in client_parts {
+        // S3처럼 번호는 오름차순·유일해야 한다 — 중복을 허용하면 조립이 같은
+        // part를 두 번 써서 바이트가 불어난다(fs). 이 검사가 그 손상을 막는다.
+        if *n <= prev {
+            return Err(invalid_part(
+                "parts must be listed in ascending order without duplicates",
+            ));
+        }
+        prev = *n;
         let entry = ledger
             .iter()
             .find(|(ledger_no, _, _)| ledger_no == n)
@@ -571,6 +585,20 @@ mod tests {
         assert!(reconcile(&[(2, "aaaa".to_owned())], &ledger).is_err());
         // ETag 불일치 → InvalidPart.
         assert!(reconcile(&[(1, "zzzz".to_owned())], &ledger).is_err());
+    }
+
+    #[test]
+    fn reconcile_rejects_duplicate_and_out_of_order_parts() {
+        let ledger = vec![
+            (1, 50_i64, "aaaa".to_owned()),
+            (2, 30_i64, "bbbb".to_owned()),
+        ];
+        // 같은 번호 두 번 → 거부 (조립이 바이트를 불리는 손상 방지).
+        assert!(reconcile(&[(1, "aaaa".to_owned()), (1, "aaaa".to_owned())], &ledger).is_err());
+        // 내림차순 → 거부.
+        assert!(reconcile(&[(2, "bbbb".to_owned()), (1, "aaaa".to_owned())], &ledger).is_err());
+        // 오름차순·유일은 통과.
+        assert!(reconcile(&[(1, "aaaa".to_owned()), (2, "bbbb".to_owned())], &ledger).is_ok());
     }
 
     #[test]
