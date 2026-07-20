@@ -81,39 +81,52 @@ SDK 정상 경로에 나오지 않는다.
 - 모든 접근은 lease 원장을 지난다 (ADR 002) — 표면이 내부적으로 lease를
   만들어 관찰·회계·이력이 네이티브와 한 장부가 된다.
 
-### multipart — S3 프로토콜을 네이티브 기계에 배선한다
+### multipart — S3 프로토콜 + 크기-비선언 part 모델
 
-S3 multipart는 spec 02(네이티브 multipart)의 기계를 그대로 재사용한다 —
-같은 files·leases·part 회계, 같은 infra 프리미티브(s3 벤더 세션 / fs offset
-조립), 같은 합성 ETag(part MD5들의 MD5 + `-N`). 이 표면은 프로토콜 어댑터일
-뿐이다: S3 요청 모양을 받아 네이티브 create/parts/commit/abort로 번역한다.
+S3 multipart는 spec 02(네이티브 multipart)와 **infra 프리미티브·part 원장·
+합성 ETag(part MD5들의 MD5 + `-N`)를 공유하되, 크기 모델은 다르다**. 네이티브는
+create가 `declared_size`를 받아 part 기하(개수·명목 크기·offset)를 파생하고
+실측을 그 기하에 대조한다. 그러나 S3 multipart는 **create에 크기가 없고 part
+경계를 클라이언트(boto3의 chunksize)가 정한다** — 그래서 declared_size에 매인
+경로(`classify_upload`·`part_count`·`part_expected_size`·`part_offset`·
+`verify_part_sizes`)는 **쓰지 않는다**. 대신 **part별 실측 크기를 저장**해
+조립하고 검증한다. 이 표면은 프로토콜 어댑터이자 **크기-비선언 multipart 경로**다
+(공유 재료 위의 신규 도메인 코드).
 
-- **CreateMultipartUpload** `?uploads`: pending file과 write lease를 만들고
-  `UploadId`를 돌려준다. part 크기는 filegate가 정한다(운영자 설정, 균일 —
-  마지막만 나머지) — 클라이언트가 part 크기를 정하는 S3 관례와 다르지만,
-  균일 part는 R2 요구이자 fs offset의 전제다 (spec 02). declared_size는
-  이 시점에 알 수 없으므로, geometry가 아니라 **실측 part**로 검증한다.
-  s3 백엔드는 벤더 upload_id를 write lease에 저장하고, fs 백엔드는 lease
-  자체가 세션이다. `UploadId`는 filegate가 발급한 핸들이다(벤더 id를 그대로
-  노출하지 않는다 — client는 filegate 자격으로만 인증한다).
-- **UploadPart** `?partNumber=N&uploadId=U`: part 바이트를 스풀로 받아
-  백엔드로 중계한다(단일 PUT과 같은 릴레이). 크기·MD5를 실측해 part 원장에
-  기록하고 `ETag`(part MD5)를 돌려준다. 같은 partNumber 재업로드는
-  덮어쓰기다. **no-commit 대칭은 여기서 유지된다** — part 업로드에는 확정이
-  없다.
-- **CompleteMultipartUpload** `?uploadId=U`: 요청 XML의 part 목록(번호+ETag)을
-  받아 네이티브 multipart commit으로 번역한다 — s3는 벤더 CompleteMultipart,
-  fs는 offset 조립. **이 Complete가 곧 커밋점이다.** 단일 PUT은 관찰
-  확정(no-commit)을 유지하지만, multipart는 S3 프로토콜 자체가 명시적 완료를
-  요구하므로 그 Complete를 커밋으로 삼는다 — filegate 전용 단계가 아니라 S3가
-  원래 부르는 호출이라 "무수정 SDK" 원칙과 어긋나지 않는다. 응답 ETag는
-  합성형(`"<hex>-<part수>"`)이며, 같은 키 매핑·detach 규칙은 PutObject와 같다.
-- **AbortMultipartUpload** `?uploadId=U`: 벤더 세션 중단(s3) 또는 임시 정리
-  (fs)하고 pending을 회수한다 — 회수 확장(spec 02)과 같은 경로. 멱등.
+- **CreateMultipartUpload** `?uploads`: 크기 미상의 pending file과 write
+  lease를 만들고 `UploadId`를 돌려준다. `UploadId`는 filegate 핸들(예: file_id
+  기반)이고 벤더 upload_id는 lease에 내부 저장한다 — client는 벤더 id를 보지
+  않는다(filegate 자격으로만 인증). s3 백엔드는 벤더 multipart 세션을 열고,
+  fs 백엔드는 조립 임시를 연다. **part 크기·개수는 클라이언트가 정한다** —
+  filegate는 강제하지 않는다.
+- **UploadPart** `?partNumber=N&uploadId=U`: part 바이트를 스풀로 받아 백엔드로
+  중계하고 **실측 크기·MD5를 part 원장에 기록**한다. s3는 벤더 UploadPart로
+  그대로 넘긴다(클라이언트 part = 벤더 part; boto3 기본 chunk가 S3의 part
+  ≥5MiB 규칙을 충족하므로 filegate가 균일을 보장할 필요가 없다). fs는 **직전
+  part들 실측 크기의 누계를 offset으로** 쓴다 — 네이티브의 `(N-1)×part_size`
+  균일 가정은 클라이언트 part가 비균일이라 여기 쓸 수 없다. `ETag`(part MD5)
+  반환, 같은 partNumber 재업로드는 덮어쓰기. part 업로드에 확정은 없다.
+- **CompleteMultipartUpload** `?uploadId=U`: 요청 XML의 part 목록(번호+ETag)은
+  **검증 입력**이다 — filegate가 자기 원장의 실측과 대조해(존재·ETag 일치)
+  완성하며, 크기의 진실은 원장(실측 part 합)이다. 클라이언트 목록을 신뢰의
+  근원으로 삼지 않는 것은 spec 02와 같은 원칙이다 (spec 02는 게이트웨이 계약이
+  프로토콜 사정과 갈리는 지점을 이미 밝힌다). s3는 벤더 CompleteMultipart,
+  fs는 누계 offset 조립 마감. **이 Complete가 커밋점이다** — 단일 PUT의 관찰
+  확정(no-commit)과 달리 S3 프로토콜이 명시적 완료를 요구하며, spec 00이
+  multipart를 관찰-확정에서 이미 제외한다(00:54). filegate 전용 단계가 아니라
+  SDK가 원래 부르는 호출이다. 응답 ETag는 합성형(`"<hex>-<part수>"`), 매핑·
+  detach는 PutObject와 같다.
+- **AbortMultipartUpload** `?uploadId=U`: 벤더 세션 중단(s3)·임시 정리(fs) 후
+  pending을 회수한다 — 회수 확장(spec 02)과 같은 경로. 멱등.
 
-백엔드 종류는 client의 기반 storage가 결정한다 — S3 표면은 s3·fs 어느
-쪽이든 같은 갈래를 탄다(NAS 포함). 세션이 lease TTL보다 오래 걸리면
-part 접근은 재발급으로 살아있고, 미완 세션은 reconciler가 회수한다.
+크기 상한(단일 PUT 5GiB, spec 02의 `part_size × 10000` 한도)은 create에 크기가
+없으므로 **Complete 시점에 실측 합으로 강제**한다. 백엔드 종류는 client 기반
+storage가 결정하며 s3·fs 같은 어댑터를 탄다(NAS 포함). 세션이 lease TTL보다
+오래 걸리면 part 접근은 재발급으로 살아있고, 미완 세션은 reconciler가 회수한다.
+
+라우팅상 POST와 `?uploads`·`?uploadId`·`?partNumber` 쿼리 분기는 현재 dispatch
+(PUT/GET/HEAD/DELETE만, POST는 405)에 없는 **새 표면**이다 — 어댑터는 단순
+배선이 아니라 이 라우팅과 위 크기-비선언 경로를 새로 짓는다.
 
 ### 에러 모양
 
