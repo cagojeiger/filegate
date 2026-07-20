@@ -241,7 +241,6 @@ pub async fn prune_terminal_files(
          AND COALESCE(f.deleted_at, f.created_at) < now() - $1 * interval '1 second' \
          AND NOT EXISTS (SELECT 1 FROM locations l WHERE l.file_id = f.id) \
          AND NOT EXISTS (SELECT 1 FROM leases le WHERE le.file_id = f.id) \
-         AND NOT EXISTS (SELECT 1 FROM object_moves m WHERE m.file_id = f.id) \
          LIMIT $2)",
     )
     .bind(retention_secs)

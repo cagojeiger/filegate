@@ -22,7 +22,6 @@ pub async fn run() -> anyhow::Result<ExitCode> {
     let checks = crate::admin::check_registered(&pool, &crypto).await?;
     let usage = filegate_db::usage::by_storage(&pool).await?;
     let clients = filegate_db::registry::list_clients(&pool).await?;
-    let moves = filegate_db::moves::status_summary(&pool).await?;
     pool.close().await;
 
     println!("filegate {}   db ok", env!("CARGO_PKG_VERSION"));
@@ -50,12 +49,8 @@ pub async fn run() -> anyhow::Result<ExitCode> {
     }
     println!();
     println!("CLIENTS  {}", clients.len());
-    println!();
-    // 요약만 — 멈춘 이동의 상세는 admin GET /moves가 담당한다.
-    println!("MOVES    active {} · failed {}", moves.active, moves.failed);
 
-    // 스토리지 접근 실패든 멈춘 이동이든 배포는 unhealthy다 (운영자 개입 신호).
-    let all_ok = checks.iter().all(|check| check.ok()) && moves.failed == 0;
+    let all_ok = checks.iter().all(|check| check.ok());
     Ok(if all_ok {
         ExitCode::SUCCESS
     } else {
