@@ -17,10 +17,16 @@
 | HeadObject | `HEAD /{bucket}/{key}` | 200 + Content-Length·Content-Type·ETag | 404 |
 | GetObject | `GET /{bucket}/{key}` (+`Range`) | 200 스트림 / 206 부분 | 404·416 |
 | DeleteObject | `DELETE /{bucket}/{key}` | 204 — 멱등 | 403 |
+| CreateMultipartUpload | `POST /{bucket}/{key}?uploads` | 200 + XML `<UploadId>` | 403·404 |
+| UploadPart | `PUT /{bucket}/{key}?partNumber=N&uploadId=U` | 200, `ETag: "<md5>"` | 403·404(세션)·400 |
+| CompleteMultipartUpload | `POST /{bucket}/{key}?uploadId=U` (XML part 목록) | 200 + XML `<ETag>` 합성 | 403·404·400(part 불일치) |
+| AbortMultipartUpload | `DELETE /{bucket}/{key}?uploadId=U` | 204 — 멱등 | 403 |
 
-넷으로 충분함이 실측이다: boto3의 put→head→get(+Range)→delete→head(404)
-전체 수명에서 **다른 요청은 하나도 나가지 않는다** — ListBuckets·
-HeadBucket 같은 프로브가 없다.
+단일 객체 넷(put→head→get+Range→delete)은 boto3의 작은 파일 수명 전체다.
+multipart 넷은 `upload_file`의 임계(기본 8MiB) 초과 자동 전환이 요구한다 —
+같은 SDK 호출이 MinIO와 filegate에서 동일하게 도는 것이 목표다. 이 여덟이
+전부다: ListBuckets·HeadBucket·ListMultipartUploads·ListParts 같은 프로브는
+SDK 정상 경로에 나오지 않는다.
 
 ## 결정 사항
 
@@ -75,6 +81,56 @@ HeadBucket 같은 프로브가 없다.
 - 모든 접근은 lease 원장을 지난다 (ADR 002) — 표면이 내부적으로 lease를
   만들어 관찰·회계·이력이 네이티브와 한 장부가 된다.
 
+### multipart — S3 프로토콜 + 크기-비선언 part 모델
+
+S3 multipart는 spec 02(네이티브 multipart)와 **infra 프리미티브·part 원장·
+합성 ETag(part MD5들의 MD5 + `-N`)를 공유하되, 크기 모델은 다르다**. 네이티브는
+create가 `declared_size`를 받아 part 기하(개수·명목 크기·offset)를 파생하고
+실측을 그 기하에 대조한다. 그러나 S3 multipart는 **create에 크기가 없고 part
+경계를 클라이언트(boto3의 chunksize)가 정한다** — 그래서 declared_size에 매인
+경로(`classify_upload`·`part_count`·`part_expected_size`·`part_offset`·
+`verify_part_sizes`)는 **쓰지 않는다**. 대신 **part별 실측 크기를 저장**해
+조립하고 검증한다. 이 표면은 프로토콜 어댑터이자 **크기-비선언 multipart 경로**다
+(공유 재료 위의 신규 도메인 코드).
+
+- **CreateMultipartUpload** `?uploads`: 크기 미상의 pending file과 write
+  lease를 만들고 `UploadId`를 돌려준다. `UploadId`는 filegate 핸들(예: file_id
+  기반)이고 벤더 upload_id는 lease에 내부 저장한다 — client는 벤더 id를 보지
+  않는다(filegate 자격으로만 인증). s3 백엔드는 벤더 multipart 세션을 열고,
+  fs 백엔드는 조립 임시를 연다. **part 크기·개수는 클라이언트가 정한다** —
+  filegate는 강제하지 않는다.
+- **UploadPart** `?partNumber=N&uploadId=U`: part 바이트를 스풀로 받아 백엔드로
+  중계하고 **실측 크기·MD5를 part 원장에 기록**한다. s3는 벤더 UploadPart로
+  그대로 넘긴다(클라이언트 part = 벤더 part; boto3 기본 chunk가 S3의 part
+  ≥5MiB 규칙을 충족하므로 filegate가 균일을 보장할 필요가 없다). fs는 각
+  part를 **임시로 저장하고 실측 크기를 기록**만 한다 — 조립(offset 배치)은
+  Complete로 미룬다. boto3가 part를 **동시·비순차로 올리므로** UploadPart
+  시점엔 앞 part 크기를 몰라 offset을 정할 수 없다(네이티브의
+  `(N-1)×part_size` 균일 가정도 비균일 part에 쓸 수 없다). `ETag`(part MD5)
+  반환, 같은 partNumber 재업로드는 덮어쓰기. part 업로드에 확정은 없다.
+- **CompleteMultipartUpload** `?uploadId=U`: 요청 XML의 part 목록(번호+ETag)은
+  **검증 입력**이다 — filegate가 자기 원장의 실측과 대조해(존재·ETag 일치)
+  완성하며, 크기의 진실은 원장(실측 part 합)이다. 클라이언트 목록을 신뢰의
+  근원으로 삼지 않는 것은 spec 02와 같은 원칙이다 (spec 02는 게이트웨이 계약이
+  프로토콜 사정과 갈리는 지점을 이미 밝힌다). s3는 벤더 CompleteMultipart,
+  fs는 이 시점에 part를 **partNumber 순으로 정렬해 실측 크기 누계 offset으로
+  조립**한다(모든 part가 도착한 뒤라야 offset이 정해진다). **이 Complete가 커밋점이다** — 단일 PUT의 관찰
+  확정(no-commit)과 달리 S3 프로토콜이 명시적 완료를 요구하며, spec 00이
+  multipart를 관찰-확정에서 이미 제외한다(00:54). filegate 전용 단계가 아니라
+  SDK가 원래 부르는 호출이다. 응답 ETag는 합성형(`"<hex>-<part수>"`), 매핑·
+  detach는 PutObject와 같다.
+- **AbortMultipartUpload** `?uploadId=U`: 벤더 세션 중단(s3)·임시 정리(fs) 후
+  pending을 회수한다 — 회수 확장(spec 02)과 같은 경로. 멱등.
+
+크기 상한(단일 PUT 5GiB, spec 02의 `part_size × 10000` 한도)은 create에 크기가
+없으므로 **Complete 시점에 실측 합으로 강제**한다. 백엔드 종류는 client 기반
+storage가 결정하며 s3·fs 같은 어댑터를 탄다(NAS 포함). 세션이 lease TTL보다
+오래 걸리면 part 접근은 재발급으로 살아있고, 미완 세션은 reconciler가 회수한다.
+
+라우팅상 POST와 `?uploads`·`?uploadId`·`?partNumber` 쿼리 분기는 현재 dispatch
+(PUT/GET/HEAD/DELETE만, POST는 405)에 없는 **새 표면**이다 — 어댑터는 단순
+배선이 아니라 이 라우팅과 위 크기-비선언 경로를 새로 짓는다.
+
 ### 에러 모양
 
 S3 표준 XML 최소형으로 답한다 — SDK가 이걸 파싱한다:
@@ -84,17 +140,19 @@ S3 표준 XML 최소형으로 답한다 — SDK가 이걸 파싱한다:
 ```
 
 Code 어휘는 S3 표준을 따른다: `NoSuchBucket`, `NoSuchKey`,
-`SignatureDoesNotMatch`, `AccessDenied`, `InvalidRange`.
+`SignatureDoesNotMatch`, `AccessDenied`, `InvalidRange`, `NoSuchUpload`
+(없는 uploadId), `InvalidPart`(Complete의 part 목록 불일치).
 
 ## 다음 범위로 미룬다
 
-- **multipart 4종** (CreateMultipartUpload/UploadPart/Complete/Abort) —
-  boto3 `upload_file`의 8MiB 초과 자동 전환이 요구한다. 그 전까지는
-  가이드가 단일 PUT을 고정한다 ([가이드](../guide/s3-onboarding.md)).
 - **ListObjectsV2** — 보류. 목록의 진실 원천은 서비스 DB다 (ADR 003).
-- CopyObject·bucket 계열 오퍼레이션 — 계획 없음.
+- part 내부 오프셋 재개, full-object CRC 합성 검증 — spec 02와 같이 보류.
+- CopyObject·bucket 계열·ListMultipartUploads·ListParts — 계획 없음
+  (SDK 정상 경로에 나오지 않는다).
 
 ## 완료 기준
 
 [scripts/s3-capture.py](../../scripts/s3-capture.py)가 endpoint만 바꿔
 MinIO와 filegate에서 **동일하게 통과한다** — 표면 동등성의 실측 정의다.
+multipart는 임계를 넘긴 파일의 `upload_file`(자동 전환)이 두 백엔드에서
+같은 요청 흐름으로 통과함을 포함한다.
