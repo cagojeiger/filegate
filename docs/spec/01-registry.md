@@ -8,7 +8,7 @@
 
 ## 등록부
 
-- 정본은 DB다. client는 자기 기반 storage(`storage_id`)를 직접 소유한다 — 별도 binding/intent 테이블 없이 client 행이 storage 하나를 참조한다. S3 표면 자격증명은 client 아래 1:N이다.
+- 정본은 DB다. client는 자기 기반 storage(`storage_id`)를 직접 소유한다 — 별도 binding/intent 테이블 없이 client 행이 storage 하나를 참조한다. S3 표면 자격증명은 client 아래 1:N이고, 배치 정책은 storage 아래 1:N이다 ([spec 04](04-moves.md)).
 - id는 운영자가 정하는 안정 슬러그다 (`oci-std`, `notegate`). 생성 후 불변 — Terraform·API 모두 이 id로 참조한다.
 - storage는 내부 접근 주소(`endpoint`)와 전송 주체가 쓰는 공개 주소(`public_endpoint`)를 구분한다. 같으면 같은 값을 둔다.
 - 검증은 쓰기 시점이다: 참조 무결성은 FK가, storage 등록은 제출된 자격증명으로 저장 공간 접근을 즉석 확인해 지킨다. 실패한 등록은 거부된다.
