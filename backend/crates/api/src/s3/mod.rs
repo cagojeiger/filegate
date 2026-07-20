@@ -14,6 +14,7 @@
 
 mod auth;
 mod handlers;
+mod multipart;
 mod xml;
 
 use axum::Router;
@@ -55,19 +56,58 @@ async fn dispatch(
             "the specified bucket does not exist",
         );
     }
-    let result = match parts.method {
-        Method::PUT => {
+    // multipart는 쿼리스트링이 오퍼레이션을 가른다 (spec 03) — POST와
+    // ?uploads·?uploadId·?partNumber 분기는 단일 객체 메서드 라우팅에 없는
+    // 새 표면이다. 인증·bucket 검사는 이미 공용으로 지났다.
+    let query = parts.uri.query().unwrap_or("");
+    let has_uploads = query_flag(query, "uploads");
+    let upload_id = query_value(query, "uploadId");
+    let part_number = query_value(query, "partNumber");
+    let result = match (&parts.method, has_uploads, upload_id, part_number) {
+        // CreateMultipartUpload: POST …?uploads
+        (&Method::POST, true, _, _) => {
+            multipart::create_multipart(&state, &client_id, &bucket, &key, &parts.headers).await
+        }
+        // UploadPart: PUT …?partNumber=N&uploadId=U
+        (&Method::PUT, _, Some(upload_id), Some(part_number)) => match part_number.parse::<i32>() {
+            Ok(part_number) => {
+                multipart::upload_part(
+                    &state,
+                    &client_id,
+                    part_number,
+                    upload_id,
+                    &parts.headers,
+                    body,
+                )
+                .await
+            }
+            Err(_) => Err(xml::xml_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument",
+                "partNumber must be an integer",
+            )),
+        },
+        // CompleteMultipartUpload: POST …?uploadId=U (no uploads)
+        (&Method::POST, false, Some(upload_id), _) => {
+            multipart::complete_multipart(&state, &client_id, &bucket, &key, upload_id, body).await
+        }
+        // AbortMultipartUpload: DELETE …?uploadId=U
+        (&Method::DELETE, _, Some(upload_id), _) => {
+            multipart::abort_multipart(&state, &client_id, upload_id).await
+        }
+        // 단일 객체 오퍼레이션 — 메서드로 라우팅한다 (기존 표면).
+        (&Method::PUT, ..) => {
             handlers::put_object(&state, &client_id, &bucket, &key, &parts.headers, body).await
         }
-        Method::GET => {
+        (&Method::GET, ..) => {
             handlers::get_object(&state, &client_id, &bucket, &key, &parts.headers).await
         }
-        Method::HEAD => handlers::head_object(&state, &client_id, &key).await,
-        Method::DELETE => handlers::delete_object(&state, &client_id, &bucket, &key).await,
+        (&Method::HEAD, ..) => handlers::head_object(&state, &client_id, &key).await,
+        (&Method::DELETE, ..) => handlers::delete_object(&state, &client_id, &bucket, &key).await,
         _ => Err(xml::xml_error(
             StatusCode::METHOD_NOT_ALLOWED,
             "MethodNotAllowed",
-            "only PutObject, GetObject, HeadObject, DeleteObject are supported",
+            "the method is not supported on this surface",
         )),
     };
     match result {
@@ -75,7 +115,55 @@ async fn dispatch(
     }
 }
 
+/// 쿼리에 이 키가 (값 유무와 무관하게) 있는가 — `?uploads`처럼 값 없는
+/// 플래그 판정용. S3의 subresource 플래그는 값이 없다.
+fn query_flag(query: &str, key: &str) -> bool {
+    query
+        .split('&')
+        .any(|pair| pair == key || pair.split_once('=').is_some_and(|(k, _)| k == key))
+}
+
+/// 쿼리 파라미터의 값 — 없으면 None. uploadId(UUID)·partNumber(정수)는
+/// 퍼센트 인코딩이 없으므로 raw를 그대로 쓴다.
+fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(k, _)| *k == key)
+        .map(|(_, value)| value)
+}
+
 /// 헤더 값을 문자열로 — 표면 전역이 쓰는 작은 헬퍼 (auth·handlers 공유).
 pub(super) fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|v| v.to_str().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uploads_flag_is_detected_with_or_without_value() {
+        // ?uploads (값 없음)·?uploads= 둘 다 플래그다. presigned의 X-Amz-*가
+        // 섞여 와도 가른다.
+        assert!(query_flag("uploads", "uploads"));
+        assert!(query_flag("uploads=", "uploads"));
+        assert!(query_flag("uploads&X-Amz-Signature=abc", "uploads"));
+        // uploadId는 uploads 플래그가 아니다 (Complete/Abort와 Create를 가른다).
+        assert!(!query_flag("uploadId=abc", "uploads"));
+        assert!(!query_flag("", "uploads"));
+    }
+
+    #[test]
+    fn upload_id_and_part_number_are_read_as_values() {
+        let q = "partNumber=3&uploadId=fed00000-0000-4000-8000-000000000000";
+        assert_eq!(query_value(q, "partNumber"), Some("3"));
+        assert_eq!(
+            query_value(q, "uploadId"),
+            Some("fed00000-0000-4000-8000-000000000000")
+        );
+        assert_eq!(query_value(q, "missing"), None);
+        // 값 없는 uploads는 value로는 None이다 (flag로만 잡힌다).
+        assert_eq!(query_value("uploads", "uploads"), None);
+    }
 }

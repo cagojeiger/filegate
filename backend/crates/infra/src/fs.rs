@@ -134,10 +134,15 @@ pub async fn sweep_stale_temps(
         if !name.starts_with(".fg-tmp-") {
             continue;
         }
-        if let Some(lease_id) = name.strip_prefix(".fg-tmp-mp-")
-            && protected_mp_leases.contains(lease_id)
-        {
-            continue;
+        if let Some(rest) = name.strip_prefix(".fg-tmp-mp-") {
+            // rest는 네이티브 조립 파일이면 `{lease}`, S3 multipart part 파일이면
+            // `{lease}-p{N}`이다. UUID는 hex+하이픈이라 `p`가 없으므로 `-p`가
+            // lease id와 part 번호를 명확히 가른다 (네이티브는 `-p`가 없어 rest
+            // 전체가 lease). 활성 lease면 조립 중 part든 조립 파일이든 보호한다.
+            let lease = rest.split_once("-p").map_or(rest, |(lease, _)| lease);
+            if protected_mp_leases.contains(lease) {
+                continue;
+            }
         }
         let Ok(meta) = entry.metadata().await else {
             continue;
@@ -172,6 +177,24 @@ pub fn multipart_temp(root: &Path, lease_id: &str) -> PathBuf {
     root.join(format!(".fg-tmp-mp-{lease_id}"))
 }
 
+/// S3 multipart part의 임시 파일 경로 (spec 03) — 크기-비선언 모델이라
+/// 도착 시점엔 offset을 모른다. 그래서 각 part를 자기 파일에 계측 보관하고
+/// (조립은 Complete로 미룬다), `.fg-tmp-mp-{lease}-p{N}`로 짓는다: `.fg-tmp-`
+/// 접두로 버려지면 mtime sweep이 줍고, `mp-{lease}` 부분으로 활성 lease 보호
+/// (sweep_stale_temps)가 조립 중 part를 지키게 한다.
+pub fn multipart_part_temp(root: &Path, lease_id: &str, part_no: i32) -> PathBuf {
+    root.join(format!(".fg-tmp-mp-{lease_id}-p{part_no}"))
+}
+
+/// 스풀 임시를 최종 part 임시로 원자 교체한다 (S3 multipart part 승격).
+/// rename이라 같은 part의 재업로드가 last-write-wins로 덮어쓰고, 이전 더
+/// 큰 part의 꼬리 바이트가 남지 않는다 (truncate 있는 write_part_at과 달리
+/// 여기선 조립 전이라 part 파일이 통째로 교체돼야 한다).
+pub async fn rename_into(source: &Path, target: &Path) -> anyhow::Result<()> {
+    fs::rename(source, target).await?;
+    Ok(())
+}
+
 /// part 승격 — part 스풀을 대상 임시 파일의 자기 offset에 기록한다.
 /// 범위가 겹치지 않아 병렬·멀티 pod 안전하고, 같은 part의 동시 승격
 /// 직렬화는 호출자의 part claim(행 락) 몫이다 (spec 02).
@@ -192,6 +215,16 @@ pub async fn write_part_at(target: &Path, offset: u64, source: &Path) -> anyhow:
     Ok(())
 }
 
+/// 조립 임시를 정확한 길이로 자른다 — 조립은 결정적 이름을 truncate 없이
+/// 쓰므로, 실패한 이전 시도가 더 긴 꼬리를 남겼을 수 있다. 확정 직전 실측
+/// 합으로 잘라 그 꼬리가 객체로 새는 것을 막는다.
+pub async fn truncate_to(target: &Path, len: u64) -> anyhow::Result<()> {
+    let file = fs::OpenOptions::new().write(true).open(target).await?;
+    file.set_len(len).await?;
+    file.sync_all().await?;
+    Ok(())
+}
+
 /// 경로 기반 확정 — multipart 대상 임시 파일을 실체 경로로 rename.
 /// (단일 PUT의 commit_write와 같은 계약, 핸들 대신 경로를 받는 변형.)
 pub async fn commit_path(root: &Path, temp: &Path, object_key: &str) -> anyhow::Result<()> {
@@ -201,4 +234,107 @@ pub async fn commit_path(root: &Path, temp: &Path, object_key: &str) -> anyhow::
     }
     fs::rename(temp, target).await?;
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod tests {
+    use std::collections::HashSet;
+    use std::time::Duration;
+
+    use super::*;
+
+    async fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fg-fstest-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir).await;
+        fs::create_dir_all(&dir).await.unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn multipart_part_temp_carries_lease_and_part_number() {
+        let root = Path::new("/data/x");
+        let path = multipart_part_temp(root, "lease-abc", 7);
+        assert_eq!(path, root.join(".fg-tmp-mp-lease-abc-p7"));
+    }
+
+    #[tokio::test]
+    async fn out_of_order_parts_assemble_by_cumulative_offset() {
+        // S3 multipart: part는 비순차로 오지만, Complete가 번호순 실측 누계
+        // offset으로 조립하면 원본 바이트열이 재구성된다. 물리 쓰기 순서는
+        // 무관하다 (offset이 절대값이므로).
+        let dir = scratch("assemble").await;
+        let p1 = dir.join("src-p1");
+        let p2 = dir.join("src-p2");
+        let p3 = dir.join("src-p3");
+        fs::write(&p1, b"AAA").await.unwrap(); // 크기 3, offset 0
+        fs::write(&p2, b"BB").await.unwrap(); // 크기 2, offset 3
+        fs::write(&p3, b"CCCC").await.unwrap(); // 크기 4, offset 5
+        let assembly = multipart_temp(&dir, "lease1");
+        // 도착 순서 = 2, 3, 1 (비순차). offset은 번호순 누계 (0, 3, 5).
+        write_part_at(&assembly, 3, &p2).await.unwrap();
+        write_part_at(&assembly, 5, &p3).await.unwrap();
+        write_part_at(&assembly, 0, &p1).await.unwrap();
+        let assembled = fs::read(&assembly).await.unwrap();
+        assert_eq!(assembled, b"AAABBCCCC");
+        fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn truncate_to_drops_stale_tail_from_a_prior_attempt() {
+        // 이전 실패 시도가 더 긴 꼬리를 남겼다 — 짧은 재시도가 앞부분만
+        // 덮어써도 truncate_to가 실측 합으로 잘라 꼬리가 새지 않는다.
+        let dir = scratch("truncate").await;
+        let assembly = multipart_temp(&dir, "lease1");
+        fs::write(&assembly, b"OLDLONGTAIL").await.unwrap(); // 11바이트 잔재
+        let p1 = dir.join("src-p1");
+        fs::write(&p1, b"NEW").await.unwrap();
+        write_part_at(&assembly, 0, &p1).await.unwrap(); // 앞 3바이트만 갱신
+        truncate_to(&assembly, 3).await.unwrap();
+        assert_eq!(fs::read(&assembly).await.unwrap(), b"NEW");
+        fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn sweep_protects_active_multipart_part_files() {
+        // `.fg-tmp-mp-{lease}-p{N}` part 파일은 활성 lease면 mtime과 무관하게
+        // 보호된다 — UUID엔 'p'가 없어 `-p`가 lease와 part 번호를 가른다.
+        let dir = scratch("sweep").await;
+        let active = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let stale = "11111111-2222-3333-4444-555555555555";
+        fs::write(dir.join(format!(".fg-tmp-mp-{active}-p1")), b"x")
+            .await
+            .unwrap();
+        fs::write(dir.join(format!(".fg-tmp-mp-{active}")), b"x") // 조립 파일
+            .await
+            .unwrap();
+        fs::write(dir.join(format!(".fg-tmp-mp-{stale}-p1")), b"x")
+            .await
+            .unwrap();
+        // 늙었다고 간주되도록 max_age를 0에 가깝게 두고 잠깐 재운다.
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        let mut protected = HashSet::new();
+        protected.insert(active.to_owned());
+        let removed = sweep_stale_temps(&dir, Duration::from_millis(1), &protected)
+            .await
+            .unwrap();
+        // 보호되지 않은 stale part 하나만 지워진다.
+        assert_eq!(removed, 1);
+        assert!(
+            fs::try_exists(dir.join(format!(".fg-tmp-mp-{active}-p1")))
+                .await
+                .unwrap()
+        );
+        assert!(
+            fs::try_exists(dir.join(format!(".fg-tmp-mp-{active}")))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !fs::try_exists(dir.join(format!(".fg-tmp-mp-{stale}-p1")))
+                .await
+                .unwrap()
+        );
+        fs::remove_dir_all(&dir).await.ok();
+    }
 }

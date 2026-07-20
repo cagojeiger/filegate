@@ -26,7 +26,9 @@ pub use access::{
     ByteLease, FileAccess, FileStat, access, attach_write_secret, byte_lease, issue_read_lease,
     record_upload, recorded_upload, stat,
 };
-pub use commit::{ObservedCommitCandidate, finalize_commit, observed_commit_candidates};
+pub use commit::{
+    ObservedCommitCandidate, finalize_commit, finalize_multipart_commit, observed_commit_candidates,
+};
 pub use create::{CreateOutcome, CreateSpec, CreatedFile, create};
 pub use geometry::{part_count, part_expected_size, part_offset};
 pub use multipart::{
@@ -36,5 +38,5 @@ pub use multipart::{
 pub use sweep::{
     DeleteOutcome, SweepCandidate, active_multipart_lease_ids, expire_read_leases, expired_pending,
     finalize_purge, finalize_reclaim, mark_deleted, prune_history, prune_terminal_files,
-    prune_terminal_leases, purgeable,
+    prune_terminal_leases, purgeable, reclaim_pending,
 };
