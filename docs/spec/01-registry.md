@@ -44,7 +44,6 @@
 - **운영자 API가 유일한 제어점이다.** 등록 CRUD와 운영 동사(usage, 이후 plan/approve/pause)가 여기 산다. 인증은 정적 운영자 토큰(env).
 - 클라이언트: **Terraform provider**(선언 관리 — 같은 API의 번역기)로 시작한다. CLI는 필요해지면 같은 API의 클라이언트로 추가한다. 화면은 두지 않으며, 생기더라도 이 API의 얇은 클라이언트다.
 - API는 클라이언트-친화 CRUD로 만든다: 안정 id, id 단건 조회, 명확한 404, 멱등 삭제 — Terraform의 Read/plan이 요구하는 성질이다.
-- 운영자는 파일 하나의 storage를 이동할 수 있다 (`POST /api/admin/v1/files/{id}/move`) — 복사·검증 후 포인터를 교체하고, 구본은 presigned 수명(900초) 이후에 지운다. 실패는 정책 횟수 후 `failed`로 멈추고 재요청이 재시도다.
 
 ## 경계선
 
