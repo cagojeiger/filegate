@@ -135,6 +135,37 @@ pub async fn finalize_reclaim(
     Ok(true)
 }
 
+/// 명시적 Abort의 회수 (spec 03) — 만료를 기다리지 않고 pending multipart를
+/// 되돈다. finalize_reclaim과 같은 전이(pending→reclaimed + lease 만료 +
+/// location 제거)지만, 사용자가 세션을 명시적으로 버렸으므로 lease 만료
+/// 재확인이 없다. 조건부 pending→reclaimed라 reconciler의 만료 회수와
+/// 경합해도 하나만 이긴다 — 진 쪽은 false(멱등). lease_parts는 lease가 남는
+/// 동안 유지되다 GC(CASCADE)로 사라진다 — Abort의 물리 정리는 호출자 몫이다.
+pub async fn reclaim_pending(pool: &PgPool, file_id: Uuid) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let transitioned =
+        sqlx::query("UPDATE files SET state = 'reclaimed' WHERE id = $1 AND state = 'pending'")
+            .bind(file_id)
+            .execute(&mut *tx)
+            .await?;
+    if transitioned.rows_affected() == 0 {
+        return Ok(false);
+    }
+    sqlx::query(
+        "UPDATE leases SET state = 'expired' \
+         WHERE file_id = $1 AND kind = 'write' AND state = 'issued'",
+    )
+    .bind(file_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM locations WHERE file_id = $1")
+        .bind(file_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
 /// purge 대상 — deleted인데 location이 남은 파일들. purge가 끝난 deleted는
 /// location이 없어 자연히 스캔에서 빠진다.
 pub async fn purgeable(pool: &PgPool, limit: i64) -> Result<Vec<SweepCandidate>, sqlx::Error> {

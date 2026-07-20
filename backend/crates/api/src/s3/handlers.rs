@@ -191,8 +191,9 @@ pub(super) async fn put_object(
 }
 
 /// 공유 스풀 프리미티브의 실패를 S3 XML 에러로 번역한다. 스풀이 이미
-/// 임시 파일을 지웠으므로 여기서는 응답만 만든다.
-fn spool_error_to_xml(error: spool::SpoolError) -> Response {
+/// 임시 파일을 지웠으므로 여기서는 응답만 만든다. 단일 PUT·multipart part
+/// 표면이 공유한다 (같은 스풀 프리미티브를 쓰므로 번역도 하나다).
+pub(super) fn spool_error_to_xml(error: spool::SpoolError) -> Response {
     match error {
         spool::SpoolError::Idle => xml_error(
             StatusCode::REQUEST_TIMEOUT,

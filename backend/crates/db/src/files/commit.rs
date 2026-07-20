@@ -39,6 +39,43 @@ pub async fn finalize_commit(
     Ok(true)
 }
 
+/// S3 multipart 확정 (spec 03) — Complete 시점에 실측 part 합으로 크기가
+/// 정해진다. create가 크기 미상(sentinel 0)으로 열었으므로, finalize_commit과
+/// 달리 declared_size도 함께 확정한다. 나머지(조건부 pending→active 전이 +
+/// lease 정산)는 finalize_commit과 같다 — 동시 Complete 중 하나만 true.
+pub async fn finalize_multipart_commit(
+    pool: &PgPool,
+    file_id: Uuid,
+    declared_size: i64,
+    etag: &str,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    let transitioned = sqlx::query(
+        "UPDATE files SET state = 'active', declared_size = $2, etag = $3, committed_at = now() \
+         WHERE id = $1 AND state = 'pending'",
+    )
+    .bind(file_id)
+    .bind(declared_size)
+    .bind(etag)
+    .execute(&mut *tx)
+    .await?;
+    if transitioned.rows_affected() == 0 {
+        return Ok(false);
+    }
+
+    sqlx::query(
+        "UPDATE leases SET state = 'committed' \
+         WHERE file_id = $1 AND kind = 'write' AND state = 'issued'",
+    )
+    .bind(file_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(true)
+}
+
 /// 관찰 확정 후보 — lease가 살아 있는 단일 PUT pending (spec 00).
 /// reconciler가 실물을 관찰해 선언과 맞으면 서비스의 commit 없이 확정한다.
 pub struct ObservedCommitCandidate {
