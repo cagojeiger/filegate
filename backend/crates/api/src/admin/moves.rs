@@ -67,8 +67,19 @@ impl From<moves::MoveRow> for MoveOut {
     }
 }
 
+/// 두 storage가 같은 실물을 가리키는가 — kind는 호출부가 이미 같음을 보장한다.
+/// s3는 endpoint+bucket이, fs는 root_path가 실물 정체성이다 (id·자격증명은
+/// 무관). 실물이 같으면 복사가 자기 위 덮어쓰기라 지연삭제가 유일 사본을 지운다.
+fn same_physical_target(source: &registry::StorageRow, dest: &registry::StorageRow) -> bool {
+    match source.kind.as_str() {
+        "s3" => source.endpoint == dest.endpoint && source.bucket == dest.bucket,
+        "fs" => source.root_path == dest.root_path,
+        _ => false,
+    }
+}
+
 /// 이동 요청 — job 생성. 검증을 통과하면 저널에 requested를 심고 202로 그 job을
-/// 돌려준다. active·동종 kind·≤5GiB·다른 storage만; 진행 중 이동이 있으면 409.
+/// 돌려준다. active·동종 kind·≤5GiB·다른 실물만; 진행 중 이동이 있으면 409.
 pub(super) async fn request_move(
     State(state): State<AppState>,
     Json(body): Json<MoveRequestBody>,
@@ -102,6 +113,14 @@ pub(super) async fn request_move(
     if body.storage_id == location.storage_id {
         return Err(bad_request("destination is the current storage"));
     }
+    // object_key가 storage_id와 독립이라, 같은 백엔드(s3 endpoint+bucket,
+    // fs root_path)에 두 storage가 등록되면 다른 id라도 같은 실물을 가리킨다 —
+    // 그러면 이동의 지연삭제가 유일 사본을 지운다. 실물 동일이면 거부한다.
+    if same_physical_target(&source, &dest) {
+        return Err(bad_request(
+            "source and dest resolve to the same physical storage",
+        ));
+    }
     // 저널에 심는다 — 진행 중(requested·swapped)이 있으면 409, failed면 재무장.
     let inserted = moves::insert_move(
         &state.pool,
@@ -131,9 +150,10 @@ pub(super) async fn request_move(
 pub(super) struct ListParams {
     state: Option<String>,
     dest_storage_id: Option<String>,
+    limit: Option<i64>,
 }
 
-/// 진행 중 이동 목록 (저널) — state·dest_storage_id로 거른다.
+/// 진행 중 이동 목록 (저널) — state·dest_storage_id로 거르고 유계로 자른다.
 pub(super) async fn list(
     State(state): State<AppState>,
     Query(params): Query<ListParams>,
@@ -145,10 +165,12 @@ pub(super) async fn list(
             "state must be one of requested, canceled, swapped, failed",
         ));
     }
+    let limit = params.limit.unwrap_or(100).clamp(1, 1000);
     let rows = moves::list_moves(
         &state.pool,
         params.state.as_deref(),
         params.dest_storage_id.as_deref(),
+        limit,
     )
     .await?;
     let out: Vec<MoveOut> = rows.into_iter().map(MoveOut::from).collect();
@@ -182,12 +204,17 @@ pub(super) async fn cancel(
             "already swapped; deletion of the old copy is pending",
         ));
     }
-    // requested·failed면 canceled로 전이한다. 위 조회와 이 전이 사이의 경합은
-    // 조건부 WHERE가 끊는다 — swapped로 넘어갔으면 0행이라 취소가 실패한다.
+    // requested·failed면 canceled로 전이한다. 0행이면 위 조회 뒤 상태가
+    // 넘어간 것 — 재조회로 갈래를 가른다: 이미 canceled면 멱등 성공(204),
+    // swapped면 늦음(409), 사라졌으면 404.
     if !moves::cancel_move(&state.pool, file_id).await? {
-        return Err(conflict(
-            "already swapped; deletion of the old copy is pending",
-        ));
+        return match moves::get_move(&state.pool, file_id).await? {
+            Some(row) if row.state == "canceled" => Ok(StatusCode::NO_CONTENT.into_response()),
+            Some(_) => Err(conflict(
+                "already swapped; deletion of the old copy is pending",
+            )),
+            None => Err(not_found("move not found")),
+        };
     }
     tracing::info!(event = "move.cancel_requested", file = %file_id);
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -252,4 +279,68 @@ pub(super) async fn history(
     .await?;
     let out: Vec<MoveHistoryOut> = rows.into_iter().map(MoveHistoryOut::from).collect();
     Ok(Json(out).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use filegate_db::registry::StorageRow;
+
+    fn s3(id: &str, endpoint: &str, bucket: &str) -> StorageRow {
+        StorageRow {
+            id: id.to_owned(),
+            kind: "s3".to_owned(),
+            force_relay: false,
+            root_path: None,
+            endpoint: Some(endpoint.to_owned()),
+            public_endpoint: Some(endpoint.to_owned()),
+            region: Some("us-east-1".to_owned()),
+            bucket: Some(bucket.to_owned()),
+            force_path_style: true,
+            access_key: Some("ak".to_owned()),
+            secret_key_ciphertext: Some(vec![1]),
+            secret_key_nonce: Some(vec![0_u8; 12]),
+            enc_key_id: Some("v1".to_owned()),
+            capacity_bytes: 0,
+        }
+    }
+
+    fn fs(id: &str, root: &str) -> StorageRow {
+        StorageRow {
+            id: id.to_owned(),
+            kind: "fs".to_owned(),
+            force_relay: false,
+            root_path: Some(root.to_owned()),
+            endpoint: None,
+            public_endpoint: None,
+            region: None,
+            bucket: None,
+            force_path_style: false,
+            access_key: None,
+            secret_key_ciphertext: None,
+            secret_key_nonce: None,
+            enc_key_id: None,
+            capacity_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn same_physical_target_catches_shared_backend() {
+        // 다른 id라도 같은 endpoint+bucket이면 실물이 같다 — 이동 금지 대상.
+        assert!(same_physical_target(
+            &s3("a", "http://m:9000", "shared"),
+            &s3("b", "http://m:9000", "shared"),
+        ));
+        // bucket이 다르면 별개 실물.
+        assert!(!same_physical_target(
+            &s3("a", "http://m:9000", "one"),
+            &s3("b", "http://m:9000", "two"),
+        ));
+        // fs는 root_path가 정체성 — 같으면 같은 실물.
+        assert!(same_physical_target(&fs("a", "/data"), &fs("b", "/data")));
+        assert!(!same_physical_target(
+            &fs("a", "/data/x"),
+            &fs("b", "/data/y")
+        ));
+    }
 }

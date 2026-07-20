@@ -253,7 +253,7 @@ async fn stale_requested_catches_move_whose_location_vanished(pool: PgPool) {
         .await
         .unwrap();
     assert!(
-        moves::list_moves(&pool, None, None)
+        moves::list_moves(&pool, None, None, 100)
             .await
             .unwrap()
             .is_empty()

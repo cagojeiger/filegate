@@ -223,36 +223,50 @@ async fn run_jobs(
                             file = %candidate.file_id,
                             dest = %candidate.dest_storage_id,
                         ),
-                        // 스왑 패배 — dest에 남은 stray를 best-effort로 치우고 종료.
+                        // 스왑 0행 — 두 갈래다. 저널을 재조회해 가른다: canceled면
+                        // 복사 중 취소가 끼어들어 tx가 롤백된 것이니 M4 취소 잡에
+                        // dest 정리·'canceled' 종결을 맡기고 건너뛴다 (lost로 잘못
+                        // 박제하지 않는다). 그 외(requested)는 진짜 경합 패배라 dest
+                        // stray를 치우고 'lost'로 종결한다.
                         Ok(false) => {
-                            if let Err(error) = crate::storage_access::delete_object_at(
-                                pool,
-                                crypto,
-                                s3_clients,
-                                &candidate.dest_storage_id,
-                                &candidate.object_key,
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    event = "reconciler.move_failed",
-                                    file = %candidate.file_id,
-                                    stage = "lost_cleanup",
-                                    %error,
-                                );
-                            }
-                            match moves::finish_move_with_history(pool, candidate.file_id, "lost")
+                            let recheck = moves::get_move(pool, candidate.file_id).await;
+                            let canceled =
+                                matches!(&recheck, Ok(Some(row)) if row.state == "canceled");
+                            if !canceled {
+                                if let Err(error) = crate::storage_access::delete_object_at(
+                                    pool,
+                                    crypto,
+                                    s3_clients,
+                                    &candidate.dest_storage_id,
+                                    &candidate.object_key,
+                                )
                                 .await
-                            {
-                                Ok(()) => {
-                                    tracing::info!(event = "move.lost", file = %candidate.file_id)
+                                {
+                                    tracing::warn!(
+                                        event = "reconciler.move_failed",
+                                        file = %candidate.file_id,
+                                        stage = "lost_cleanup",
+                                        %error,
+                                    );
                                 }
-                                Err(error) => tracing::error!(
-                                    event = "reconciler.move_failed",
-                                    file = %candidate.file_id,
-                                    stage = "lost_finish",
-                                    %error,
-                                ),
+                                match moves::finish_move_with_history(
+                                    pool,
+                                    candidate.file_id,
+                                    "lost",
+                                )
+                                .await
+                                {
+                                    Ok(()) => tracing::info!(
+                                        event = "move.lost",
+                                        file = %candidate.file_id,
+                                    ),
+                                    Err(error) => tracing::error!(
+                                        event = "reconciler.move_failed",
+                                        file = %candidate.file_id,
+                                        stage = "lost_finish",
+                                        %error,
+                                    ),
+                                }
                             }
                         }
                         Err(error) => {

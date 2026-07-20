@@ -10,6 +10,12 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::error::{Error, Result};
 
+/// 읽기 lease(presigned GET)의 수명 초 — api::lease::READ_LEASE_TTL의 값.
+/// 이동의 삭제 지연은 이 값 이상이어야 스왑 직전 발급된 읽기 URL이 old 실물의
+/// 지연삭제보다 오래 산다 (spec 04 불변식 ④). 이 크레이트는 api에 의존하지
+/// 않으므로 상수를 여기 박고, 어긋나면 배포 검증(status)이 잡는다.
+const READ_LEASE_TTL_SECS: i64 = 900;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub server: ServerConfig,
@@ -194,11 +200,12 @@ impl Config {
         if server.move_max_attempts < 1 {
             return Err(Error::config("FILEGATE_MOVE_MAX_ATTEMPTS must be >= 1"));
         }
-        // 0·음수 지연은 스왑 즉시 삭제가 되어 presigned 수명 보호가 깨진다 —
-        // 이 손잡이가 지키려는 불변식을 손잡이로 끌 수 없게 한다.
-        if server.move_delete_delay_secs < 1 {
+        // 읽기 lease 수명보다 짧은 지연은 스왑 직전 발급된 읽기 URL이 old
+        // 실물의 지연삭제보다 먼저 죽게 두는 것 — 이 손잡이가 지키려는 불변식을
+        // 손잡이로 끌 수 없게 floor를 lease 수명에 고정한다 (spec 04 ④).
+        if server.move_delete_delay_secs < READ_LEASE_TTL_SECS {
             return Err(Error::config(
-                "FILEGATE_MOVE_DELETE_DELAY_SECS must be >= 1",
+                "FILEGATE_MOVE_DELETE_DELAY_SECS must be >= 900 (read-lease TTL)",
             ));
         }
         if server.move_retry_backoff_secs < 0 {
@@ -295,13 +302,13 @@ mod tests {
     fn move_envs_override_and_validate() {
         let overridden = |key: &str| match key {
             "FILEGATE_MOVE_MAX_ATTEMPTS" => Some("3".to_owned()),
-            "FILEGATE_MOVE_DELETE_DELAY_SECS" => Some("1".to_owned()),
+            "FILEGATE_MOVE_DELETE_DELAY_SECS" => Some("1200".to_owned()),
             "FILEGATE_MOVE_RETRY_BACKOFF_SECS" => Some("0".to_owned()),
             other => base_env(other),
         };
         let config = Config::load_from(&overridden).unwrap();
         assert_eq!(config.server.move_max_attempts, 3);
-        assert_eq!(config.server.move_delete_delay_secs, 1);
+        assert_eq!(config.server.move_delete_delay_secs, 1200);
         assert_eq!(config.server.move_retry_backoff_secs, 0);
 
         // 0회 시도는 이동이 즉시 failed로 태어난다 — 거부한다.
@@ -310,12 +317,18 @@ mod tests {
             other => base_env(other),
         };
         assert!(Config::load_from(&zero_attempts).is_err());
-        // 0·음수 지연은 스왑 즉시 삭제 — presigned 수명 보호가 깨진다.
+        // 읽기 lease 수명(900초)보다 짧은 지연은 presigned 수명 보호를 깬다 —
+        // 0도 899도 거부한다.
         let zero_delay = |key: &str| match key {
             "FILEGATE_MOVE_DELETE_DELAY_SECS" => Some("0".to_owned()),
             other => base_env(other),
         };
         assert!(Config::load_from(&zero_delay).is_err());
+        let below_floor = |key: &str| match key {
+            "FILEGATE_MOVE_DELETE_DELAY_SECS" => Some("899".to_owned()),
+            other => base_env(other),
+        };
+        assert!(Config::load_from(&below_floor).is_err());
         // 파싱 불가한 값도 거부한다.
         let unparsable = |key: &str| match key {
             "FILEGATE_MOVE_RETRY_BACKOFF_SECS" => Some("soon".to_owned()),

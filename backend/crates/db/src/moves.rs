@@ -305,12 +305,13 @@ pub async fn due_deletes(pool: &PgPool, limit: i64) -> Result<Vec<DueDelete>, sq
     .await
 }
 
-/// 저널 조회 (운영자 목록) — state·dest_storage_id로 거른다. 소수 행이라
-/// 무계 조회다. 필터가 없으면 전체를 created_at 순으로.
+/// 저널 조회 (운영자 목록) — state·dest_storage_id로 거르고 유계로 자른다
+/// (호출부가 clamp). 필터가 없으면 전체를 created_at 순으로.
 pub async fn list_moves(
     pool: &PgPool,
     state: Option<&str>,
     dest_storage_id: Option<&str>,
+    limit: i64,
 ) -> Result<Vec<MoveRow>, sqlx::Error> {
     sqlx::query_as(
         "SELECT file_id, source_storage_id, dest_storage_id, state, attempts, \
@@ -318,10 +319,11 @@ pub async fn list_moves(
          FROM object_moves \
          WHERE ($1::text IS NULL OR state = $1) \
          AND ($2::text IS NULL OR dest_storage_id = $2) \
-         ORDER BY created_at",
+         ORDER BY created_at LIMIT $3",
     )
     .bind(state)
     .bind(dest_storage_id)
+    .bind(limit)
     .fetch_all(pool)
     .await
 }
