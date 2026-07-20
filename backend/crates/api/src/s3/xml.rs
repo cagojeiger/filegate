@@ -47,6 +47,21 @@ fn xml_escape(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// XML 텍스트 노드 디코드 — SDK가 보내는 Complete 본문의 엔티티를 원문으로
+/// 되돌린다. AWS Rust SDK는 ETag 따옴표를 `&quot;`로 인코딩해 보내므로, 이걸
+/// 풀지 않으면 원장 다이제스트와 대조가 어긋난다. `&amp;`는 이중 디코드를
+/// 막으려 마지막에 푼다 (표준 순서).
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&quot;", "\"")
+        .replace("&#34;", "\"")
+        .replace("&#x22;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
 /// CreateMultipartUpload 성공 XML (spec 03) — SDK가 UploadId를 여기서 읽는다.
 pub(super) fn initiate_result(bucket: &str, key: &str, upload_id: &str) -> Response {
     let body = format!(
@@ -98,8 +113,11 @@ pub(super) fn parse_complete_multipart(body: &str) -> Result<Vec<(i32, String)>,
         let number = extract_tag(block, "PartNumber").ok_or("part is missing PartNumber")?;
         let etag = extract_tag(block, "ETag").ok_or("part is missing ETag")?;
         let part_no: i32 = number.trim().parse().map_err(|_| "invalid PartNumber")?;
-        // ETag는 따옴표째 오므로 벗긴다 — 원장 대조는 raw 다이제스트로 한다.
-        parts.push((part_no, etag.trim().trim_matches('"').to_owned()));
+        // ETag는 따옴표째 오고, SDK에 따라 그 따옴표가 XML 엔티티(&quot;)로
+        // 인코딩된다. 엔티티를 먼저 풀고 따옴표를 벗겨야 원장 다이제스트와
+        // 대조된다 — raw 다이제스트로 비교한다.
+        let etag = xml_unescape(etag.trim());
+        parts.push((part_no, etag.trim_matches('"').to_owned()));
     }
     if parts.is_empty() {
         return Err("the part list is empty");
@@ -154,6 +172,22 @@ mod tests {
              </CompleteMultipartUpload>";
         let parts = parse_complete_multipart(body).expect("well-formed body parses");
         assert_eq!(parts, vec![(1, "aaa".to_owned()), (2, "bbb".to_owned())]);
+    }
+
+    #[test]
+    fn decodes_entity_encoded_etags_from_the_aws_sdk() {
+        // AWS Rust SDK는 Complete 본문에서 ETag 따옴표를 &quot;(또는 &#34;)로
+        // 엔티티 인코딩한다 — 파서가 엔티티를 풀지 않으면 원장 다이제스트와
+        // 불일치해 InvalidPart가 났다 (notegate multipart 실패의 원인).
+        let body = "<CompleteMultipartUpload>\
+             <Part><PartNumber>1</PartNumber><ETag>&quot;abc123&quot;</ETag></Part>\
+             <Part><PartNumber>2</PartNumber><ETag>&#34;def456&#34;</ETag></Part>\
+             </CompleteMultipartUpload>";
+        let parts = parse_complete_multipart(body).expect("entity-encoded body parses");
+        assert_eq!(
+            parts,
+            vec![(1, "abc123".to_owned()), (2, "def456".to_owned())]
+        );
     }
 
     #[test]
