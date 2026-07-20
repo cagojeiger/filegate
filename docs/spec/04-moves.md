@@ -53,14 +53,19 @@ requested ──집행──▶ swapped ──지연삭제──▶ (행 삭제 
 
 ## 운영자 표면
 
+이동은 비동기 job이다 — 요청은 저널에 requested를 남기고 집행은 reconciler가
+한다. 그래서 이동을 1급 job 리소스(`/moves`)로 모델링한다: 요청은 생성이고,
+진행은 폴링이며, fleet은 컬렉션이다 (Stripe의 Refund·Google LRO와 같은 결).
+`/files`는 이동 대상 선정을 위한 인벤토리다 — 물리는 운영자만 본다.
+
 | 동사 | 호출 | 뜻 |
 |---|---|---|
-| 이동 요청 | `POST /api/admin/v1/files/{id}/move` `{storage_id}` | 저널에 requested 기록 (202) — active·동종 kind만 |
-| 이동 취소 | `DELETE /api/admin/v1/moves/{file_id}` | canceled 표시만 — 정리는 reconciler. swapped는 409 |
-| 이동 조회 | `GET /api/admin/v1/moves`·`/moves/{file_id}` | 저널 |
-| 이력 조회 | `GET /api/admin/v1/moves/history` | 원장 |
-| 파일 목록 | `GET /api/admin/v1/files?storage_id=&state=&after=` | 인벤토리 — 이동 대상 선정의 전제 |
-| 파일 상세 | `GET /api/admin/v1/files/{id}` | location·진행 중 이동 포함 (운영자만 물리를 본다) |
+| 이동 요청 | `POST /api/admin/v1/moves` `{file_id, storage_id}` | job 생성 → 202. active·동종 kind·≤5GiB만. 진행 중 이동 있으면 409 |
+| 이동 조회 | `GET /api/admin/v1/moves`·`/moves/{file_id}` | 진행 중 job (저널). 없으면 404 |
+| 이동 취소 | `DELETE /api/admin/v1/moves/{file_id}` | canceled 표시만 — 정리는 reconciler. swapped는 409(늦음) |
+| 이력 조회 | `GET /api/admin/v1/moves/history` | 종결 원장 |
+| 파일 목록 | `GET /api/admin/v1/files?storage_id=&state=&limit=&after=` | 인벤토리 (keyset 페이지네이션) — idle 신호 포함 |
+| 파일 상세 | `GET /api/admin/v1/files/{id}` | location·진행 중 이동 포함 |
 | 자가점검 | `filegate status` | `MOVES active n · failed m` 요약 — failed가 있으면 exit 1 |
 
 ## 배치 정책 — 이동의 생성기
