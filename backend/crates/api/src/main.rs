@@ -84,11 +84,17 @@ async fn serve() -> anyhow::Result<()> {
     let shutdown = CancellationToken::new();
     // 요청 경로와 reconciler가 같은 캐시를 공유한다 — 같은 storage의 웜 풀.
     let s3_clients = std::sync::Arc::new(filegate_infra::S3ClientCache::default());
+    let move_policy = reconciler::MovePolicy {
+        max_attempts: config.server.move_max_attempts,
+        delete_delay_secs: config.server.move_delete_delay_secs,
+        retry_backoff_secs: config.server.move_retry_backoff_secs,
+    };
     let worker = reconciler::spawn(
         pool.clone(),
         crypto.clone(),
         s3_clients.clone(),
         std::time::Duration::from_secs(config.server.reconciler_interval_secs),
+        move_policy,
         shutdown.clone(),
     );
 
