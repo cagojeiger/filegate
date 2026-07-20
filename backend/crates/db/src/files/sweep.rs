@@ -256,8 +256,10 @@ pub async fn prune_terminal_leases(
 }
 
 /// 종착 파일 행 정리 — 보존 기간을 지난 reclaimed·purge 완료 deleted 행을
-/// 배치 삭제한다 (spec 00: stat 계약은 보존 기간까지). location(점유)이나
-/// lease(원장)가 남은 행은 건드리지 않는다 — purge와 lease GC가 먼저다.
+/// 배치 삭제한다 (spec 00: stat 계약은 보존 기간까지). location(점유)·lease
+/// (원장)·object_moves(이동 저널)가 남은 행은 건드리지 않는다 — purge·lease
+/// GC·stale 정리가 먼저다. 이동 저널 FK로 배치 전체가 실패하는 대신 그 행만
+/// 건너뛴다.
 /// 이 정리가 있어야 files의 무한 누적이 멎고, 이력이 쌓인 client도 행이
 /// 모두 정리된 뒤에는 등록 해제(RESTRICT FK)가 가능해진다.
 pub async fn prune_terminal_files(
@@ -272,6 +274,7 @@ pub async fn prune_terminal_files(
          AND COALESCE(f.deleted_at, f.created_at) < now() - $1 * interval '1 second' \
          AND NOT EXISTS (SELECT 1 FROM locations l WHERE l.file_id = f.id) \
          AND NOT EXISTS (SELECT 1 FROM leases le WHERE le.file_id = f.id) \
+         AND NOT EXISTS (SELECT 1 FROM object_moves m WHERE m.file_id = f.id) \
          LIMIT $2)",
     )
     .bind(retention_secs)
