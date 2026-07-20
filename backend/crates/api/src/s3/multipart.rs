@@ -203,8 +203,7 @@ pub(super) async fn upload_part(
 
     match &backend {
         StorageBackend::Fs { root } => {
-            // 같은 part 동시 승격을 직렬화한다 (spec 02의 처방) — claim(행 락)
-            // 아래에서 스풀 임시를 part 임시로 원자 교체하고 실측을 닫는다.
+            // 같은 part 동시 승격을 claim(행 락)으로 직렬화한다 (spec 02의 처방).
             let claim = match files::claim_part(&state.pool, lease.lease_id, part_number).await {
                 Ok(claim) => claim,
                 Err(error) => {
@@ -358,8 +357,7 @@ pub(super) async fn complete_multipart(
             .map_err(|e| xml_storage_error("complete multipart", e))?
         }
         StorageBackend::Fs { root } => {
-            // 조립: part를 번호순 실측 누계 offset으로 대상 임시에 기록한 뒤
-            // rename 한 번 (모든 part가 도착한 뒤라야 offset이 정해진다).
+            // 조립은 Complete뿐이다 — 모든 part가 도착한 뒤라야 누계 offset이 정해진다.
             let lease_str = lease.lease_id.to_string();
             let assembly = fs_backend::multipart_temp(root, &lease_str);
             let mut offset = 0_u64;
@@ -383,7 +381,6 @@ pub(super) async fn complete_multipart(
                 fs_backend::abort_write(&fs_backend::multipart_part_temp(root, &lease_str, *n))
                     .await;
             }
-            // ETag는 S3 multipart와 같은 합성 규칙: md5(part md5들) + "-N".
             composite_etag(&completion)
         }
     };
