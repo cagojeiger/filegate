@@ -17,10 +17,16 @@
 | HeadObject | `HEAD /{bucket}/{key}` | 200 + Content-Length·Content-Type·ETag | 404 |
 | GetObject | `GET /{bucket}/{key}` (+`Range`) | 200 스트림 / 206 부분 | 404·416 |
 | DeleteObject | `DELETE /{bucket}/{key}` | 204 — 멱등 | 403 |
+| CreateMultipartUpload | `POST /{bucket}/{key}?uploads` | 200 + XML `<UploadId>` | 403·404 |
+| UploadPart | `PUT /{bucket}/{key}?partNumber=N&uploadId=U` | 200, `ETag: "<md5>"` | 403·404(세션)·400 |
+| CompleteMultipartUpload | `POST /{bucket}/{key}?uploadId=U` (XML part 목록) | 200 + XML `<ETag>` 합성 | 403·404·400(part 불일치) |
+| AbortMultipartUpload | `DELETE /{bucket}/{key}?uploadId=U` | 204 — 멱등 | 403 |
 
-넷으로 충분함이 실측이다: boto3의 put→head→get(+Range)→delete→head(404)
-전체 수명에서 **다른 요청은 하나도 나가지 않는다** — ListBuckets·
-HeadBucket 같은 프로브가 없다.
+단일 객체 넷(put→head→get+Range→delete)은 boto3의 작은 파일 수명 전체다.
+multipart 넷은 `upload_file`의 임계(기본 8MiB) 초과 자동 전환이 요구한다 —
+같은 SDK 호출이 MinIO와 filegate에서 동일하게 도는 것이 목표다. 이 여덟이
+전부다: ListBuckets·HeadBucket·ListMultipartUploads·ListParts 같은 프로브는
+SDK 정상 경로에 나오지 않는다.
 
 ## 결정 사항
 
@@ -75,6 +81,40 @@ HeadBucket 같은 프로브가 없다.
 - 모든 접근은 lease 원장을 지난다 (ADR 002) — 표면이 내부적으로 lease를
   만들어 관찰·회계·이력이 네이티브와 한 장부가 된다.
 
+### multipart — S3 프로토콜을 네이티브 기계에 배선한다
+
+S3 multipart는 spec 02(네이티브 multipart)의 기계를 그대로 재사용한다 —
+같은 files·leases·part 회계, 같은 infra 프리미티브(s3 벤더 세션 / fs offset
+조립), 같은 합성 ETag(part MD5들의 MD5 + `-N`). 이 표면은 프로토콜 어댑터일
+뿐이다: S3 요청 모양을 받아 네이티브 create/parts/commit/abort로 번역한다.
+
+- **CreateMultipartUpload** `?uploads`: pending file과 write lease를 만들고
+  `UploadId`를 돌려준다. part 크기는 filegate가 정한다(운영자 설정, 균일 —
+  마지막만 나머지) — 클라이언트가 part 크기를 정하는 S3 관례와 다르지만,
+  균일 part는 R2 요구이자 fs offset의 전제다 (spec 02). declared_size는
+  이 시점에 알 수 없으므로, geometry가 아니라 **실측 part**로 검증한다.
+  s3 백엔드는 벤더 upload_id를 write lease에 저장하고, fs 백엔드는 lease
+  자체가 세션이다. `UploadId`는 filegate가 발급한 핸들이다(벤더 id를 그대로
+  노출하지 않는다 — client는 filegate 자격으로만 인증한다).
+- **UploadPart** `?partNumber=N&uploadId=U`: part 바이트를 스풀로 받아
+  백엔드로 중계한다(단일 PUT과 같은 릴레이). 크기·MD5를 실측해 part 원장에
+  기록하고 `ETag`(part MD5)를 돌려준다. 같은 partNumber 재업로드는
+  덮어쓰기다. **no-commit 대칭은 여기서 유지된다** — part 업로드에는 확정이
+  없다.
+- **CompleteMultipartUpload** `?uploadId=U`: 요청 XML의 part 목록(번호+ETag)을
+  받아 네이티브 multipart commit으로 번역한다 — s3는 벤더 CompleteMultipart,
+  fs는 offset 조립. **이 Complete가 곧 커밋점이다.** 단일 PUT은 관찰
+  확정(no-commit)을 유지하지만, multipart는 S3 프로토콜 자체가 명시적 완료를
+  요구하므로 그 Complete를 커밋으로 삼는다 — filegate 전용 단계가 아니라 S3가
+  원래 부르는 호출이라 "무수정 SDK" 원칙과 어긋나지 않는다. 응답 ETag는
+  합성형(`"<hex>-<part수>"`)이며, 같은 키 매핑·detach 규칙은 PutObject와 같다.
+- **AbortMultipartUpload** `?uploadId=U`: 벤더 세션 중단(s3) 또는 임시 정리
+  (fs)하고 pending을 회수한다 — 회수 확장(spec 02)과 같은 경로. 멱등.
+
+백엔드 종류는 client의 기반 storage가 결정한다 — S3 표면은 s3·fs 어느
+쪽이든 같은 갈래를 탄다(NAS 포함). 세션이 lease TTL보다 오래 걸리면
+part 접근은 재발급으로 살아있고, 미완 세션은 reconciler가 회수한다.
+
 ### 에러 모양
 
 S3 표준 XML 최소형으로 답한다 — SDK가 이걸 파싱한다:
@@ -84,17 +124,19 @@ S3 표준 XML 최소형으로 답한다 — SDK가 이걸 파싱한다:
 ```
 
 Code 어휘는 S3 표준을 따른다: `NoSuchBucket`, `NoSuchKey`,
-`SignatureDoesNotMatch`, `AccessDenied`, `InvalidRange`.
+`SignatureDoesNotMatch`, `AccessDenied`, `InvalidRange`, `NoSuchUpload`
+(없는 uploadId), `InvalidPart`(Complete의 part 목록 불일치).
 
 ## 다음 범위로 미룬다
 
-- **multipart 4종** (CreateMultipartUpload/UploadPart/Complete/Abort) —
-  boto3 `upload_file`의 8MiB 초과 자동 전환이 요구한다. 그 전까지는
-  가이드가 단일 PUT을 고정한다 ([가이드](../guide/s3-onboarding.md)).
 - **ListObjectsV2** — 보류. 목록의 진실 원천은 서비스 DB다 (ADR 003).
-- CopyObject·bucket 계열 오퍼레이션 — 계획 없음.
+- part 내부 오프셋 재개, full-object CRC 합성 검증 — spec 02와 같이 보류.
+- CopyObject·bucket 계열·ListMultipartUploads·ListParts — 계획 없음
+  (SDK 정상 경로에 나오지 않는다).
 
 ## 완료 기준
 
 [scripts/s3-capture.py](../../scripts/s3-capture.py)가 endpoint만 바꿔
 MinIO와 filegate에서 **동일하게 통과한다** — 표면 동등성의 실측 정의다.
+multipart는 임계를 넘긴 파일의 `upload_file`(자동 전환)이 두 백엔드에서
+같은 요청 흐름으로 통과함을 포함한다.
