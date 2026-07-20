@@ -1,12 +1,13 @@
-# spec 04: 이동과 배치 정책
+# spec 04: 이동
 
 - Status: Accepted
 - Date: 2026-07-20
-- 근거: ADR [007](../adr/007-tiering-policy.md) (배치는 storage 소유 정책으로 cold에 수렴), [001](../adr/001-multi-storage.md) (file/location 분리), [002](../adr/002-lease-model.md) (관찰 원장)
+- 근거: ADR [001](../adr/001-multi-storage.md) (file/location 분리 — 이동은 포인터 교체), [002](../adr/002-lease-model.md) (관찰 원장)
 
-파일 하나의 storage를 바꾸는 이동 오퍼레이션과, 이동을 생성하는 배치
-정책의 계약을 정한다. 정책 부분은 모양과 방향을 정한다 — 스키마·필드
-목록은 구현의 영역이다 ([spec 01](01-registry.md)과 같은 경계).
+파일 하나의 storage를 바꾸는 이동 오퍼레이션의 계약을 정한다 — 운영자가
+수동으로 트리거하고 reconciler가 집행한다. 어떤 파일을 언제 옮길지 자동
+결정하는 배치 정책은 다음 범위다. 이 문서는 그 정책이 집행에 쓸
+프리미티브(안전한 재배치 + 운영자 표면)를 정한다.
 
 ## 이동 — 한 파일의 안전한 재배치
 
@@ -40,8 +41,8 @@ requested ──집행──▶ swapped ──지연삭제──▶ (행 삭제 
 - 재시도는 정책이다: `FILEGATE_MOVE_MAX_ATTEMPTS`(기본 5) ·
   `FILEGATE_MOVE_RETRY_BACKOFF_SECS`(60) ·
   `FILEGATE_MOVE_DELETE_DELAY_SECS`(900, 1 미만 거부).
-- **집행 우선순위**: 낮을수록 먼저. 운영자 수동(0)이 정책(기본 100)을
-  항상 추월한다. 정책 간 서열도 이 값이다.
+- **집행 우선순위**: 낮을수록 먼저. 운영자 수동은 0이다 — 배치 정책층
+  (다음 범위)이 이 값으로 서열을 매기고 수동을 추월당하지 않게 둔다.
 - 저널의 storage FK가 이동 중 storage 삭제를 거부한다 (spec 01 삭제
   방패의 연장).
 
@@ -68,39 +69,10 @@ requested ──집행──▶ swapped ──지연삭제──▶ (행 삭제 
 | 파일 상세 | `GET /api/admin/v1/files/{id}` | location·진행 중 이동 포함 |
 | 자가점검 | `filegate status` | `MOVES active n · failed m` 요약 — failed가 있으면 exit 1 |
 
-## 배치 정책 — 이동의 생성기
-
-정책은 storage가 소유하는 등록부 리소스다 (credential이 client에
-붙는 것과 같은 관계). Terraform `filegate_storage_policy`와 운영자
-API(`/api/admin/v1/storages/{id}/policies`)로 선언한다.
-
-- **모양**: `(우선순위, 조건들, 목적지)`. 조건은 nullable 필드의
-  AND다 — 있는 것만 적용된다:
-
-| 조건 | 뜻 |
-|---|---|
-| `min_size` | 이 크기 이상이면 (대용량의 cold 직행) |
-| `min_idle` | 마지막 read가 이보다 오래됐으면 (강등) |
-| `max_idle` | 마지막 read가 이보다 최근이면 (승격) |
-| `high_pct` / `low_pct` | 압력 트리거 — 사용량이 high를 넘을 때만 작동, low에서 멈춤. 없으면 무조건 |
-
-- **평가**: reconciler가 tick마다 우선순위 순으로 순차 평가한다. 앞
-  정책이 집은 파일은 뒤 정책의 입력에서 빠진다 (첫 매칭 승리). 조건
-  미달이면 no-op — 평가는 값싸다.
-- **idle의 정의**: 그 파일의 마지막 read lease 시각, 없으면 확정
-  시각. 원장(lease_history)의 관찰이며 별도 카운터가 없다.
-- **가드**: tick당 이동량 상한(벤더 요청 예산 보호) · 최근 이동
-  제외(이동 원장 기준 쿨다운 — 양방향 정책의 핑퐁을 끊는다) · 진행 중
-  이동 제외 · 복사 상한(단일 PUT 5GiB) 초과 파일 제외.
-- **실패 기록**: 정책 평가 실패는 정책 행(last_run·last_error)에
-  남고 다음 정책은 계속 평가된다. 개별 이동 실패는 저널이, 종결은
-  원장이 기록한다 — 세 층이 status와 운영자 API로 보인다.
-
 ## 경계선
 
-- 이 문서는 모양과 방향만 정한다. 정책 스키마·엔드포인트 상세는
-  구현의 영역이다.
-- 승격은 새 기능이 아니라 `max_idle` 정책 한 줄이다 — 도입 시점은
-  운영 관찰이 정한다.
+- **배치 정책은 다음 범위다** — 어떤 파일을 언제 옮길지 자동 결정하는
+  정책층(storage 소유, 조건 필터, 스케줄러가 이동을 생성)은 이
+  프리미티브 위에 얹힌다. 이번 범위는 프리미티브와 수동 트리거뿐이다.
 - 다른 kind로의 이동(s3↔fs)과 5GiB 초과(multipart 복사)는 후속이다.
   제외된 파일은 관찰 가능해야 한다.
