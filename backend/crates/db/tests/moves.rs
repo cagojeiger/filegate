@@ -92,7 +92,7 @@ async fn insert_move_then_due_moves_returns_candidate(pool: PgPool) {
     wire(&pool).await;
     let file = active_file(&pool, 100).await;
     assert!(
-        moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+        moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key, 100)
             .await
             .unwrap()
     );
@@ -110,13 +110,13 @@ async fn insert_move_conflicts_in_progress_and_resets_after_failed(pool: PgPool)
     wire(&pool).await;
     let file = active_file(&pool, 100).await;
     assert!(
-        moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+        moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key, 100)
             .await
             .unwrap()
     );
     // 진행 중(requested)이면 두 번째 요청은 false — API가 409로 번역한다.
     assert!(
-        !moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+        !moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key, 100)
             .await
             .unwrap()
     );
@@ -127,7 +127,7 @@ async fn insert_move_conflicts_in_progress_and_resets_after_failed(pool: PgPool)
         .await
         .unwrap();
     assert!(
-        moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+        moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key, 100)
             .await
             .unwrap()
     );
@@ -142,7 +142,7 @@ async fn insert_move_conflicts_in_progress_and_resets_after_failed(pool: PgPool)
 async fn finalize_swap_wins_moves_pointer_and_schedules_delete(pool: PgPool) {
     wire(&pool).await;
     let file = active_file(&pool, 100).await;
-    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key, 100)
         .await
         .unwrap();
     assert!(
@@ -161,7 +161,7 @@ async fn finalize_swap_wins_moves_pointer_and_schedules_delete(pool: PgPool) {
 async fn finalize_swap_loses_when_file_not_active(pool: PgPool) {
     wire(&pool).await;
     let file = active_file(&pool, 100).await;
-    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key, 100)
         .await
         .unwrap();
     // 요청 경로가 이겼다 — 파일이 삭제되면 스왑은 조용히 진다.
@@ -183,7 +183,7 @@ async fn finalize_swap_loses_when_file_not_active(pool: PgPool) {
 async fn mark_attempt_increments_and_parks_at_max(pool: PgPool) {
     wire(&pool).await;
     let file = active_file(&pool, 100).await;
-    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key, 100)
         .await
         .unwrap();
     // max=2: 첫 실패는 requested에 남고, 둘째 실패가 failed로 park한다.
@@ -208,7 +208,7 @@ async fn due_deletes_only_returns_rows_past_delete_after(pool: PgPool) {
     let past = active_file(&pool, 100).await;
     let future = active_file(&pool, 100).await;
     for file in [&past, &future] {
-        moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+        moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key, 100)
             .await
             .unwrap();
         moves::finalize_swap(&pool, file.file_id, "s", "d", &file.object_key, 900)
@@ -234,7 +234,7 @@ async fn due_deletes_only_returns_rows_past_delete_after(pool: PgPool) {
 async fn stale_requested_catches_move_whose_location_vanished(pool: PgPool) {
     wire(&pool).await;
     let file = active_file(&pool, 100).await;
-    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key, 100)
         .await
         .unwrap();
     // 실물 위치가 사라지면(경합 패배) due_moves 조인이 실패하고 stale이 줍는다.
@@ -262,7 +262,7 @@ async fn cancel_move_from_requested_and_failed_but_not_swapped(pool: PgPool) {
     wire(&pool).await;
     // requested에서 취소된다.
     let a = active_file(&pool, 100).await;
-    moves::insert_move(&pool, a.file_id, "s", "d", &a.object_key)
+    moves::insert_move(&pool, a.file_id, "s", "d", &a.object_key, 100)
         .await
         .unwrap();
     assert!(moves::cancel_move(&pool, a.file_id).await.unwrap());
@@ -270,7 +270,7 @@ async fn cancel_move_from_requested_and_failed_but_not_swapped(pool: PgPool) {
 
     // failed에서도 취소된다.
     let b = active_file(&pool, 100).await;
-    moves::insert_move(&pool, b.file_id, "s", "d", &b.object_key)
+    moves::insert_move(&pool, b.file_id, "s", "d", &b.object_key, 100)
         .await
         .unwrap();
     sqlx::query("UPDATE object_moves SET state = 'failed' WHERE file_id = $1")
@@ -283,7 +283,7 @@ async fn cancel_move_from_requested_and_failed_but_not_swapped(pool: PgPool) {
 
     // swapped는 취소 불가 — 포인터가 이미 dest로 넘어갔다.
     let c = active_file(&pool, 100).await;
-    moves::insert_move(&pool, c.file_id, "s", "d", &c.object_key)
+    moves::insert_move(&pool, c.file_id, "s", "d", &c.object_key, 100)
         .await
         .unwrap();
     moves::finalize_swap(&pool, c.file_id, "s", "d", &c.object_key, 900)
@@ -297,7 +297,7 @@ async fn cancel_move_from_requested_and_failed_but_not_swapped(pool: PgPool) {
 async fn canceled_moves_picked_up_when_due(pool: PgPool) {
     wire(&pool).await;
     let file = active_file(&pool, 100).await;
-    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key, 100)
         .await
         .unwrap();
     moves::cancel_move(&pool, file.file_id).await.unwrap();
@@ -332,7 +332,7 @@ async fn finish_move_with_history_snapshots_and_deletes_journal(pool: PgPool) {
     // 저널 삭제가 같은 tx에서 일어난다.
     for outcome in ["moved", "lost", "canceled"] {
         let file = active_file(&pool, 4242).await;
-        moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+        moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key, 100)
             .await
             .unwrap();
         moves::finish_move_with_history(&pool, file.file_id, outcome)
@@ -363,7 +363,7 @@ async fn prune_move_history_removes_only_past_cutoff(pool: PgPool) {
     let old = active_file(&pool, 100).await;
     let fresh = active_file(&pool, 100).await;
     for file in [&old, &fresh] {
-        moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+        moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key, 100)
             .await
             .unwrap();
         moves::finish_move_with_history(&pool, file.file_id, "moved")
@@ -392,7 +392,7 @@ async fn history_filters_by_file_id(pool: PgPool) {
     let a = active_file(&pool, 100).await;
     let b = active_file(&pool, 100).await;
     for file in [&a, &b] {
-        moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+        moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key, 100)
             .await
             .unwrap();
         moves::finish_move_with_history(&pool, file.file_id, "moved")
@@ -411,7 +411,7 @@ async fn mark_attempt_parks_only_requested(pool: PgPool) {
     wire(&pool).await;
     // canceled는 max에 닿아도 park하지 않는다 — 정리가 성공할 때까지 재시도한다.
     let file = active_file(&pool, 100).await;
-    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key, 100)
         .await
         .unwrap();
     moves::cancel_move(&pool, file.file_id).await.unwrap();
@@ -501,7 +501,7 @@ async fn admin_file_detail_includes_location(pool: PgPool) {
 async fn finalize_swap_rolls_back_when_canceled_mid_copy(pool: PgPool) {
     wire(&pool).await;
     let file = active_file(&pool, 100).await;
-    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key, 100)
         .await
         .unwrap();
     // 복사가 도는 사이 운영자가 취소한다.
@@ -525,7 +525,7 @@ async fn prune_terminal_files_skips_files_with_move_rows(pool: PgPool) {
     // 파일 A: failed 이동이 남은 종착 파일. 파일 B: 저널 없는 종착 파일.
     let a = active_file(&pool, 100).await;
     let b = active_file(&pool, 100).await;
-    moves::insert_move(&pool, a.file_id, "s", "d", &a.object_key)
+    moves::insert_move(&pool, a.file_id, "s", "d", &a.object_key, 100)
         .await
         .unwrap();
     sqlx::query("UPDATE object_moves SET state = 'failed' WHERE file_id = $1")
@@ -570,7 +570,7 @@ async fn prune_terminal_files_skips_files_with_move_rows(pool: PgPool) {
 async fn stale_moves_catches_failed_move_after_file_left(pool: PgPool) {
     wire(&pool).await;
     let file = active_file(&pool, 100).await;
-    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key)
+    moves::insert_move(&pool, file.file_id, "s", "d", &file.object_key, 100)
         .await
         .unwrap();
     sqlx::query("UPDATE object_moves SET state = 'failed' WHERE file_id = $1")
@@ -585,4 +585,39 @@ async fn stale_moves_catches_failed_move_after_file_left(pool: PgPool) {
     let stale = moves::stale_moves(&pool, 10).await.unwrap();
     assert_eq!(stale.len(), 1);
     assert_eq!(stale[0].file_id, file.file_id);
+}
+
+/// 운영자 수동 이동(priority 0)은 먼저 요청된 정책 이동(100)보다 앞선다 —
+/// due_moves가 priority, next_attempt_at 순으로 집는다.
+#[sqlx::test(migrations = "./migrations")]
+async fn due_moves_orders_by_priority_before_time(pool: PgPool) {
+    wire(&pool).await;
+    let policy_move = active_file(&pool, 100).await;
+    let manual_move = active_file(&pool, 100).await;
+    // 정책 이동이 먼저 기록되지만,
+    moves::insert_move(
+        &pool,
+        policy_move.file_id,
+        "s",
+        "d",
+        &policy_move.object_key,
+        100,
+    )
+    .await
+    .unwrap();
+    // 나중에 온 수동 이동(0)이 큐를 추월한다.
+    moves::insert_move(
+        &pool,
+        manual_move.file_id,
+        "s",
+        "d",
+        &manual_move.object_key,
+        moves::OPERATOR_PRIORITY,
+    )
+    .await
+    .unwrap();
+    let due = moves::due_moves(&pool, 10).await.unwrap();
+    assert_eq!(due.len(), 2);
+    assert_eq!(due[0].file_id, manual_move.file_id);
+    assert_eq!(due[1].file_id, policy_move.file_id);
 }

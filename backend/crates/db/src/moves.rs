@@ -17,6 +17,7 @@ pub struct MoveRow {
     pub file_id: Uuid,
     pub source_storage_id: String,
     pub dest_storage_id: String,
+    pub priority: i16,
     pub state: String,
     pub attempts: i32,
     pub next_attempt_at: DateTime<Utc>,
@@ -124,6 +125,9 @@ pub struct AdminFileDetail {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
+/// 운영자 수동 이동의 집행 우선순위 — 정책 이동(컬럼 기본 100)을 항상 추월한다.
+pub const OPERATOR_PRIORITY: i16 = 0;
+
 /// 이동 요청 기록 — 진행 중이 없으면 새로 만들고, failed면 재무장한다.
 /// 새 삽입은 1행, failed 재무장은 1행, 그 외(requested·swapped 진행 중)는
 /// WHERE가 걸러 0행이다 — false면 API가 409로 번역한다.
@@ -133,12 +137,15 @@ pub async fn insert_move(
     source: &str,
     dest: &str,
     object_key: &str,
+    priority: i16,
 ) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
-        "INSERT INTO object_moves (file_id, source_storage_id, dest_storage_id, object_key) \
-         VALUES ($1, $2, $3, $4) \
+        "INSERT INTO object_moves \
+         (file_id, source_storage_id, dest_storage_id, object_key, priority) \
+         VALUES ($1, $2, $3, $4, $5) \
          ON CONFLICT (file_id) DO UPDATE SET \
-         dest_storage_id = EXCLUDED.dest_storage_id, state = 'requested', attempts = 0, \
+         dest_storage_id = EXCLUDED.dest_storage_id, priority = EXCLUDED.priority, \
+         state = 'requested', attempts = 0, \
          next_attempt_at = now(), last_error = NULL \
          WHERE object_moves.state = 'failed'",
     )
@@ -146,6 +153,7 @@ pub async fn insert_move(
     .bind(source)
     .bind(dest)
     .bind(object_key)
+    .bind(priority)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -179,7 +187,7 @@ pub async fn due_moves(pool: &PgPool, limit: i64) -> Result<Vec<DueMove>, sqlx::
          JOIN locations l ON l.file_id = m.file_id \
          AND l.storage_id = m.source_storage_id AND l.object_key = m.object_key \
          WHERE m.state = 'requested' AND m.next_attempt_at <= now() \
-         ORDER BY m.next_attempt_at LIMIT $1",
+         ORDER BY m.priority, m.next_attempt_at LIMIT $1",
     )
     .bind(limit)
     .fetch_all(pool)
@@ -299,7 +307,7 @@ pub async fn due_deletes(pool: &PgPool, limit: i64) -> Result<Vec<DueDelete>, sq
 /// 저널 전체 조회 (운영자 목록) — 소수 행이라 무계 조회다.
 pub async fn list_moves(pool: &PgPool) -> Result<Vec<MoveRow>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT file_id, source_storage_id, dest_storage_id, state, attempts, \
+        "SELECT file_id, source_storage_id, dest_storage_id, priority, state, attempts, \
          next_attempt_at, delete_after, last_error, created_at \
          FROM object_moves ORDER BY created_at",
     )
@@ -310,7 +318,7 @@ pub async fn list_moves(pool: &PgPool) -> Result<Vec<MoveRow>, sqlx::Error> {
 /// 저널 단건 조회 (운영자) — 없으면 None.
 pub async fn get_move(pool: &PgPool, file_id: Uuid) -> Result<Option<MoveRow>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT file_id, source_storage_id, dest_storage_id, state, attempts, \
+        "SELECT file_id, source_storage_id, dest_storage_id, priority, state, attempts, \
          next_attempt_at, delete_after, last_error, created_at \
          FROM object_moves WHERE file_id = $1",
     )

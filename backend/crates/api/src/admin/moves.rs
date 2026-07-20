@@ -37,6 +37,7 @@ struct MoveOut {
     file_id: Uuid,
     source_storage_id: String,
     dest_storage_id: String,
+    priority: i16,
     state: String,
     attempts: i32,
     next_attempt_at: DateTime<Utc>,
@@ -51,6 +52,7 @@ impl From<moves::MoveRow> for MoveOut {
             file_id: row.file_id,
             source_storage_id: row.source_storage_id,
             dest_storage_id: row.dest_storage_id,
+            priority: row.priority,
             state: row.state,
             attempts: row.attempts,
             next_attempt_at: row.next_attempt_at,
@@ -98,6 +100,7 @@ pub(super) async fn request_move(
         &location.storage_id,
         &body.storage_id,
         &location.object_key,
+        moves::OPERATOR_PRIORITY,
     )
     .await?;
     if !inserted {

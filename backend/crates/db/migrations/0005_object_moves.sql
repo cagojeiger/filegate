@@ -7,6 +7,9 @@ CREATE TABLE object_moves (
     object_key        text NOT NULL,
     state             text NOT NULL DEFAULT 'requested'
                       CHECK (state IN ('requested', 'canceled', 'swapped', 'failed')),
+    -- 집행 우선순위 — 낮을수록 먼저. 운영자 수동 이동(0)이 정책 이동(100)을
+    -- 항상 추월한다. 정책 간 서열도 이 값으로 표현한다.
+    priority          smallint NOT NULL DEFAULT 100,
     attempts          int  NOT NULL DEFAULT 0,
     next_attempt_at   timestamptz NOT NULL DEFAULT now(),
     delete_after      timestamptz,
@@ -15,7 +18,7 @@ CREATE TABLE object_moves (
     CHECK (source_storage_id <> dest_storage_id),
     CHECK (state <> 'swapped' OR delete_after IS NOT NULL)
 );
-CREATE INDEX object_moves_due_idx ON object_moves (state, next_attempt_at);
+CREATE INDEX object_moves_due_idx ON object_moves (state, priority, next_attempt_at);
 
 -- 이동 결과 원장 — 종결 시 reconciler가 같은 tx로 박제한다 (lease_history와 같은
 -- 원칙). 파일·storage 행이 정리된 뒤에도 홀로 읽히도록 FK 없이 박제한다.
