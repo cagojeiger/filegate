@@ -2,6 +2,7 @@
 
 pub mod files;
 pub mod moves;
+pub mod policies;
 pub mod registry;
 pub mod s3_registry;
 pub mod usage;
