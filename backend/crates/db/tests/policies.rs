@@ -304,3 +304,66 @@ async fn candidates_respect_limit(pool: PgPool) {
         .unwrap();
     assert_eq!(cands.len(), 2);
 }
+
+// ── 압력 과다 배출 방지 (진행 중 이동 반영) ───────────────────
+
+/// 진행 중 이동은 아직 source에 있어 active_bytes에 남지만 candidates에서는
+/// 빠진다 — 이 바이트를 압력 seed에서 빼지 않으면 집행(tick당 소량)이 생성을
+/// 못 따라가 tick을 건너 과다 배출한다. in_flight_bytes_by_source가 그 바이트를
+/// source별로 정확히 세어(스왑된 것은 제외) seed 보정에 쓰이는지 본다.
+#[sqlx::test(migrations = "./migrations")]
+async fn in_flight_bytes_prevents_pressure_overshoot(pool: PgPool) {
+    wire(&pool).await;
+    // "s"에 1000짜리 5개 → active 5000.
+    let mut created = Vec::new();
+    for _ in 0..5 {
+        created.push(active_file(&pool, 1000).await);
+    }
+    // 3개는 진행 중(requested, location 아직 "s") — 이 3000이 예약된 감소분이다.
+    for file in created.iter().take(3) {
+        sqlx::query(
+            "INSERT INTO object_moves (file_id, source_storage_id, dest_storage_id, object_key) \
+             VALUES ($1, 's', 'd', $2)",
+        )
+        .bind(file.file_id)
+        .bind(&file.object_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    // 1개는 이미 스왑(location "d") — 바이트가 source를 떠나 세면 안 된다.
+    let swapped = &created[3];
+    sqlx::query(
+        "INSERT INTO object_moves \
+         (file_id, source_storage_id, dest_storage_id, object_key, state, delete_after) \
+         VALUES ($1, 's', 'd', $2, 'swapped', now())",
+    )
+    .bind(swapped.file_id)
+    .bind(&swapped.object_key)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE locations SET storage_id = 'd' WHERE file_id = $1")
+        .bind(swapped.file_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let by_source: std::collections::HashMap<String, i64> =
+        policies::in_flight_bytes_by_source(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+    // requested 3개(3000)만 — 스왑된 것은 location이 "d"라 제외된다.
+    assert_eq!(by_source.get("s").copied().unwrap_or(0), 3000);
+
+    // 과다 배출 없음의 산술: capacity 10_000, low 30% = 3000.
+    let active_bytes = 5000_i64;
+    let queued = by_source.get("s").copied().unwrap_or(0);
+    let low = 3000_i64;
+    // 보정 seed(5000−3000=2000)는 이미 low 이하 → 정책은 재생성하지 않는다.
+    assert!(active_bytes - queued <= low);
+    // 미보정 seed(5000)였다면 여전히 low를 넘어 계속 생성했을 것이다.
+    assert!(active_bytes > low);
+}

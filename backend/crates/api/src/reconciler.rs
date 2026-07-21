@@ -561,6 +561,23 @@ fn pct_of(capacity: i64, pct: i32) -> i64 {
     i64::try_from(scaled).unwrap_or(i64::MAX)
 }
 
+/// tick 전역 가변 상태 — 예산과 dest별 추정 점유. 모든 source·정책이 공유해
+/// 같은 tick에 한 dest로 향하는 이동들이 그 dest 용량을 함께 계산한다.
+struct EvalState {
+    /// tick당 생성 이동 예산 (소진되면 평가 종료).
+    budget: i64,
+    /// dest별 추정 active — tick 시작 usage로 seed하고 생성마다 늘린다.
+    dest_projected: std::collections::HashMap<String, i64>,
+}
+
+/// source 하나의 가변 상태 — 압력 히스테리시스용 추정 점유와 첫 매칭 승리 집합.
+struct SourceState {
+    /// 이 source의 추정 active — 진행 중 이동만큼 이미 뺀 값에서 생성마다 준다.
+    projected: i64,
+    /// 앞 정책이 집은 파일 — 뒷 정책이 건너뛴다 (첫 매칭 승리).
+    claimed: HashSet<Uuid>,
+}
+
 /// 배치 정책 평가 (spec 05) — source별 우선순위 순, 첫 매칭 승리. usage를 한
 /// 번 읽어 압력·목적지 여유를 판정하고 조건을 만족하는 coldest 파일의 이동을
 /// 생성한다. tick당 전역 예산이 상한이다. 한 정책의 실패는 그 정책 행에만
@@ -572,6 +589,16 @@ async fn evaluate_policies(pool: &PgPool, config: &PolicyConfig) {
                 .into_iter()
                 .map(|u| (u.storage_id.clone(), u))
                 .collect(),
+            Err(error) => {
+                tracing::error!(event = "reconciler.scan_failed", job = "policy_evaluate", %error);
+                return;
+            }
+        };
+    // 진행 중 이동의 바이트를 source별로 뺀 만큼이 압력 추정의 출발점이다 —
+    // 못 빼면 tick을 건너 과다 배출하므로, 실패 시 이번 tick 평가를 접는다.
+    let in_flight: std::collections::HashMap<String, i64> =
+        match policies::in_flight_bytes_by_source(pool).await {
+            Ok(rows) => rows.into_iter().collect(),
             Err(error) => {
                 tracing::error!(event = "reconciler.scan_failed", job = "policy_evaluate", %error);
                 return;
@@ -589,37 +616,52 @@ async fn evaluate_policies(pool: &PgPool, config: &PolicyConfig) {
         config,
         usage: &usage,
     };
+    let mut state = EvalState {
+        budget: config.max_moves_per_tick,
+        dest_projected: usage
+            .iter()
+            .map(|(id, u)| (id.clone(), u.active_bytes))
+            .collect(),
+    };
     // (source, priority) 정렬이라 source별 연속 그룹이 곧 우선순위 순이다.
-    let mut budget = config.max_moves_per_tick;
     for group in all.chunk_by(|a, b| a.source_storage_id == b.source_storage_id) {
-        if budget <= 0 {
+        if state.budget <= 0 {
             break;
         }
         let Some(first) = group.first() else { continue };
         let Some(src) = usage.get(&first.source_storage_id) else {
             continue;
         };
-        // source별 상태: 압력 히스테리시스용 추정 점유(생성분만큼 줄인다)와
-        // 첫 매칭 승리용 집합(앞 정책이 집은 파일을 뒷 정책이 건너뛴다).
+        // 압력 추정 seed = active − 진행 중 이동(아직 source 점유) — 집행이
+        // 뒤처져도 예약된 감소분을 반영해 tick을 건너 과다 배출하지 않는다.
+        let queued = in_flight
+            .get(&first.source_storage_id)
+            .copied()
+            .unwrap_or(0);
         let capacity = src.capacity_bytes;
-        let mut projected = src.active_bytes;
-        let mut claimed: HashSet<Uuid> = HashSet::new();
+        let mut source_state = SourceState {
+            projected: (src.active_bytes - queued).max(0),
+            claimed: HashSet::new(),
+        };
         for policy in group {
-            if budget <= 0 {
+            if state.budget <= 0 {
                 break;
             }
-            let (error, generated) = match evaluate_one(
+            let mut generated = 0_i64;
+            let error = match evaluate_one(
                 &tick,
                 policy,
                 capacity,
-                &mut projected,
-                &mut claimed,
-                &mut budget,
+                &mut source_state,
+                &mut state,
+                &mut generated,
             )
             .await
             {
-                Ok(count) => (None, count),
-                Err(error) => (Some(error.to_string()), 0),
+                Ok(()) => None,
+                // 중도 실패라도 앞선 반복이 실제로 만든 이동 수(generated)를
+                // 그대로 기록한다 (오류와 함께) — 저평가를 막는다.
+                Err(error) => Some(error.to_string()),
             };
             if generated > 0 {
                 tracing::info!(
@@ -645,56 +687,74 @@ async fn evaluate_policies(pool: &PgPool, config: &PolicyConfig) {
 }
 
 /// 정책 하나를 평가해 이동을 생성한다 — 압력 게이트 → 목적지 여유 → coldest
-/// 후보 순회. 생성 수를 돌려준다. insert_move가 false면(진행 중 이동 있음)
-/// 건너뛴다 — 정책은 수동 이동을 추월하지 않는다 (PK가 막는다).
+/// 후보 순회. 만든 수는 `generated`에 누적한다 (중도 실패도 그때까지의 수를
+/// 남긴다). insert_move가 false면(진행 중 이동 있음) 건너뛴다 — 정책은 수동
+/// 이동을 추월하지 않는다 (PK가 막는다).
 async fn evaluate_one(
     tick: &PolicyTick<'_>,
     policy: &policies::PolicyRow,
     capacity: i64,
-    projected: &mut i64,
-    claimed: &mut HashSet<Uuid>,
-    budget: &mut i64,
-) -> Result<i64, filegate_db::DbError> {
+    source: &mut SourceState,
+    state: &mut EvalState,
+    generated: &mut i64,
+) -> Result<(), filegate_db::DbError> {
     // capacity가 없는데(무한) 압력 정책이면 트리거를 계산할 수 없다 — no-op.
     if policy.high_pct.is_some() && capacity <= 0 {
-        return Ok(0);
+        return Ok(());
     }
     // 압력 게이트: high 미만이면 이번 tick 작동하지 않는다. low는 멈출 지점
     // (히스테리시스) — 없으면 high로 둔다 (밴드 없음, high에서 즉시 멈춤).
     let low_target = match policy.high_pct {
         Some(high) => {
-            if *projected <= pct_of(capacity, high) {
-                return Ok(0);
+            if source.projected <= pct_of(capacity, high) {
+                return Ok(());
             }
             Some(pct_of(capacity, policy.low_pct.unwrap_or(high)))
         }
         None => None,
     };
-    // 목적지 여유: 자기 용량을 이미 넘긴 dest로는 강등하지 않는다 (꽉 찬 곳에
-    // 밀어넣지 않는다). capacity 0(무한)은 항상 여유다.
-    if let Some(dest) = tick.usage.get(&policy.dest_storage_id)
-        && dest.capacity_bytes > 0
-        && dest.active_bytes >= dest.capacity_bytes
-    {
-        return Ok(0);
+    // 목적지 여유 — tick 내내 이어지는 dest별 추정으로 본다 (여러 정책·source가
+    // 같은 dest로 향해도 함께 계산해 한 tick에 dest를 용량 위로 밀지 않는다).
+    // capacity 0(무한)은 항상 여유다.
+    let dest_capacity = tick
+        .usage
+        .get(&policy.dest_storage_id)
+        .map_or(0, |u| u.capacity_bytes);
+    let dest_full = |state: &EvalState| {
+        dest_capacity > 0
+            && state
+                .dest_projected
+                .get(&policy.dest_storage_id)
+                .copied()
+                .unwrap_or(0)
+                >= dest_capacity
+    };
+    if dest_full(state) {
+        return Ok(());
     }
     let candidates =
-        policies::candidates(tick.pool, policy, tick.config.cooldown_secs, *budget).await?;
-    let mut generated = 0_i64;
+        policies::candidates(tick.pool, policy, tick.config.cooldown_secs, state.budget).await?;
     for candidate in candidates {
-        if *budget <= 0 {
+        if state.budget <= 0 {
             break;
         }
         // 히스테리시스: 추정 점유가 low까지 내려오면 이 정책은 멈춘다.
         if let Some(low) = low_target
-            && *projected <= low
+            && source.projected <= low
         {
             break;
         }
+        // dest가 이번 tick 추정으로 용량에 닿으면 더 밀어넣지 않는다.
+        if dest_full(state) {
+            break;
+        }
         // 앞 정책이 이미 집었으면 건너뛴다 (첫 매칭 승리).
-        if claimed.contains(&candidate.file_id) {
+        if source.claimed.contains(&candidate.file_id) {
             continue;
         }
+        // insert_move의 ON CONFLICT는 failed 이동만 재무장하므로, 실패한 수동
+        // 이동과의 sub-ms 경합에서 dest가 바뀔 수 있다 — 바이트 안전(이동
+        // 메커니즘 보증)이라 감수한다 (리뷰 #4 수용).
         if !moves::insert_move(
             tick.pool,
             candidate.file_id,
@@ -706,12 +766,16 @@ async fn evaluate_one(
         {
             continue;
         }
-        claimed.insert(candidate.file_id);
-        *projected -= candidate.declared_size;
-        *budget -= 1;
-        generated += 1;
+        source.claimed.insert(candidate.file_id);
+        source.projected -= candidate.declared_size;
+        *state
+            .dest_projected
+            .entry(policy.dest_storage_id.clone())
+            .or_insert(0) += candidate.declared_size;
+        state.budget -= 1;
+        *generated += 1;
     }
-    Ok(generated)
+    Ok(())
 }
 
 /// 이동 시도 실패를 저널에 남긴다 — 횟수·오류를 기록하고 backoff·park한다.

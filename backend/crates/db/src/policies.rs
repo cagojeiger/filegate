@@ -206,6 +206,24 @@ pub async fn candidates(
     .await
 }
 
+/// source별 진행 중 이동의 declared_size 합 — (source_id, bytes)로. 아직
+/// source에 있는(location 미스왑) active 파일의 이동만 센다. usage의
+/// active_bytes는 이 바이트를 아직 포함하므로, 평가는 이 값을 빼 "떠나기로
+/// 예약된 만큼 줄어들 점유"를 추정한다 — 집행(tick당 소량)이 생성을 못 따라가도
+/// 압력 게이트가 tick을 건너 과다 배출하지 않게 한다. swapped(location=dest)는
+/// 이미 active_bytes 밖이라 세지 않는다 (locations 조인이 걸러낸다).
+pub async fn in_flight_bytes_by_source(pool: &PgPool) -> Result<Vec<(String, i64)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT m.source_storage_id, COALESCE(SUM(f.declared_size), 0)::bigint \
+         FROM object_moves m \
+         JOIN files f ON f.id = m.file_id AND f.state = 'active' \
+         JOIN locations l ON l.file_id = m.file_id AND l.storage_id = m.source_storage_id \
+         GROUP BY m.source_storage_id",
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// status CLI용 정책 요약 — 전체 수와 last_error가 남은 수.
 #[derive(Debug)]
 pub struct PolicyStatusSummary {
