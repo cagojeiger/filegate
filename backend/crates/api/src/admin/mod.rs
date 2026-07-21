@@ -10,6 +10,7 @@
 mod clients;
 mod files;
 mod moves;
+mod policies;
 mod storages;
 mod usage;
 
@@ -34,6 +35,16 @@ pub fn admin_routes() -> Router<AppState> {
             get(storages::get)
                 .put(storages::update)
                 .delete(storages::delete),
+        )
+        .route(
+            "/storages/{id}/policies",
+            get(policies::list).post(policies::create),
+        )
+        .route(
+            "/storages/{id}/policies/{policy_id}",
+            get(policies::get)
+                .put(policies::update)
+                .delete(policies::delete),
         )
         .route("/clients", get(clients::list).post(clients::create))
         .route("/clients/{id}", get(clients::get).delete(clients::delete))
