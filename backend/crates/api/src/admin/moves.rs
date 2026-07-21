@@ -70,7 +70,10 @@ impl From<moves::MoveRow> for MoveOut {
 /// 두 storage가 같은 실물을 가리키는가 — kind는 호출부가 이미 같음을 보장한다.
 /// s3는 endpoint+bucket이, fs는 root_path가 실물 정체성이다 (id·자격증명은
 /// 무관). 실물이 같으면 복사가 자기 위 덮어쓰기라 지연삭제가 유일 사본을 지운다.
-fn same_physical_target(source: &registry::StorageRow, dest: &registry::StorageRow) -> bool {
+pub(super) fn same_physical_target(
+    source: &registry::StorageRow,
+    dest: &registry::StorageRow,
+) -> bool {
     match source.kind.as_str() {
         "s3" => source.endpoint == dest.endpoint && source.bucket == dest.bucket,
         "fs" => source.root_path == dest.root_path,

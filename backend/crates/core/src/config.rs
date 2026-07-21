@@ -89,6 +89,12 @@ pub struct ServerConfig {
     pub move_delete_delay_secs: i64,
     /// 이동 실패 backoff 기준 초 (FILEGATE_MOVE_RETRY_BACKOFF_SECS, 기본 60, >=0).
     pub move_retry_backoff_secs: i64,
+    /// tick당 정책이 생성하는 이동 상한 (FILEGATE_POLICY_MAX_MOVES_PER_TICK,
+    /// 기본 100, >0). 벤더 요청 예산을 보호하는 전역 유계다 (spec 05).
+    pub policy_max_moves_per_tick: i64,
+    /// 정책 이동 쿨다운 초 (FILEGATE_POLICY_MOVE_COOLDOWN_SECS, 기본 3600, >=0).
+    /// 이 안에 이동된 파일은 후보에서 제외한다 — 양방향 정책의 핑퐁을 끊는다.
+    pub policy_move_cooldown_secs: i64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -177,6 +183,16 @@ impl Config {
                 .transpose()
                 .map_err(|e| Error::config(format!("FILEGATE_MOVE_RETRY_BACKOFF_SECS: {e}")))?
                 .unwrap_or(60),
+            policy_max_moves_per_tick: env("FILEGATE_POLICY_MAX_MOVES_PER_TICK")
+                .map(|v| v.parse())
+                .transpose()
+                .map_err(|e| Error::config(format!("FILEGATE_POLICY_MAX_MOVES_PER_TICK: {e}")))?
+                .unwrap_or(100),
+            policy_move_cooldown_secs: env("FILEGATE_POLICY_MOVE_COOLDOWN_SECS")
+                .map(|v| v.parse())
+                .transpose()
+                .map_err(|e| Error::config(format!("FILEGATE_POLICY_MOVE_COOLDOWN_SECS: {e}")))?
+                .unwrap_or(3600),
         };
         // 벤더 규칙 (S3 multipart): part는 5MiB 이상(마지막 제외), 5GiB 이하.
         if !(5 * 1024 * 1024..=5 * 1024 * 1024 * 1024).contains(&server.part_size_bytes) {
@@ -206,6 +222,17 @@ impl Config {
         if server.move_delete_delay_secs < READ_LEASE_TTL_SECS {
             return Err(Error::config(
                 "FILEGATE_MOVE_DELETE_DELAY_SECS must be >= 900 (read-lease TTL)",
+            ));
+        }
+        // 0 이하 예산은 정책층이 이동을 한 건도 못 만든다 — 죽은 손잡이가 된다.
+        if server.policy_max_moves_per_tick < 1 {
+            return Err(Error::config(
+                "FILEGATE_POLICY_MAX_MOVES_PER_TICK must be >= 1",
+            ));
+        }
+        if server.policy_move_cooldown_secs < 0 {
+            return Err(Error::config(
+                "FILEGATE_POLICY_MOVE_COOLDOWN_SECS must be >= 0",
             ));
         }
         if server.move_retry_backoff_secs < 0 {
@@ -296,6 +323,33 @@ mod tests {
         assert_eq!(config.server.move_max_attempts, 5);
         assert_eq!(config.server.move_delete_delay_secs, 900);
         assert_eq!(config.server.move_retry_backoff_secs, 60);
+        assert_eq!(config.server.policy_max_moves_per_tick, 100);
+        assert_eq!(config.server.policy_move_cooldown_secs, 3600);
+    }
+
+    #[test]
+    fn policy_envs_override_and_validate() {
+        let overridden = |key: &str| match key {
+            "FILEGATE_POLICY_MAX_MOVES_PER_TICK" => Some("25".to_owned()),
+            "FILEGATE_POLICY_MOVE_COOLDOWN_SECS" => Some("0".to_owned()),
+            other => base_env(other),
+        };
+        let config = Config::load_from(&overridden).unwrap();
+        assert_eq!(config.server.policy_max_moves_per_tick, 25);
+        assert_eq!(config.server.policy_move_cooldown_secs, 0);
+
+        // 0 예산은 정책이 한 건도 못 만든다 — 거부한다.
+        let zero_budget = |key: &str| match key {
+            "FILEGATE_POLICY_MAX_MOVES_PER_TICK" => Some("0".to_owned()),
+            other => base_env(other),
+        };
+        assert!(Config::load_from(&zero_budget).is_err());
+        // 음수 쿨다운도 거부한다.
+        let neg_cooldown = |key: &str| match key {
+            "FILEGATE_POLICY_MOVE_COOLDOWN_SECS" => Some("-1".to_owned()),
+            other => base_env(other),
+        };
+        assert!(Config::load_from(&neg_cooldown).is_err());
     }
 
     #[test]
