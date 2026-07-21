@@ -8,6 +8,9 @@
 //!   3. read lease GC / 5. 종료 lease GC / 6. 이력 보존 정리 / 8. 종착 파일 정리
 //!   7. 일별 사용량 스냅샷 (전량 집계) / 4. fs 임시 파일 sweep
 //!
+//! purge 뒤에는 이동 집행 잡(M1~M5)이 돈다 — 복사·검증·스왑, 지연삭제,
+//! 경합·취소 정리, 이동 이력 보존 (spec 04).
+//!
 //! 순서가 잡마다 다르다: 회수는 전이(pending→reclaimed)가 먼저다 —
 //! 물리 삭제를 먼저 하면 늦은 commit이 전이 경합을 이겨 "실물 없는
 //! active 파일"이 생길 수 있다. purge는 물리 삭제가 먼저다 — deleted는
@@ -19,11 +22,24 @@ use std::time::Duration;
 
 use filegate_core::Crypto;
 use filegate_db::files::{self, SweepCandidate};
-use filegate_db::{PgPool, registry, usage};
+use filegate_db::{PgPool, moves, registry, usage};
 use filegate_infra::{Address, S3ClientCache, fs as fs_backend, s3_delete_object, s3_head_object};
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
+
+/// 이동 잡의 정책 파라미터 — 재시도 상한·삭제 지연·backoff. main.rs가
+/// config에서 구성해 spawn에 넘긴다. 요청 경로와 무관한 reconciler 튜닝값이다.
+#[derive(Debug, Clone, Copy)]
+pub struct MovePolicy {
+    /// 이 횟수만큼 실패하면 이동을 `failed`로 멈춘다 (운영자 재요청이 재시도).
+    pub max_attempts: i32,
+    /// 스왑 후 old 실물을 지우기까지의 지연 — presigned GET 수명(READ_LEASE_TTL)
+    /// 이상이어야 발급된 URL이 살아 있는 동안 실물이 사라지지 않는다.
+    pub delete_delay_secs: i64,
+    /// 실패 후 다음 시도까지의 backoff 기준 (attempts 배수로 증가).
+    pub retry_backoff_secs: i64,
+}
 
 /// 한 tick에 잡별로 처리하는 최대 건수 (유계 배치, docs/stack).
 const BATCH_LIMIT: i64 = 20;
@@ -49,6 +65,7 @@ pub fn spawn(
     crypto: Arc<Crypto>,
     s3_clients: Arc<S3ClientCache>,
     tick: Duration,
+    move_policy: MovePolicy,
     shutdown: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -69,7 +86,7 @@ pub fn spawn(
                     // 락을 못 이긴 pod의 잔여물이 밀린다.
                     sweep_local_temps().await;
                     let result = filegate_db::with_reconciler_lock(&pool, || async {
-                        run_jobs(&pool, &crypto, &s3_clients).await;
+                        run_jobs(&pool, &crypto, &s3_clients, &move_policy).await;
                     })
                     .await;
                     match result {
@@ -86,7 +103,12 @@ pub fn spawn(
     })
 }
 
-async fn run_jobs(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
+async fn run_jobs(
+    pool: &PgPool,
+    crypto: &Crypto,
+    s3_clients: &S3ClientCache,
+    move_policy: &MovePolicy,
+) {
     // 잡 0: 관찰 확정 (spec 00) — 단일 PUT pending의 실물이 선언과 맞으면
     // 서비스의 commit 없이 확정한다. 직결 presigned 패턴("URL 주고 잊기")이
     // filegate에서도 성립하는 지점이다. commit API는 즉시 확정이 필요한
@@ -177,6 +199,223 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
         Err(error) => tracing::error!(event = "reconciler.scan_failed", job = "purge", %error),
     }
 
+    // 잡 M1: move.execute — 이동 요청의 복사·검증·스왑. 황금률: dest 복사가
+    // 검증되고 포인터 스왑이 커밋되기 전에는 source를 절대 건드리지 않는다.
+    // 스왑 패배(Ok(false))는 경합에 진 것 — 요청 경로가 이겼으니 dest stray만
+    // 치우고 이동을 조용히 버린다. 복사 실패는 mark_attempt로 backoff·park.
+    match moves::due_moves(pool, BATCH_LIMIT).await {
+        Ok(candidates) => {
+            for candidate in candidates {
+                match crate::storage_access::copy_object(pool, crypto, s3_clients, &candidate).await
+                {
+                    Ok(()) => match moves::finalize_swap(
+                        pool,
+                        candidate.file_id,
+                        &candidate.source_storage_id,
+                        &candidate.dest_storage_id,
+                        &candidate.object_key,
+                        move_policy.delete_delay_secs,
+                    )
+                    .await
+                    {
+                        Ok(true) => tracing::info!(
+                            event = "move.swapped",
+                            file = %candidate.file_id,
+                            dest = %candidate.dest_storage_id,
+                        ),
+                        // 스왑 0행 — 두 갈래다. 저널을 재조회해 가른다: canceled면
+                        // 복사 중 취소가 끼어들어 tx가 롤백된 것이니 M4 취소 잡에
+                        // dest 정리·'canceled' 종결을 맡기고 건너뛴다 (lost로 잘못
+                        // 박제하지 않는다). 그 외(requested)는 진짜 경합 패배라 dest
+                        // stray를 치우고 'lost'로 종결한다.
+                        Ok(false) => {
+                            let recheck = moves::get_move(pool, candidate.file_id).await;
+                            let canceled =
+                                matches!(&recheck, Ok(Some(row)) if row.state == "canceled");
+                            if !canceled {
+                                if let Err(error) = crate::storage_access::delete_object_at(
+                                    pool,
+                                    crypto,
+                                    s3_clients,
+                                    &candidate.dest_storage_id,
+                                    &candidate.object_key,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        event = "reconciler.move_failed",
+                                        file = %candidate.file_id,
+                                        stage = "lost_cleanup",
+                                        %error,
+                                    );
+                                }
+                                match moves::finish_move_with_history(
+                                    pool,
+                                    candidate.file_id,
+                                    "lost",
+                                )
+                                .await
+                                {
+                                    Ok(()) => tracing::info!(
+                                        event = "move.lost",
+                                        file = %candidate.file_id,
+                                    ),
+                                    Err(error) => tracing::error!(
+                                        event = "reconciler.move_failed",
+                                        file = %candidate.file_id,
+                                        stage = "lost_finish",
+                                        %error,
+                                    ),
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            mark_move_attempt(
+                                pool,
+                                candidate.file_id,
+                                &error.to_string(),
+                                move_policy,
+                            )
+                            .await
+                        }
+                    },
+                    Err(error) => {
+                        mark_move_attempt(pool, candidate.file_id, &error.to_string(), move_policy)
+                            .await
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", job = "move_execute", %error)
+        }
+    }
+
+    // 잡 M2: move.sweep — 스왑이 끝나 지연이 지난 old 실물을 지운다. 지우고
+    // 나서만 저널을 지운다 (멱등: 남은 실물이 없어도 삭제는 성공). sweep 실패도
+    // mark_attempt로 park해 STUCK 가시성을 준다.
+    match moves::due_deletes(pool, BATCH_LIMIT).await {
+        Ok(candidates) => {
+            for candidate in candidates {
+                match crate::storage_access::delete_object_at(
+                    pool,
+                    crypto,
+                    s3_clients,
+                    &candidate.source_storage_id,
+                    &candidate.object_key,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        match moves::finish_move_with_history(pool, candidate.file_id, "moved")
+                            .await
+                        {
+                            Ok(()) => {
+                                tracing::info!(event = "move.swept", file = %candidate.file_id)
+                            }
+                            Err(error) => tracing::error!(
+                                event = "reconciler.move_failed",
+                                file = %candidate.file_id,
+                                stage = "sweep_finish",
+                                %error,
+                            ),
+                        }
+                    }
+                    Err(error) => {
+                        mark_move_attempt(pool, candidate.file_id, &error.to_string(), move_policy)
+                            .await
+                    }
+                }
+            }
+        }
+        Err(error) => tracing::error!(event = "reconciler.scan_failed", job = "move_sweep", %error),
+    }
+
+    // 잡 M3: move.stale — 경합에 진 requested 이동을 치운다. dest에 stray가
+    // 남았을 수 있으니(없어도 무해) 지우고 저널을 지운다. 이 잡이 없으면 진
+    // 이동이 dest에 고아 객체를 남긴 채 due_moves 조인 밖에 영원히 머문다.
+    match moves::stale_moves(pool, BATCH_LIMIT).await {
+        Ok(candidates) => {
+            for candidate in candidates {
+                match crate::storage_access::delete_object_at(
+                    pool,
+                    crypto,
+                    s3_clients,
+                    &candidate.dest_storage_id,
+                    &candidate.object_key,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        match moves::finish_move_with_history(pool, candidate.file_id, "lost").await
+                        {
+                            Ok(()) => tracing::info!(
+                                event = "move.stale_cleaned",
+                                file = %candidate.file_id,
+                            ),
+                            Err(error) => tracing::error!(
+                                event = "reconciler.move_failed",
+                                file = %candidate.file_id,
+                                stage = "stale_finish",
+                                %error,
+                            ),
+                        }
+                    }
+                    Err(error) => {
+                        mark_move_attempt(pool, candidate.file_id, &error.to_string(), move_policy)
+                            .await
+                    }
+                }
+            }
+        }
+        Err(error) => tracing::error!(event = "reconciler.scan_failed", job = "move_stale", %error),
+    }
+
+    // 잡 M4: move.canceled — 운영자가 취소한 이동을 치운다. dest에 복사가
+    // 남았을 수 있으니(없어도 무해) 지우고 'canceled'로 박제·종결한다. 취소는
+    // requested·failed에서만 오므로 포인터는 아직 source다 — old 실물은
+    // 건드리지 않는다. 정리 실패는 mark_attempt로 backoff하되 park하지 않는다
+    // (canceled는 정리가 성공할 때까지 재시도한다).
+    match moves::canceled_moves(pool, BATCH_LIMIT).await {
+        Ok(candidates) => {
+            for candidate in candidates {
+                match crate::storage_access::delete_object_at(
+                    pool,
+                    crypto,
+                    s3_clients,
+                    &candidate.dest_storage_id,
+                    &candidate.object_key,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        match moves::finish_move_with_history(pool, candidate.file_id, "canceled")
+                            .await
+                        {
+                            Ok(()) => tracing::info!(
+                                event = "move.canceled_cleaned",
+                                file = %candidate.file_id,
+                            ),
+                            Err(error) => tracing::error!(
+                                event = "reconciler.move_failed",
+                                file = %candidate.file_id,
+                                stage = "canceled_finish",
+                                %error,
+                            ),
+                        }
+                    }
+                    Err(error) => {
+                        mark_move_attempt(pool, candidate.file_id, &error.to_string(), move_policy)
+                            .await
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", job = "move_canceled", %error)
+        }
+    }
+
     // 잡 3: 만료된 read lease의 원장 정리 — 회계 무관, issued가 무한히
     // 쌓여 partial index가 비대해지는 것만 막는다.
     match files::expire_read_leases(pool, BATCH_LIMIT).await {
@@ -206,6 +445,18 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
         Ok(count) => tracing::info!(event = "reconciler.history_pruned", count),
         Err(error) => {
             tracing::error!(event = "reconciler.scan_failed", job = "prune_history", %error)
+        }
+    }
+
+    // 잡 M5: 이동 이력 보존 정리 — 3개월 지난 move_history를 배치 삭제한다
+    // (lease_history와 같은 보존 기준). 종결된 이동의 관찰 로그 성장 상한이다.
+    let move_cutoff =
+        chrono::Utc::now() - chrono::Duration::seconds(HISTORY_RETENTION.as_secs() as i64);
+    match moves::prune_move_history(pool, move_cutoff, BATCH_LIMIT).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(event = "reconciler.move_history_pruned", count),
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", job = "prune_move_history", %error)
         }
     }
 
@@ -273,6 +524,29 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
             }
         }
         Err(error) => tracing::error!(event = "reconciler.scan_failed", job = "temps", %error),
+    }
+}
+
+/// 이동 시도 실패를 저널에 남긴다 — 횟수·오류를 기록하고 backoff·park한다.
+/// 이동 잡들이 공유하는 실패 경로다. 기록 자체가 실패하면(DB) 다음 tick이
+/// 같은 후보를 다시 줍는다 — error 로그만 남긴다.
+async fn mark_move_attempt(pool: &PgPool, file_id: uuid::Uuid, error: &str, policy: &MovePolicy) {
+    tracing::warn!(event = "reconciler.move_failed", file = %file_id, error);
+    if let Err(mark_error) = moves::mark_attempt(
+        pool,
+        file_id,
+        error,
+        policy.max_attempts,
+        policy.retry_backoff_secs,
+    )
+    .await
+    {
+        tracing::error!(
+            event = "reconciler.move_failed",
+            file = %file_id,
+            stage = "mark_attempt",
+            error = %mark_error,
+        );
     }
 }
 

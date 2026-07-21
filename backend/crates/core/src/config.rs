@@ -10,6 +10,12 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::error::{Error, Result};
 
+/// 읽기 lease(presigned GET)의 수명 초 — api::lease::READ_LEASE_TTL의 값.
+/// 이동의 삭제 지연은 이 값 이상이어야 스왑 직전 발급된 읽기 URL이 old 실물의
+/// 지연삭제보다 오래 산다 (spec 04 불변식 ④). 이 크레이트는 api에 의존하지
+/// 않으므로 상수를 여기 박고, 어긋나면 배포 검증(status)이 잡는다.
+const READ_LEASE_TTL_SECS: i64 = 900;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub server: ServerConfig,
@@ -74,6 +80,15 @@ pub struct ServerConfig {
     /// S3 표면 CORS 허용 origin (FILEGATE_S3_CORS_ALLOWED_ORIGINS, 콤마구분).
     /// 비면 CORS 미적용 — 브라우저 직접 업로드는 이 목록의 origin에만 열린다.
     pub s3_cors_allowed_origins: Vec<String>,
+    /// 이동 시도 재시도 상한 (FILEGATE_MOVE_MAX_ATTEMPTS, 기본 5, >=1).
+    /// 이 횟수만큼 실패하면 이동이 `failed`로 멈춘다 (운영자 재요청이 재시도).
+    pub move_max_attempts: i32,
+    /// 스왑 후 old 실물 삭제까지의 지연 초 (FILEGATE_MOVE_DELETE_DELAY_SECS,
+    /// 기본 900). presigned GET 수명(READ_LEASE_TTL)과 같다 — 발급된 URL이
+    /// 살아 있는 동안 실물이 사라지지 않게 한다.
+    pub move_delete_delay_secs: i64,
+    /// 이동 실패 backoff 기준 초 (FILEGATE_MOVE_RETRY_BACKOFF_SECS, 기본 60, >=0).
+    pub move_retry_backoff_secs: i64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -147,6 +162,21 @@ impl Config {
                         .collect()
                 })
                 .unwrap_or_default(),
+            move_max_attempts: env("FILEGATE_MOVE_MAX_ATTEMPTS")
+                .map(|v| v.parse())
+                .transpose()
+                .map_err(|e| Error::config(format!("FILEGATE_MOVE_MAX_ATTEMPTS: {e}")))?
+                .unwrap_or(5),
+            move_delete_delay_secs: env("FILEGATE_MOVE_DELETE_DELAY_SECS")
+                .map(|v| v.parse())
+                .transpose()
+                .map_err(|e| Error::config(format!("FILEGATE_MOVE_DELETE_DELAY_SECS: {e}")))?
+                .unwrap_or(900),
+            move_retry_backoff_secs: env("FILEGATE_MOVE_RETRY_BACKOFF_SECS")
+                .map(|v| v.parse())
+                .transpose()
+                .map_err(|e| Error::config(format!("FILEGATE_MOVE_RETRY_BACKOFF_SECS: {e}")))?
+                .unwrap_or(60),
         };
         // 벤더 규칙 (S3 multipart): part는 5MiB 이상(마지막 제외), 5GiB 이하.
         if !(5 * 1024 * 1024..=5 * 1024 * 1024 * 1024).contains(&server.part_size_bytes) {
@@ -164,6 +194,23 @@ impl Config {
         if server.reconciler_interval_secs < 1 {
             return Err(Error::config(
                 "FILEGATE_RECONCILER_INTERVAL_SECS must be >= 1",
+            ));
+        }
+        // 0회 시도는 이동이 즉시 failed로 태어나 영원히 진행하지 못한다.
+        if server.move_max_attempts < 1 {
+            return Err(Error::config("FILEGATE_MOVE_MAX_ATTEMPTS must be >= 1"));
+        }
+        // 읽기 lease 수명보다 짧은 지연은 스왑 직전 발급된 읽기 URL이 old
+        // 실물의 지연삭제보다 먼저 죽게 두는 것 — 이 손잡이가 지키려는 불변식을
+        // 손잡이로 끌 수 없게 floor를 lease 수명에 고정한다 (spec 04 ④).
+        if server.move_delete_delay_secs < READ_LEASE_TTL_SECS {
+            return Err(Error::config(
+                "FILEGATE_MOVE_DELETE_DELAY_SECS must be >= 900 (read-lease TTL)",
+            ));
+        }
+        if server.move_retry_backoff_secs < 0 {
+            return Err(Error::config(
+                "FILEGATE_MOVE_RETRY_BACKOFF_SECS must be >= 0",
             ));
         }
         let database = DatabaseConfig {
@@ -246,6 +293,48 @@ mod tests {
         assert_eq!(config.security.operator_tokens.len(), 2);
         assert_eq!(config.server.multipart_threshold_bytes, 256 * 1024 * 1024);
         assert_eq!(config.server.part_size_bytes, 64 * 1024 * 1024);
+        assert_eq!(config.server.move_max_attempts, 5);
+        assert_eq!(config.server.move_delete_delay_secs, 900);
+        assert_eq!(config.server.move_retry_backoff_secs, 60);
+    }
+
+    #[test]
+    fn move_envs_override_and_validate() {
+        let overridden = |key: &str| match key {
+            "FILEGATE_MOVE_MAX_ATTEMPTS" => Some("3".to_owned()),
+            "FILEGATE_MOVE_DELETE_DELAY_SECS" => Some("1200".to_owned()),
+            "FILEGATE_MOVE_RETRY_BACKOFF_SECS" => Some("0".to_owned()),
+            other => base_env(other),
+        };
+        let config = Config::load_from(&overridden).unwrap();
+        assert_eq!(config.server.move_max_attempts, 3);
+        assert_eq!(config.server.move_delete_delay_secs, 1200);
+        assert_eq!(config.server.move_retry_backoff_secs, 0);
+
+        // 0회 시도는 이동이 즉시 failed로 태어난다 — 거부한다.
+        let zero_attempts = |key: &str| match key {
+            "FILEGATE_MOVE_MAX_ATTEMPTS" => Some("0".to_owned()),
+            other => base_env(other),
+        };
+        assert!(Config::load_from(&zero_attempts).is_err());
+        // 읽기 lease 수명(900초)보다 짧은 지연은 presigned 수명 보호를 깬다 —
+        // 0도 899도 거부한다.
+        let zero_delay = |key: &str| match key {
+            "FILEGATE_MOVE_DELETE_DELAY_SECS" => Some("0".to_owned()),
+            other => base_env(other),
+        };
+        assert!(Config::load_from(&zero_delay).is_err());
+        let below_floor = |key: &str| match key {
+            "FILEGATE_MOVE_DELETE_DELAY_SECS" => Some("899".to_owned()),
+            other => base_env(other),
+        };
+        assert!(Config::load_from(&below_floor).is_err());
+        // 파싱 불가한 값도 거부한다.
+        let unparsable = |key: &str| match key {
+            "FILEGATE_MOVE_RETRY_BACKOFF_SECS" => Some("soon".to_owned()),
+            other => base_env(other),
+        };
+        assert!(Config::load_from(&unparsable).is_err());
     }
 
     #[test]
