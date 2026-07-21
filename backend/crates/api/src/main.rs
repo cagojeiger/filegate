@@ -94,6 +94,10 @@ async fn serve() -> anyhow::Result<()> {
             delete_delay_secs: config.server.move_delete_delay_secs,
             retry_backoff_secs: config.server.move_retry_backoff_secs,
         },
+        reconciler::PolicyConfig {
+            max_moves_per_tick: config.server.policy_max_moves_per_tick,
+            cooldown_secs: config.server.policy_move_cooldown_secs,
+        },
         shutdown.clone(),
     );
 
