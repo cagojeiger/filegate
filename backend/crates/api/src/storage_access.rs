@@ -77,6 +77,115 @@ pub async fn commit_temp_to_backend(
     }
 }
 
+/// 등록부에서 백엔드를 복원한다 — 워커의 집행은 storage_id만 들고 온다.
+pub async fn backend_of(
+    pool: &filegate_db::PgPool,
+    crypto: &Crypto,
+    storage_id: &str,
+) -> anyhow::Result<StorageBackend> {
+    let row = filegate_db::registry::get_storage(pool, storage_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("storage '{storage_id}' not registered"))?;
+    Ok(backend_from_row(crypto, &row)?)
+}
+
+/// 객체 하나를 storage 사이로 복사한다 — 같은 키를 쓰므로 대상이 결정적이고
+/// 재시도가 멱등이다 (같은 키를 덮어쓴다).
+///
+/// 요청 경로의 중계 업로드와 **같은 스풀 슬롯**을 잡는다. 둘 다 같은 로컬
+/// 디스크를 쓰므로 예산이 하나여야 한다 — 따로 두면 업로드가 슬롯을 다 쓴
+/// 상태에서 이동이 추가로 볼륨을 채워 같은 파드의 다른 전송까지 무너뜨린다.
+pub async fn copy_object(
+    pool: &filegate_db::PgPool,
+    crypto: &Crypto,
+    s3_clients: &S3ClientCache,
+    spool_slots: &std::sync::Arc<tokio::sync::Semaphore>,
+    source_storage_id: &str,
+    dest_storage_id: &str,
+    object_key: &str,
+) -> anyhow::Result<()> {
+    let source = backend_of(pool, crypto, source_storage_id).await?;
+    let dest = backend_of(pool, crypto, dest_storage_id).await?;
+
+    // 대상이 s3면 스풀을 거치므로 슬롯을 잡는다 (fs는 자기 마운트에 직접 쓴다).
+    let _permit = crate::spool::acquire_spool_slot(&dest, spool_slots).await;
+
+    let temp_name = format!("move-{}", uuid::Uuid::new_v4());
+    let (temp_path, mut file) =
+        filegate_infra::fs::begin_write(&crate::spool::spool_root(&dest), &temp_name).await?;
+
+    let copied = stream_source_to_temp(
+        s3_clients,
+        &source,
+        source_storage_id,
+        object_key,
+        &mut file,
+    )
+    .await;
+    if let Err(error) = copied {
+        filegate_infra::fs::abort_write(&temp_path).await;
+        return Err(error);
+    }
+
+    commit_temp_to_backend(
+        s3_clients,
+        &dest,
+        dest_storage_id,
+        file,
+        &temp_path,
+        object_key,
+        None,
+    )
+    .await
+    .map_err(|error| match error {
+        CommitErr::Fs(error) | CommitErr::Storage(error) => error,
+    })
+}
+
+async fn stream_source_to_temp(
+    s3_clients: &S3ClientCache,
+    source: &StorageBackend,
+    source_storage_id: &str,
+    object_key: &str,
+    file: &mut tokio::fs::File,
+) -> anyhow::Result<()> {
+    let mut reader: std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>> = match source {
+        StorageBackend::Fs { root } => {
+            let (opened, _) = filegate_infra::fs::open_read(root, object_key)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("source object '{object_key}' is missing"))?;
+            Box::pin(opened)
+        }
+        StorageBackend::S3 { spec, .. } => {
+            let storage = s3_clients.get(source_storage_id, spec, Address::Internal);
+            let (opened, _) = filegate_infra::s3_open_read(&storage, object_key)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("source object '{object_key}' is missing"))?;
+            Box::pin(opened)
+        }
+    };
+    tokio::io::copy(&mut reader, file).await?;
+    Ok(())
+}
+
+/// 특정 storage의 객체를 지운다 — 이동의 뒷정리(스왑 후 source, 경합 패배 시
+/// dest)에 쓴다. 두 백엔드 모두 없는 대상에 성공하므로 멱등이다.
+pub async fn delete_object_at(
+    pool: &filegate_db::PgPool,
+    crypto: &Crypto,
+    s3_clients: &S3ClientCache,
+    storage_id: &str,
+    object_key: &str,
+) -> anyhow::Result<()> {
+    match backend_of(pool, crypto, storage_id).await? {
+        StorageBackend::S3 { spec, .. } => {
+            let storage = s3_clients.get(storage_id, &spec, Address::Internal);
+            filegate_infra::s3_delete_object(&storage, object_key).await
+        }
+        StorageBackend::Fs { root } => filegate_infra::fs::delete(&root, object_key).await,
+    }
+}
+
 pub fn backend_from_row(
     crypto: &Crypto,
     row: &StorageRow,
