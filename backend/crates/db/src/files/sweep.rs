@@ -65,12 +65,20 @@ pub struct SweepCandidate {
     pub write_lease_id: Option<Uuid>,
 }
 
-/// 쓰기 lease가 만료된 pending 파일들 (spec 00: 만료 회수 대상).
-pub async fn expired_pending(
-    pool: &PgPool,
-    limit: i64,
-) -> Result<Vec<SweepCandidate>, sqlx::Error> {
-    expired_pending_rows(pool, None, limit).await
+/// 도출과 집행이 같은 조건을 보게 하는 단일 정의. 둘이 어긋나면 큐에는
+/// 들어가는데 집행자는 못 찾는 작업이 생긴다.
+const EXPIRED_PENDING_SOURCE: &str = "FROM files f \
+     JOIN leases le ON le.file_id = f.id AND le.kind = 'write' \
+     JOIN locations l ON l.file_id = f.id \
+     WHERE f.state = 'pending' AND le.state = 'issued' AND le.expires_at < now()";
+
+/// 쓰기 lease가 만료된 pending 파일들 (spec 00: 만료 회수 대상). 도출은
+/// id만 낸다 — 집행에 쓸 재료는 집행자가 그때의 상태로 다시 읽는다.
+pub async fn expired_pending_ids(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(&format!("SELECT f.id {EXPIRED_PENDING_SOURCE} LIMIT $1"))
+        .bind(limit)
+        .fetch_all(pool)
+        .await
 }
 
 /// 회수 후보 한 건을 집행 직전에 다시 읽는다. 도출과 집행 사이에 늦은
@@ -80,37 +88,20 @@ pub async fn expired_pending_one(
     pool: &PgPool,
     file_id: Uuid,
 ) -> Result<Option<SweepCandidate>, sqlx::Error> {
-    Ok(expired_pending_rows(pool, Some(file_id), 1).await?.pop())
-}
-
-async fn expired_pending_rows(
-    pool: &PgPool,
-    file_id: Option<Uuid>,
-    limit: i64,
-) -> Result<Vec<SweepCandidate>, sqlx::Error> {
-    let rows: Vec<(Uuid, String, String, Option<String>, Uuid)> = sqlx::query_as(
+    let row: Option<(Uuid, String, String, Option<String>, Uuid)> = sqlx::query_as(&format!(
         "SELECT f.id, l.storage_id, l.object_key, le.upload_id, le.id \
-         FROM files f \
-         JOIN leases le ON le.file_id = f.id AND le.kind = 'write' \
-         JOIN locations l ON l.file_id = f.id \
-         WHERE f.state = 'pending' AND le.state = 'issued' AND le.expires_at < now() \
-         AND ($1::uuid IS NULL OR f.id = $1) \
-         LIMIT $2",
-    )
+         {EXPIRED_PENDING_SOURCE} AND f.id = $1"
+    ))
     .bind(file_id)
-    .bind(limit)
-    .fetch_all(pool)
+    .fetch_optional(pool)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|row| SweepCandidate {
-            file_id: row.0,
-            storage_id: row.1,
-            object_key: row.2,
-            upload_id: row.3,
-            write_lease_id: Some(row.4),
-        })
-        .collect())
+    Ok(row.map(|row| SweepCandidate {
+        file_id: row.0,
+        storage_id: row.1,
+        object_key: row.2,
+        upload_id: row.3,
+        write_lease_id: Some(row.4),
+    }))
 }
 
 /// 만료 회수 확정: pending → reclaimed 전이가 이기면 lease 만료 +
@@ -186,10 +177,16 @@ pub async fn reclaim_pending(pool: &PgPool, file_id: Uuid) -> Result<bool, sqlx:
     Ok(true)
 }
 
+const PURGEABLE_SOURCE: &str = "FROM files f JOIN locations l ON l.file_id = f.id \
+     WHERE f.state = 'deleted'";
+
 /// purge 대상 — deleted인데 location이 남은 파일들. purge가 끝난 deleted는
 /// location이 없어 자연히 스캔에서 빠진다.
-pub async fn purgeable(pool: &PgPool, limit: i64) -> Result<Vec<SweepCandidate>, sqlx::Error> {
-    purgeable_rows(pool, None, limit).await
+pub async fn purgeable_ids(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(&format!("SELECT f.id {PURGEABLE_SOURCE} LIMIT $1"))
+        .bind(limit)
+        .fetch_all(pool)
+        .await
 }
 
 /// purge 후보 한 건을 집행 직전에 다시 읽는다 — 이미 purge됐으면 None.
@@ -197,24 +194,13 @@ pub async fn purgeable_one(
     pool: &PgPool,
     file_id: Uuid,
 ) -> Result<Option<SweepCandidate>, sqlx::Error> {
-    Ok(purgeable_rows(pool, Some(file_id), 1).await?.pop())
-}
-
-async fn purgeable_rows(
-    pool: &PgPool,
-    file_id: Option<Uuid>,
-    limit: i64,
-) -> Result<Vec<SweepCandidate>, sqlx::Error> {
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT f.id, l.storage_id, l.object_key \
-         FROM files f JOIN locations l ON l.file_id = f.id \
-         WHERE f.state = 'deleted' AND ($1::uuid IS NULL OR f.id = $1) LIMIT $2",
-    )
+    let row: Option<(Uuid, String, String)> = sqlx::query_as(&format!(
+        "SELECT f.id, l.storage_id, l.object_key {PURGEABLE_SOURCE} AND f.id = $1"
+    ))
     .bind(file_id)
-    .bind(limit)
-    .fetch_all(pool)
+    .fetch_optional(pool)
     .await?;
-    Ok(rows.into_iter().map(candidate_from).collect())
+    Ok(row.map(candidate_from))
 }
 
 /// purge 확정: location을 제거한다 — "남은 행 = 현재 점유"의 그 행이

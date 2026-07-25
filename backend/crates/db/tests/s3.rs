@@ -213,12 +213,12 @@ async fn key_mapping_dies_with_the_file_row(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let candidates = files::expired_pending(&pool, 10).await.unwrap();
-    assert!(
-        files::finalize_reclaim(&pool, &candidates[0])
-            .await
-            .unwrap()
-    );
+    let ids = files::expired_pending_ids(&pool, 10).await.unwrap();
+    let candidate = files::expired_pending_one(&pool, ids[0])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(files::finalize_reclaim(&pool, &candidate).await.unwrap());
     files::prune_terminal_leases(&pool, 0, 10).await.unwrap();
     sqlx::query("UPDATE files SET created_at = now() - interval '91 days' WHERE id = $1")
         .bind(file.file_id)

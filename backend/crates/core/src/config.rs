@@ -66,6 +66,9 @@ pub struct ServerConfig {
     pub public_url: Option<String>,
     /// reconciler tick 간격 (기본 60초). 테스트에서만 줄인다.
     pub reconciler_interval_secs: u64,
+    /// 파드당 집행 워커 수 (기본 8). reconciler는 클러스터에 하나뿐이지만
+    /// 워커는 파드마다 뜨므로, 집행 용량은 파드수 × 이 값이다.
+    pub worker_concurrency: usize,
     /// 이 선언 크기를 넘으면 create가 multipart를 발급한다 (spec 02).
     pub multipart_threshold_bytes: i64,
     /// multipart part 크기 (균일, 마지막만 나머지). 업로드별로 동결된다 —
@@ -128,6 +131,11 @@ impl Config {
                 .transpose()
                 .map_err(|e| Error::config(format!("FILEGATE_RECONCILER_INTERVAL_SECS: {e}")))?
                 .unwrap_or(60),
+            worker_concurrency: env("FILEGATE_WORKER_CONCURRENCY")
+                .map(|v| v.parse())
+                .transpose()
+                .map_err(|e| Error::config(format!("FILEGATE_WORKER_CONCURRENCY: {e}")))?
+                .unwrap_or(8),
             multipart_threshold_bytes: env("FILEGATE_MULTIPART_THRESHOLD_BYTES")
                 .map(|v| v.parse())
                 .transpose()
@@ -166,6 +174,10 @@ impl Config {
                 "FILEGATE_RECONCILER_INTERVAL_SECS must be >= 1",
             ));
         }
+        // 0이면 집행자가 없어 큐가 조용히 쌓이기만 한다 — 부팅에서 거부한다.
+        if server.worker_concurrency < 1 {
+            return Err(Error::config("FILEGATE_WORKER_CONCURRENCY must be >= 1"));
+        }
         let database = DatabaseConfig {
             url: SecretString::from(env("FILEGATE_DATABASE_URL").unwrap_or_else(|| {
                 "postgres://filegate:filegate@127.0.0.1:55432/filegate".to_owned()
@@ -173,6 +185,8 @@ impl Config {
             // 기본 20: 요청 트랜잭션이 커넥션을 duration 내내 쥐고, reconciler
             // tick이 최대 2개(advisory lock + 잡 tx)를 점유한다 — 5면 서빙에
             // ~3개만 남아 동시성이 조금만 있어도 acquire에서 큐잉된다.
+            // 워커는 집행 내내 쥐지 않는다 — claim·집행·종결이 각각 짧은
+            // 문장이라, 워커 수를 올려도 점유는 순간적이다.
             max_connections: env("FILEGATE_DB_MAX_CONNECTIONS")
                 .map(|v| v.parse())
                 .transpose()

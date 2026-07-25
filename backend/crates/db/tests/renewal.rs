@@ -65,6 +65,16 @@ async fn force_expire(pool: &PgPool, file_id: uuid::Uuid) {
         .unwrap();
 }
 
+/// 도출(id)에서 집행 재료를 얻는 두 단계 — 워커가 하는 순서 그대로다.
+async fn reclaim_candidate(pool: &PgPool) -> files::SweepCandidate {
+    let ids = files::expired_pending_ids(pool, 10).await.unwrap();
+    assert_eq!(ids.len(), 1);
+    files::expired_pending_one(pool, ids[0])
+        .await
+        .unwrap()
+        .unwrap()
+}
+
 async fn file_state(pool: &PgPool, file_id: uuid::Uuid) -> String {
     sqlx::query_scalar("SELECT state FROM files WHERE id = $1")
         .bind(file_id)
@@ -107,13 +117,8 @@ async fn extend_refuses_expired_lease(pool: PgPool) {
             .unwrap()
     );
     // 갱신이 거부됐으므로 회수는 그대로 성립한다.
-    let candidates = files::expired_pending(&pool, 10).await.unwrap();
-    assert_eq!(candidates.len(), 1);
-    assert!(
-        files::finalize_reclaim(&pool, &candidates[0])
-            .await
-            .unwrap()
-    );
+    let candidate = reclaim_candidate(&pool).await;
+    assert!(files::finalize_reclaim(&pool, &candidate).await.unwrap());
 }
 
 // ── finalize_reclaim의 갱신 재확인 ──────────────────────────
@@ -123,20 +128,15 @@ async fn reclaim_cancels_when_renewed_after_snapshot(pool: PgPool) {
     wire(&pool).await;
     let file = create_ok(&pool).await;
     force_expire(&pool, file.file_id).await;
-    let candidates = files::expired_pending(&pool, 10).await.unwrap();
-    assert_eq!(candidates.len(), 1);
-    // 스냅샷 이후 클라이언트가 갱신한 상황 — 회수는 취소되고 아무것도
+    let candidate = reclaim_candidate(&pool).await;
+    // 도출 이후 클라이언트가 갱신한 상황 — 회수는 취소되고 아무것도
     // 변하지 않아야 한다 (파일 pending, lease issued, location 유지).
     sqlx::query("UPDATE leases SET expires_at = now() + interval '15 minutes' WHERE id = $1")
         .bind(file.lease_id)
         .execute(&pool)
         .await
         .unwrap();
-    assert!(
-        !files::finalize_reclaim(&pool, &candidates[0])
-            .await
-            .unwrap()
-    );
+    assert!(!files::finalize_reclaim(&pool, &candidate).await.unwrap());
     assert_eq!(file_state(&pool, file.file_id).await, "pending");
     assert_eq!(lease_state(&pool, file.lease_id).await, "issued");
     let locations: i64 = sqlx::query_scalar("SELECT count(*) FROM locations WHERE file_id = $1")
@@ -152,12 +152,8 @@ async fn reclaimed_lease_cannot_be_extended(pool: PgPool) {
     wire(&pool).await;
     let file = create_ok(&pool).await;
     force_expire(&pool, file.file_id).await;
-    let candidates = files::expired_pending(&pool, 10).await.unwrap();
-    assert!(
-        files::finalize_reclaim(&pool, &candidates[0])
-            .await
-            .unwrap()
-    );
+    let candidate = reclaim_candidate(&pool).await;
+    assert!(files::finalize_reclaim(&pool, &candidate).await.unwrap());
     assert_eq!(file_state(&pool, file.file_id).await, "reclaimed");
     assert_eq!(lease_state(&pool, file.lease_id).await, "expired");
     assert!(

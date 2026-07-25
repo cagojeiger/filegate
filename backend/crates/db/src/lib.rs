@@ -3,6 +3,7 @@
 pub mod files;
 pub mod registry;
 pub mod s3_registry;
+pub mod tasks;
 pub mod usage;
 
 pub use sqlx::Error as DbError;
