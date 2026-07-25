@@ -109,7 +109,7 @@ async fn by_storage_pairs_bucket_bytes_with_file_counts(pool: PgPool) {
     files::finalize_commit(&pool, to_delete.file_id, "etag")
         .await
         .unwrap();
-    files::mark_deleted(&pool, "c", to_delete.file_id)
+    files::soft_delete(&pool, "c", to_delete.file_id)
         .await
         .unwrap(); // → purge_pending
 

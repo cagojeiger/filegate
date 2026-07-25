@@ -151,7 +151,7 @@ async fn abort_expired(pool: &PgPool) {
                 continue;
             }
         };
-        match files::finalize_reclaim(pool, &candidate).await {
+        match files::finalize_abort(pool, &candidate).await {
             Ok(true) => tracing::info!(event = "file.aborted", file = %file_id),
             Ok(false) => {}
             Err(error) => {

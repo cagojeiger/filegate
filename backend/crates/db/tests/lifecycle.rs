@@ -122,36 +122,36 @@ async fn commit_moves_reserved_to_active(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn mark_deleted_moves_active_to_purge_pending(pool: PgPool) {
+async fn soft_delete_moves_active_to_purge_pending(pool: PgPool) {
     wire(&pool, 1000).await;
     let file = create_ok(&pool, 100).await;
     files::finalize_commit(&pool, file.file_id, "etag")
         .await
         .unwrap();
     assert!(matches!(
-        files::mark_deleted(&pool, "c", file.file_id).await.unwrap(),
+        files::soft_delete(&pool, "c", file.file_id).await.unwrap(),
         DeleteOutcome::Deleted
     ));
     assert_eq!(observed(&pool).await, (0, 0, 100));
     // 멱등 — 두 번째 delete는 AlreadyDeleted.
     assert!(matches!(
-        files::mark_deleted(&pool, "c", file.file_id).await.unwrap(),
+        files::soft_delete(&pool, "c", file.file_id).await.unwrap(),
         DeleteOutcome::AlreadyDeleted
     ));
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn mark_deleted_diagnoses_wrong_states(pool: PgPool) {
+async fn soft_delete_diagnoses_wrong_states(pool: PgPool) {
     wire(&pool, 1000).await;
     let pending = create_ok(&pool, 100).await;
     assert!(matches!(
-        files::mark_deleted(&pool, "c", pending.file_id)
+        files::soft_delete(&pool, "c", pending.file_id)
             .await
             .unwrap(),
         DeleteOutcome::NotCommitted
     ));
     assert!(matches!(
-        files::mark_deleted(&pool, "c", uuid::Uuid::new_v4())
+        files::soft_delete(&pool, "c", uuid::Uuid::new_v4())
             .await
             .unwrap(),
         DeleteOutcome::NotFound
@@ -164,7 +164,7 @@ async fn mark_deleted_diagnoses_wrong_states(pool: PgPool) {
 async fn expired_pending_reclaims_and_frees_observation(pool: PgPool) {
     wire(&pool, 1000).await;
     let file = create_ok(&pool, 100).await;
-    // lease 만료를 과거로 밀어 회수 대상이 되게 한다.
+    // lease 만료를 과거로 밀어 중단 대상이 되게 한다.
     sqlx::query("UPDATE leases SET expires_at = now() - interval '1 hour' WHERE file_id = $1")
         .bind(file.file_id)
         .execute(&pool)
@@ -176,7 +176,7 @@ async fn expired_pending_reclaims_and_frees_observation(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    assert!(files::finalize_reclaim(&pool, &candidate).await.unwrap());
+    assert!(files::finalize_abort(&pool, &candidate).await.unwrap());
     // 예약이 풀린다. 다만 실물은 아직 있고, 그게 "정리 대기"로 보인다 —
     // 행을 지우지 않고 버려짐으로 넘겼기 때문이다 (ADR 007).
     assert_eq!(observed(&pool).await, (0, 0, 100));
@@ -199,7 +199,7 @@ async fn purge_drops_the_primary_then_collects_the_object(pool: PgPool) {
     files::finalize_commit(&pool, file.file_id, "etag")
         .await
         .unwrap();
-    files::mark_deleted(&pool, "c", file.file_id).await.unwrap();
+    files::soft_delete(&pool, "c", file.file_id).await.unwrap();
 
     // ① 판단자: 정본을 버린다. 점유(active)가 풀리고 정리 대기로 넘어간다.
     assert_eq!(
@@ -294,7 +294,7 @@ async fn execution_loaders_answer_with_the_state_at_execution_time(pool: PgPool)
             .is_none()
     );
 
-    // 회수 후보였다가 늦은 commit이 이기면 더는 후보가 아니다.
+    // 중단 후보였다가 늦은 commit이 이기면 더는 후보가 아니다.
     let reclaim_file = create_ok(&pool, 100).await;
     sqlx::query("UPDATE leases SET expires_at = now() - interval '1 hour' WHERE file_id = $1")
         .bind(reclaim_file.file_id)
@@ -318,7 +318,7 @@ async fn execution_loaders_answer_with_the_state_at_execution_time(pool: PgPool)
     );
 
     // 정본이 버려지면 더는 정본으로 읽히지 않는다.
-    files::mark_deleted(&pool, "c", observed_file.file_id)
+    files::soft_delete(&pool, "c", observed_file.file_id)
         .await
         .unwrap();
     placements::drop_deleted_primaries(&pool, 10).await.unwrap();
@@ -341,7 +341,7 @@ async fn prune_terminal_files_after_retention_frees_client(pool: PgPool) {
     files::finalize_commit(&pool, file.file_id, "etag")
         .await
         .unwrap();
-    files::mark_deleted(&pool, "c", file.file_id).await.unwrap();
+    files::soft_delete(&pool, "c", file.file_id).await.unwrap();
     placements::drop_deleted_primaries(&pool, 10).await.unwrap();
     let pending = placements::collectible(&pool, 10).await.unwrap();
     for (storage_id, object_key) in &pending {
@@ -383,7 +383,7 @@ async fn prune_terminal_files_keeps_occupied_and_leased_rows(pool: PgPool) {
     files::finalize_commit(&pool, occupied.file_id, "etag")
         .await
         .unwrap();
-    files::mark_deleted(&pool, "c", occupied.file_id)
+    files::soft_delete(&pool, "c", occupied.file_id)
         .await
         .unwrap();
     sqlx::query("UPDATE files SET deleted_at = now() - interval '91 days' WHERE id = $1")
@@ -392,9 +392,9 @@ async fn prune_terminal_files_keeps_occupied_and_leased_rows(pool: PgPool) {
         .await
         .unwrap();
     // B: 회수된 pending — lease 원장이 남아 있는 동안은 정리하지 않는다.
-    let reclaimed = create_ok(&pool, 100).await;
+    let aborted = create_ok(&pool, 100).await;
     sqlx::query("UPDATE leases SET expires_at = now() - interval '1 hour' WHERE file_id = $1")
-        .bind(reclaimed.file_id)
+        .bind(aborted.file_id)
         .execute(&pool)
         .await
         .unwrap();
@@ -403,9 +403,9 @@ async fn prune_terminal_files_keeps_occupied_and_leased_rows(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    assert!(files::finalize_reclaim(&pool, &candidate).await.unwrap());
+    assert!(files::finalize_abort(&pool, &candidate).await.unwrap());
     sqlx::query("UPDATE files SET created_at = now() - interval '91 days' WHERE id = $1")
-        .bind(reclaimed.file_id)
+        .bind(aborted.file_id)
         .execute(&pool)
         .await
         .unwrap();

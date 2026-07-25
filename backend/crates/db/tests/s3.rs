@@ -219,7 +219,7 @@ async fn key_mapping_dies_with_the_file_row(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    assert!(files::finalize_reclaim(&pool, &candidate).await.unwrap());
+    assert!(files::finalize_abort(&pool, &candidate).await.unwrap());
     files::prune_terminal_leases(&pool, 0, 10).await.unwrap();
     // 버려진 배치가 실물을 붙들고 있는 동안은 파일 행을 지울 수 없다 —
     // 지우면 CASCADE 로 배치까지 사라져 실물이 유실된다 (ADR 007).
