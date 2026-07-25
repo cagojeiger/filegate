@@ -39,7 +39,7 @@ pub async fn access(
         "SELECT f.state, f.declared_size, f.declared_md5, f.etag, f.content_type, \
          f.part_size, l.object_key, {storage_cols} \
          FROM files f \
-         JOIN locations l ON l.file_id = f.id \
+         JOIN placements l ON l.file_id = f.id AND l.role = 'primary' \
          JOIN storages s ON s.id = l.storage_id \
          WHERE f.id = $1 AND f.client_id = $2"
     ))
@@ -149,7 +149,7 @@ pub async fn byte_lease(
          f.part_size, le.upload_id, l.object_key, {storage_cols} \
          FROM leases le \
          JOIN files f ON f.id = le.file_id \
-         LEFT JOIN locations l ON l.file_id = f.id \
+         LEFT JOIN placements l ON l.file_id = f.id AND l.role = 'primary' \
          LEFT JOIN storages s ON s.id = l.storage_id \
          WHERE le.id = $1 AND le.secret_hash = $2 \
          AND le.state = 'issued' AND le.expires_at > now()"

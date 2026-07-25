@@ -38,7 +38,6 @@ pub use multipart::{
 };
 pub use sweep::{
     DeleteOutcome, SweepCandidate, active_multipart_lease_ids, expire_read_leases,
-    expired_pending_ids, expired_pending_one, finalize_purge, finalize_reclaim, mark_deleted,
-    prune_history, prune_terminal_files, prune_terminal_leases, purgeable_ids, purgeable_one,
-    reclaim_pending,
+    expired_pending_ids, expired_pending_one, finalize_reclaim, mark_deleted, prune_history,
+    prune_terminal_files, prune_terminal_leases, reclaim_pending,
 };

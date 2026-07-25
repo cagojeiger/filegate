@@ -74,7 +74,7 @@ pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome
     // 키는 규칙으로 조합해 저장한다 (spec 00 물리 배치). 읽기·삭제는 저장된
     // 키만 따르므로, 규칙이 바뀌어도 기존 객체는 계속 동작한다 (ADR 001).
     let object_key = object_key(spec.client_id, &storage.kind, file_id, spec.content_type);
-    sqlx::query("INSERT INTO locations (file_id, storage_id, object_key) VALUES ($1, $2, $3)")
+    sqlx::query("INSERT INTO placements (file_id, storage_id, object_key, role) VALUES ($1, $2, $3, 'primary')")
         .bind(file_id)
         .bind(&storage.id)
         .bind(&object_key)

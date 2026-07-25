@@ -69,7 +69,7 @@ pub struct SweepCandidate {
 /// 들어가는데 집행자는 못 찾는 작업이 생긴다.
 const EXPIRED_PENDING_SOURCE: &str = "FROM files f \
      JOIN leases le ON le.file_id = f.id AND le.kind = 'write' \
-     JOIN locations l ON l.file_id = f.id \
+     JOIN placements l ON l.file_id = f.id AND l.role = 'primary' \
      WHERE f.state = 'pending' AND le.state = 'issued' AND le.expires_at < now()";
 
 /// 쓰기 lease가 만료된 pending 파일들 (spec 00: 만료 회수 대상). 도출은
@@ -138,10 +138,21 @@ pub async fn finalize_reclaim(
     if expired.rows_affected() == 0 {
         return Ok(false);
     }
-    sqlx::query("DELETE FROM locations WHERE file_id = $1")
-        .bind(candidate.file_id)
-        .execute(&mut *tx)
-        .await?;
+    // 정본을 버린다 — 행을 지우지 않는다. 실물은 집행자가 지운 뒤에만
+    // 행이 사라진다 (ADR 007). 회수 재료는 이 lease 에서 실린다.
+    sqlx::query(
+        "UPDATE placements SET role = 'dropped', drop_after = now(), \
+         upload_id = (SELECT upload_id FROM leases \
+                      WHERE file_id = $1 AND kind = 'write' \
+                      ORDER BY created_at DESC LIMIT 1), \
+         lease_id = (SELECT id FROM leases \
+                     WHERE file_id = $1 AND kind = 'write' \
+                     ORDER BY created_at DESC LIMIT 1) \
+         WHERE file_id = $1 AND role = 'primary'",
+    )
+    .bind(candidate.file_id)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(true)
 }
@@ -169,62 +180,21 @@ pub async fn reclaim_pending(pool: &PgPool, file_id: Uuid) -> Result<bool, sqlx:
     .bind(file_id)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM locations WHERE file_id = $1")
-        .bind(file_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE placements SET role = 'dropped', drop_after = now(), \
+         upload_id = (SELECT upload_id FROM leases \
+                      WHERE file_id = $1 AND kind = 'write' \
+                      ORDER BY created_at DESC LIMIT 1), \
+         lease_id = (SELECT id FROM leases \
+                     WHERE file_id = $1 AND kind = 'write' \
+                     ORDER BY created_at DESC LIMIT 1) \
+         WHERE file_id = $1 AND role = 'primary'",
+    )
+    .bind(file_id)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(true)
-}
-
-const PURGEABLE_SOURCE: &str = "FROM files f JOIN locations l ON l.file_id = f.id \
-     WHERE f.state = 'deleted'";
-
-/// purge 대상 — deleted인데 location이 남은 파일들. purge가 끝난 deleted는
-/// location이 없어 자연히 스캔에서 빠진다.
-pub async fn purgeable_ids(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar(&format!("SELECT f.id {PURGEABLE_SOURCE} LIMIT $1"))
-        .bind(limit)
-        .fetch_all(pool)
-        .await
-}
-
-/// purge 후보 한 건을 집행 직전에 다시 읽는다 — 이미 purge됐으면 None.
-pub async fn purgeable_one(
-    pool: &PgPool,
-    file_id: Uuid,
-) -> Result<Option<SweepCandidate>, sqlx::Error> {
-    let row: Option<(Uuid, String, String)> = sqlx::query_as(&format!(
-        "SELECT f.id, l.storage_id, l.object_key {PURGEABLE_SOURCE} AND f.id = $1"
-    ))
-    .bind(file_id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(candidate_from))
-}
-
-/// purge 확정: location을 제거한다 — "남은 행 = 현재 점유"의 그 행이
-/// 사라지는 지점이다. 이미 없으면(이중 purge) false — 멱등.
-pub async fn finalize_purge(
-    pool: &PgPool,
-    candidate: &SweepCandidate,
-) -> Result<bool, sqlx::Error> {
-    let removed = sqlx::query("DELETE FROM locations WHERE file_id = $1")
-        .bind(candidate.file_id)
-        .execute(pool)
-        .await?;
-    Ok(removed.rows_affected() > 0)
-}
-
-/// purge 후보는 확정을 지난 파일이라 multipart 잔여물이 없다 — 회수 재료는 None.
-fn candidate_from(row: (Uuid, String, String)) -> SweepCandidate {
-    SweepCandidate {
-        file_id: row.0,
-        storage_id: row.1,
-        object_key: row.2,
-        upload_id: None,
-        write_lease_id: None,
-    }
 }
 
 /// 진행 중 multipart 조립 파일(.fg-tmp-mp-{lease})을 temp sweep에서 보호하기
@@ -293,7 +263,7 @@ pub async fn prune_terminal_files(
          SELECT f.id FROM files f \
          WHERE f.state IN ('deleted', 'reclaimed') \
          AND COALESCE(f.deleted_at, f.created_at) < now() - $1 * interval '1 second' \
-         AND NOT EXISTS (SELECT 1 FROM locations l WHERE l.file_id = f.id) \
+         AND NOT EXISTS (SELECT 1 FROM placements p WHERE p.file_id = f.id) \
          AND NOT EXISTS (SELECT 1 FROM leases le WHERE le.file_id = f.id) \
          LIMIT $2)",
     )
