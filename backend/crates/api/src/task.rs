@@ -149,7 +149,10 @@ async fn copy(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
     )
     .await?;
 
-    if placements::promote_staging(ctx.pool, file_id, HANDOVER_DELAY.as_secs() as i64).await? {
+    let filled = &staging.storage_id;
+    if placements::promote_staging(ctx.pool, file_id, filled, HANDOVER_DELAY.as_secs() as i64)
+        .await?
+    {
         tracing::info!(
             event = "file.moved",
             file = %file_id,

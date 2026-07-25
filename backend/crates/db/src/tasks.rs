@@ -101,9 +101,13 @@ pub async fn claim(pool: &PgPool, worker: &str) -> Result<Option<ClaimedTask>, s
 
 /// 집행 완료 — 행을 지운다. 다음 회차가 상태를 다시 보고, 아직 할 일이
 /// 남았으면 새로 넣는다.
-pub async fn finish(pool: &PgPool, id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM tasks WHERE id = $1")
+///
+/// **자기가 쥔 작업만 종결한다.** claim 이 만료돼 남이 이어받았는데 뒤늦게
+/// 끝난 좀비가 지우면, 진행 중인 집행이 큐에서 사라진다.
+pub async fn finish(pool: &PgPool, id: Uuid, worker: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM tasks WHERE id = $1 AND claimed_by = $2")
         .bind(id)
+        .bind(worker)
         .execute(pool)
         .await
         .map(|_| ())
@@ -111,18 +115,23 @@ pub async fn finish(pool: &PgPool, id: Uuid) -> Result<(), sqlx::Error> {
 
 /// 집행 실패 — backoff를 두고 큐로 되돌린다. 종착 상태는 없다: 상태에서
 /// 파생된 일은 항상 유효하므로 버리지 않고, 간격만 벌려 재시도한다.
+///
+/// **자기가 쥔 작업만 되돌린다.** 좀비가 남의 작업을 풀면 같은 일을 둘이
+/// 동시에 집행하게 된다.
 pub async fn fail(
     pool: &PgPool,
     id: Uuid,
+    worker: &str,
     error: &str,
     backoff_secs: i64,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE tasks SET state = 'queued', claimed_at = NULL, claimed_by = NULL, \
-         last_error = $2, run_at = now() + $3 * interval '1 second' \
-         WHERE id = $1",
+         last_error = $3, run_at = now() + $4 * interval '1 second' \
+         WHERE id = $1 AND claimed_by = $2",
     )
     .bind(id)
+    .bind(worker)
     .bind(error)
     .bind(backoff_secs)
     .execute(pool)

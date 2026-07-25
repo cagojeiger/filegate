@@ -276,3 +276,51 @@ async fn a_policy_dies_with_its_source_storage(pool: PgPool) {
     registry::delete_storage(&pool, "hot").await.unwrap();
     assert!(policies::get(&pool, policy.id).await.unwrap().is_none());
 }
+
+/// 집행자가 채운 자리와 승격되는 자리가 다를 수 있다 — 이동의 정체성이
+/// 가변 staging 행에만 살면, 복사 중 취소·재개설이 "쓴 적 없는 자리"를
+/// 정본으로 만든다. 바이트를 가진 쪽은 둘 다 회수 예약되어 사라진다.
+#[sqlx::test(migrations = "./migrations")]
+async fn promotion_must_name_the_place_the_worker_filled(pool: PgPool) {
+    wire(&pool).await;
+    registry::insert_storage(&pool, &s3_row("other", 10_000))
+        .await
+        .unwrap();
+    let file = file_of(&pool, 100).await;
+
+    // ① 운영자가 cold 로 이동 요청 → 집행자가 cold 를 읽고 복사를 시작한다.
+    placements::open_staging(&pool, file, "cold").await.unwrap();
+    let filled = placements::staging_of(&pool, file)
+        .await
+        .unwrap()
+        .expect("집행자가 읽은 자리");
+    assert_eq!(filled.storage_id, "cold");
+
+    // ② 복사 중 취소 → 자리가 버려진다.
+    placements::drop_staging(&pool, file).await.unwrap();
+    // ③ 곧바로 다른 곳으로 재요청 → 새 자리가 열린다 (아무도 안 채웠다).
+    placements::open_staging(&pool, file, "other")
+        .await
+        .unwrap();
+
+    // ④ 집행자가 cold 에 쓰기를 마치고, 자기가 채운 곳을 지목해 승격한다.
+    //    그 자리는 이미 버려졌으므로 승격은 실패해야 한다.
+    assert!(
+        !placements::promote_staging(&pool, file, &filled.storage_id, 900)
+            .await
+            .unwrap(),
+        "쓴 적 없는 자리가 승격됐다 — 바이트를 가진 쪽이 회수된다"
+    );
+
+    // 정본은 그대로다. 새로 열린 자리는 다음 집행자가 제대로 채운다.
+    let primary = placements::primary_of(&pool, file).await.unwrap().unwrap();
+    assert_eq!(primary.storage_id, "hot");
+    assert_eq!(
+        placements::staging_of(&pool, file)
+            .await
+            .unwrap()
+            .unwrap()
+            .storage_id,
+        "other"
+    );
+}

@@ -85,11 +85,14 @@ pub async fn collect(
     storage_id: &str,
     object_key: &str,
 ) -> Result<bool, sqlx::Error> {
-    let removed = sqlx::query("DELETE FROM placements WHERE storage_id = $1 AND object_key = $2")
-        .bind(storage_id)
-        .bind(object_key)
-        .execute(pool)
-        .await?;
+    let removed = sqlx::query(
+        "DELETE FROM placements \
+         WHERE storage_id = $1 AND object_key = $2 AND role = 'dropped'",
+    )
+    .bind(storage_id)
+    .bind(object_key)
+    .execute(pool)
+    .await?;
     Ok(removed.rows_affected() > 0)
 }
 
@@ -217,12 +220,18 @@ pub async fn open_staging(
 
 /// 정본을 교체한다 — 이동 전체에서 유일하게 되돌릴 수 없는 지점이다.
 ///
+/// **집행자가 실제로 채운 자리를 지목해야 한다** (`filled_storage_id`).
+/// 자리는 가변이다: 복사 중 취소되고 다른 곳으로 재요청되면 같은 파일에 다른
+/// staging 이 열린다. 지목 없이 "staging 인 것"을 승격하면 아무도 쓴 적 없는
+/// 자리가 정본이 되고, 바이트를 가진 쪽은 둘 다 회수되어 사라진다.
+///
 /// 강등이 승격보다 **먼저**여야 한다: 파일당 정본 하나라는 제약이 매 문장
 /// 경계에서 성립해야 하기 때문이다. 둘 다 조건부라 어느 쪽이든 0행이면 전부
 /// 롤백된다 — 삭제·덮어쓰기·취소가 끼어들면 이동이 지고 요청 경로가 이긴다.
 pub async fn promote_staging(
     pool: &PgPool,
     file_id: Uuid,
+    filled_storage_id: &str,
     delay_secs: i64,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
@@ -247,9 +256,11 @@ pub async fn promote_staging(
     // ② 준비된 자리를 정본으로.
     let promoted: Option<(String,)> = sqlx::query_as(
         "UPDATE placements SET role = 'primary' \
-         WHERE file_id = $1 AND role = 'staging' RETURNING storage_id",
+         WHERE file_id = $1 AND role = 'staging' AND storage_id = $2 \
+         RETURNING storage_id",
     )
     .bind(file_id)
+    .bind(filled_storage_id)
     .fetch_optional(&mut *tx)
     .await?;
     let Some((dest,)) = promoted else {
