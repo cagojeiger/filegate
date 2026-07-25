@@ -28,7 +28,7 @@ pub use access::{
 };
 pub use commit::{
     ObservedCommitCandidate, finalize_commit, finalize_multipart_commit, observed_commit_candidate,
-    observed_commit_candidates,
+    observed_commit_ids,
 };
 pub use create::{CreateOutcome, CreateSpec, CreatedFile, create};
 pub use geometry::{part_count, part_expected_size, part_offset};
@@ -37,7 +37,8 @@ pub use multipart::{
     has_done_parts, record_part_done, write_lease,
 };
 pub use sweep::{
-    DeleteOutcome, SweepCandidate, active_multipart_lease_ids, expire_read_leases, expired_pending,
-    expired_pending_one, finalize_purge, finalize_reclaim, mark_deleted, prune_history,
-    prune_terminal_files, prune_terminal_leases, purgeable, purgeable_one, reclaim_pending,
+    DeleteOutcome, SweepCandidate, active_multipart_lease_ids, expire_read_leases,
+    expired_pending_ids, expired_pending_one, finalize_purge, finalize_reclaim, mark_deleted,
+    prune_history, prune_terminal_files, prune_terminal_leases, purgeable_ids, purgeable_one,
+    reclaim_pending,
 };

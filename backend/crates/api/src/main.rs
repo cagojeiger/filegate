@@ -1,10 +1,11 @@
 //! filegate 진입점: env 설정 → PostgreSQL(+마이그레이션) → storage 재검증
-//! → HTTP + reconciler → graceful shutdown.
+//! → HTTP + reconciler + 워커 → graceful shutdown.
 
 mod admin;
 mod blobs;
 mod cors;
 mod error;
+mod gc;
 mod lease;
 mod reconciler;
 mod routes;
@@ -12,8 +13,10 @@ mod s3;
 mod spool;
 mod status;
 mod storage_access;
+mod task;
 mod v1;
 mod validation;
+mod worker;
 
 use std::io;
 use std::sync::Arc;
@@ -84,11 +87,18 @@ async fn serve() -> anyhow::Result<()> {
     let shutdown = CancellationToken::new();
     // 요청 경로와 reconciler가 같은 캐시를 공유한다 — 같은 storage의 웜 풀.
     let s3_clients = std::sync::Arc::new(filegate_infra::S3ClientCache::default());
-    let worker = reconciler::spawn(
+    // 판단자는 클러스터에 하나(락), 집행자는 파드마다 N개(락 없음) —
+    // 파드를 늘리면 집행 용량만 늘어난다.
+    let reconciler = reconciler::spawn(
+        pool.clone(),
+        std::time::Duration::from_secs(config.server.reconciler_interval_secs),
+        shutdown.clone(),
+    );
+    let workers = worker::spawn(
         pool.clone(),
         crypto.clone(),
         s3_clients.clone(),
-        std::time::Duration::from_secs(config.server.reconciler_interval_secs),
+        config.server.worker_concurrency,
         shutdown.clone(),
     );
 
@@ -132,8 +142,15 @@ async fn serve() -> anyhow::Result<()> {
         None => server.await,
     };
 
-    if let Err(error) = worker.await {
+    if let Err(error) = reconciler.await {
         tracing::warn!(event = "reconciler.join_failed", %error);
+    }
+    // 워커는 집던 작업(쪼개지지 않는 사슬)을 끝내고 나온다 — 강제로 끊으면
+    // 전이와 실물 조작이 갈라진다. 못 끝낸 것은 claim 만료가 큐로 되돌린다.
+    for handle in workers {
+        if let Err(error) = handle.await {
+            tracing::warn!(event = "worker.join_failed", %error);
+        }
     }
     pool.close().await;
     info!(event = "shutdown.complete");

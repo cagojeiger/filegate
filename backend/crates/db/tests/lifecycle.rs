@@ -169,11 +169,13 @@ async fn expired_pending_reclaims_and_frees_observation(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let candidates = files::expired_pending(&pool, 10).await.unwrap();
-    assert_eq!(candidates.len(), 1);
-    let candidate = candidates.first().unwrap();
-    assert_eq!(candidate.file_id, file.file_id);
-    assert!(files::finalize_reclaim(&pool, candidate).await.unwrap());
+    let ids = files::expired_pending_ids(&pool, 10).await.unwrap();
+    assert_eq!(ids, vec![file.file_id]);
+    let candidate = files::expired_pending_one(&pool, ids[0])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(files::finalize_reclaim(&pool, &candidate).await.unwrap());
     // location이 사라졌으니 관찰량에서도 사라진다 — 남은 행 = 현재 점유.
     assert_eq!(observed(&pool).await, (0, 0, 0));
 }
@@ -186,14 +188,13 @@ async fn purge_removes_location_and_observation(pool: PgPool) {
         .await
         .unwrap();
     files::mark_deleted(&pool, "c", file.file_id).await.unwrap();
-    let candidates = files::purgeable(&pool, 10).await.unwrap();
-    assert_eq!(candidates.len(), 1);
-    let candidate = candidates.first().unwrap();
-    assert_eq!(candidate.file_id, file.file_id);
-    assert!(files::finalize_purge(&pool, candidate).await.unwrap());
+    let ids = files::purgeable_ids(&pool, 10).await.unwrap();
+    assert_eq!(ids, vec![file.file_id]);
+    let candidate = files::purgeable_one(&pool, ids[0]).await.unwrap().unwrap();
+    assert!(files::finalize_purge(&pool, &candidate).await.unwrap());
     assert_eq!(observed(&pool).await, (0, 0, 0));
     // 이중 purge는 멱등 — false.
-    assert!(!files::finalize_purge(&pool, candidate).await.unwrap());
+    assert!(!files::finalize_purge(&pool, &candidate).await.unwrap());
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -220,10 +221,12 @@ async fn observed_commit_scan_targets_live_single_put_pending(pool: PgPool) {
     };
     files::create(&pool, mp_spec).await.unwrap();
 
-    let candidates = files::observed_commit_candidates(&pool, 10).await.unwrap();
-    assert_eq!(candidates.len(), 1);
-    let candidate = candidates.first().unwrap();
-    assert_eq!(candidate.file_id, live.file_id);
+    let ids = files::observed_commit_ids(&pool, 10).await.unwrap();
+    assert_eq!(ids, vec![live.file_id]);
+    let candidate = files::observed_commit_candidate(&pool, ids[0])
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(candidate.declared_size, 100);
     assert_eq!(candidate.object_key, live.object_key);
     assert_eq!(candidate.storage.id, "s");
@@ -307,8 +310,9 @@ async fn prune_terminal_files_after_retention_frees_client(pool: PgPool) {
         .await
         .unwrap();
     files::mark_deleted(&pool, "c", file.file_id).await.unwrap();
-    let candidates = files::purgeable(&pool, 10).await.unwrap();
-    assert!(files::finalize_purge(&pool, &candidates[0]).await.unwrap());
+    let ids = files::purgeable_ids(&pool, 10).await.unwrap();
+    let candidate = files::purgeable_one(&pool, ids[0]).await.unwrap().unwrap();
+    assert!(files::finalize_purge(&pool, &candidate).await.unwrap());
     // lease 원장 정리 (잡 5 등가) — 남은 lease는 prune을 막는다.
     files::prune_terminal_leases(&pool, 0, 10).await.unwrap();
     // 보존 기간 내 — stat 계약대로 행이 남는다.
@@ -358,12 +362,12 @@ async fn prune_terminal_files_keeps_occupied_and_leased_rows(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let candidates = files::expired_pending(&pool, 10).await.unwrap();
-    assert!(
-        files::finalize_reclaim(&pool, &candidates[0])
-            .await
-            .unwrap()
-    );
+    let ids = files::expired_pending_ids(&pool, 10).await.unwrap();
+    let candidate = files::expired_pending_one(&pool, ids[0])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(files::finalize_reclaim(&pool, &candidate).await.unwrap());
     sqlx::query("UPDATE files SET created_at = now() - interval '91 days' WHERE id = $1")
         .bind(reclaimed.file_id)
         .execute(&pool)

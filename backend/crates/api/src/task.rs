@@ -1,4 +1,4 @@
-//! 파일별 집행 작업 — 도출(scan)과 집행(execute)이 분리돼 있다.
+//! 파일별 집행 작업 — 도출(scan)은 reconciler가, 집행(execute)은 워커가 쓴다.
 //!
 //! 여기 있는 작업은 전부 저장소 백엔드 I/O를 한다. 느리고, 실패하고,
 //! 파일마다 독립이다. 반대로 DB만 만지는 정리는 gc.rs가 맡는다.
@@ -12,8 +12,9 @@
 //!            확인한 뒤에만 점유(location)를 놓아야 한다.
 //!
 //! 집행자는 스냅샷이 아니라 지금의 상태를 본다 — execute는 file_id로 후보를
-//! 다시 읽고, 그 사이 조건에서 빠졌으면 조용히 건너뛴다. 도출과 집행 사이가
-//! 벌어져도(큐를 거치면 더 벌어진다) 낡은 재료로 실물을 건드리지 않는다.
+//! 다시 읽고, 그 사이 조건에서 빠졌으면 조용히 건너뛴다. 도출과 집행 사이는
+//! 큐를 거치며 벌어지고 집행은 다른 파드에서 일어나므로, 이 재조회가 낡은
+//! 재료로 실물을 건드리지 않게 하는 유일한 장치다.
 
 use filegate_core::Crypto;
 use filegate_db::files::{self, SweepCandidate};
@@ -28,77 +29,47 @@ pub struct Context<'a> {
     pub s3_clients: &'a S3ClientCache,
 }
 
-/// 집행 단위 하나. 재료가 아니라 대상 id만 든다 — 재료는 집행 시점에 읽는다.
-#[derive(Debug, Clone, Copy)]
-pub enum Task {
-    /// 단일 PUT pending의 실물을 관찰해 선언과 맞으면 확정 (spec 00).
-    Observe(Uuid),
-    /// 쓰기 lease가 만료된 pending의 예약 해제 + 실물 정리.
-    Reclaim(Uuid),
-    /// deleted 파일의 물리 삭제 + 점유 해제.
-    Purge(Uuid),
-}
+/// 집행 갈래 — 큐의 `kind` 컬럼과 같은 어휘다.
+pub const OBSERVE: &str = "observe";
+pub const RECLAIM: &str = "reclaim";
+pub const PURGE: &str = "purge";
 
-impl Task {
-    /// 로그·관측의 갈래 이름.
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Task::Observe(_) => "observe",
-            Task::Reclaim(_) => "reclaim",
-            Task::Purge(_) => "purge",
-        }
-    }
-
-    pub fn file_id(&self) -> Uuid {
-        match self {
-            Task::Observe(id) | Task::Reclaim(id) | Task::Purge(id) => *id,
-        }
-    }
+/// 한 갈래의 도출 결과 — 큐에 넣을 대상 id들. 재료는 담지 않는다.
+pub struct Scanned {
+    pub kind: &'static str,
+    pub file_ids: Vec<Uuid>,
 }
 
 /// 상태를 훑어 이번 회차의 작업을 도출한다 (갈래마다 유계 배치).
 ///
 /// 세 갈래의 대상은 서로소다 — observe는 lease가 살아 있는 pending,
-/// reclaim은 만료된 pending, purge는 deleted다. 한 파일이 두 작업에 동시에
+/// reclaim은 만료된 pending, purge는 deleted다. 한 파일이 두 갈래에 동시에
 /// 뽑히지 않는다. 한 갈래의 스캔이 실패해도 나머지는 진행한다.
-pub async fn scan(pool: &PgPool, limit: i64) -> Vec<Task> {
-    let mut tasks = Vec::new();
-
-    match files::observed_commit_candidates(pool, limit).await {
-        Ok(rows) => tasks.extend(rows.into_iter().map(|c| Task::Observe(c.file_id))),
-        Err(error) => {
-            tracing::error!(event = "reconciler.scan_failed", kind = "observe", %error)
+pub async fn scan(pool: &PgPool, limit: i64) -> Vec<Scanned> {
+    let mut out = Vec::new();
+    for (kind, ids) in [
+        (OBSERVE, files::observed_commit_ids(pool, limit).await),
+        (RECLAIM, files::expired_pending_ids(pool, limit).await),
+        (PURGE, files::purgeable_ids(pool, limit).await),
+    ] {
+        match ids {
+            Ok(file_ids) => out.push(Scanned { kind, file_ids }),
+            Err(error) => tracing::error!(event = "reconciler.scan_failed", kind, %error),
         }
     }
-    match files::expired_pending(pool, limit).await {
-        Ok(rows) => tasks.extend(rows.into_iter().map(|c| Task::Reclaim(c.file_id))),
-        Err(error) => {
-            tracing::error!(event = "reconciler.scan_failed", kind = "reclaim", %error)
-        }
-    }
-    match files::purgeable(pool, limit).await {
-        Ok(rows) => tasks.extend(rows.into_iter().map(|c| Task::Purge(c.file_id))),
-        Err(error) => tracing::error!(event = "reconciler.scan_failed", kind = "purge", %error),
-    }
-
-    tasks
+    out
 }
 
-/// 작업 하나를 통째로 집행한다. Err는 "이번엔 못 했다" — 다음 회차가 다시
-/// 줍는다 (전부 멱등). 조건부 전이에 진 경우는 실패가 아니라 Ok다.
-pub async fn execute(ctx: &Context<'_>, task: Task) {
-    let outcome = match task {
-        Task::Observe(id) => observe(ctx, id).await,
-        Task::Reclaim(id) => reclaim(ctx, id).await,
-        Task::Purge(id) => purge(ctx, id).await,
-    };
-    if let Err(error) = outcome {
-        tracing::warn!(
-            event = "reconciler.task_failed",
-            kind = task.kind(),
-            file = %task.file_id(),
-            %error,
-        );
+/// 작업 하나를 통째로 집행한다. Err는 "이번엔 못 했다" — 워커가 backoff를
+/// 두고 큐로 되돌린다 (전부 멱등이라 재시도가 안전하다). 조건부 전이에
+/// 졌거나 대상이 이미 사라진 경우는 실패가 아니라 Ok다 — 할 일이 없어진
+/// 것이므로 큐에서 지운다.
+pub async fn execute(ctx: &Context<'_>, kind: &str, file_id: Uuid) -> anyhow::Result<()> {
+    match kind {
+        OBSERVE => observe(ctx, file_id).await,
+        RECLAIM => reclaim(ctx, file_id).await,
+        PURGE => purge(ctx, file_id).await,
+        other => Err(anyhow::anyhow!("unknown task kind '{other}'")),
     }
 }
 

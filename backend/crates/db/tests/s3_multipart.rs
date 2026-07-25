@@ -86,7 +86,7 @@ async fn open_records_pending_with_unknown_size(pool: PgPool) {
     assert_eq!(lease.lease_id, created.lease_id);
     // 관찰 확정 후보에서 빠진다 — 완료는 선언(Complete)이다 (part_size 표식).
     assert!(
-        files::observed_commit_candidates(&pool, 10)
+        files::observed_commit_ids(&pool, 10)
             .await
             .unwrap()
             .is_empty()
@@ -249,10 +249,13 @@ async fn expired_multipart_is_protected_and_reclaimable(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let candidates = files::expired_pending(&pool, 10).await.unwrap();
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].file_id, created.file_id);
-    assert_eq!(candidates[0].write_lease_id, Some(created.lease_id));
+    let ids = files::expired_pending_ids(&pool, 10).await.unwrap();
+    assert_eq!(ids, vec![created.file_id]);
+    let candidate = files::expired_pending_one(&pool, ids[0])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(candidate.write_lease_id, Some(created.lease_id));
     // 만료 시각이 지나도 lease가 아직 issued면 보호는 유지된다 — 회수(전이)가
     // 조립 파일 sweep보다 먼저다 (그래야 재개 경합에서 손상본이 안 커밋된다).
     assert_eq!(
@@ -260,11 +263,7 @@ async fn expired_multipart_is_protected_and_reclaimable(pool: PgPool) {
         vec![created.lease_id]
     );
     // 회수가 lease를 expired로 닫은 뒤에야 보호 목록에서 빠진다.
-    assert!(
-        files::finalize_reclaim(&pool, &candidates[0])
-            .await
-            .unwrap()
-    );
+    assert!(files::finalize_reclaim(&pool, &candidate).await.unwrap());
     assert!(
         files::active_multipart_lease_ids(&pool)
             .await

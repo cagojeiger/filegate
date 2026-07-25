@@ -11,7 +11,9 @@ use std::time::Duration;
 use filegate_db::{PgPool, files, registry, usage};
 use filegate_infra::fs as fs_backend;
 
-use super::BATCH_LIMIT;
+/// 한 회차에 잡별로 지우는 최대 행 수 (유계 배치, docs/stack). 정리가 밀리면
+/// 다음 회차가 이어 받는다 — 한 번에 다 지우려 들지 않는다.
+const BATCH_LIMIT: i64 = 20;
 
 /// 장부 밖 임시 파일(.fg-tmp-*)의 나이 상한 — 이보다 늙으면 크래시 잔여물이다.
 /// 진행 중 업로드의 유휴는 30초에 끊기므로(bytes) 여유가 크다.
