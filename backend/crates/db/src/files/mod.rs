@@ -27,7 +27,8 @@ pub use access::{
     record_upload, recorded_upload, stat,
 };
 pub use commit::{
-    ObservedCommitCandidate, finalize_commit, finalize_multipart_commit, observed_commit_candidates,
+    ObservedCommitCandidate, finalize_commit, finalize_multipart_commit, observed_commit_candidate,
+    observed_commit_candidates,
 };
 pub use create::{CreateOutcome, CreateSpec, CreatedFile, create};
 pub use geometry::{part_count, part_expected_size, part_offset};
@@ -37,6 +38,6 @@ pub use multipart::{
 };
 pub use sweep::{
     DeleteOutcome, SweepCandidate, active_multipart_lease_ids, expire_read_leases, expired_pending,
-    finalize_purge, finalize_reclaim, mark_deleted, prune_history, prune_terminal_files,
-    prune_terminal_leases, purgeable, reclaim_pending,
+    expired_pending_one, finalize_purge, finalize_reclaim, mark_deleted, prune_history,
+    prune_terminal_files, prune_terminal_leases, purgeable, purgeable_one, reclaim_pending,
 };
