@@ -11,7 +11,7 @@
 use filegate_db::files::{self, CreateOutcome, CreateSpec};
 use filegate_db::policies::{self, PolicySpec};
 use filegate_db::registry::{self, StorageRow};
-use filegate_db::{moves, usage};
+use filegate_db::{placements, usage};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -182,7 +182,9 @@ async fn files_already_moving_or_just_moved_are_excluded(pool: PgPool) {
     let policy = a_policy(&pool, demote(None, None)).await;
 
     // 이미 이동 중 — 파일당 이동은 하나뿐이라 다시 고르면 안 된다.
-    moves::request(&pool, moving, "cold").await.unwrap();
+    placements::open_staging(&pool, moving, "cold")
+        .await
+        .unwrap();
     // 방금 옮겨졌다 — 쿨다운이 없으면 정책 사이를 오간다.
     sqlx::query(
         "INSERT INTO move_history (file_id, source_storage_id, dest_storage_id, size, outcome) \
@@ -218,10 +220,14 @@ async fn generated_moves_take_the_same_path_as_operator_requests(pool: PgPool) {
     let file = file_of(&pool, 100).await;
 
     assert!(policies::enqueue_move(&pool, file, "cold").await.unwrap());
-    let row = moves::get(&pool, file).await.unwrap().expect("journalled");
+    let row = placements::in_flight_move(&pool, file)
+        .await
+        .unwrap()
+        .expect("journalled");
+    // 정책이 연 자리는 운영자가 연 것과 구별되지 않는다 — 같은 프리미티브다.
     assert_eq!(
-        (row.source_storage_id.as_str(), row.state.as_str()),
-        ("hot", "requested")
+        (row.source_storage_id.as_str(), row.dest_storage_id.as_str()),
+        ("hot", "cold")
     );
     // 이미 이동 중이면 다시 넣지 않는다.
     assert!(!policies::enqueue_move(&pool, file, "cold").await.unwrap());
@@ -246,8 +252,8 @@ async fn in_flight_bytes_discount_the_pressure_estimate(pool: PgPool) {
 
     // 이동이 걸려도 파일은 아직 source에 있어 점유에 잡힌다. 그러나 후보에서는
     // 빠지므로, 이 바이트를 빼지 않으면 매 회차가 "안 줄었다"고 보고 또 만든다.
-    moves::request(&pool, a, "cold").await.unwrap();
-    moves::request(&pool, b, "cold").await.unwrap();
+    placements::open_staging(&pool, a, "cold").await.unwrap();
+    placements::open_staging(&pool, b, "cold").await.unwrap();
     let in_flight = policies::in_flight_bytes(&pool).await.unwrap();
     assert_eq!(in_flight, vec![("hot".to_owned(), 500)]);
 

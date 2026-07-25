@@ -64,14 +64,30 @@ async fn enqueue_is_idempotent_per_kind_and_file(pool: PgPool) {
     wire(&pool).await;
     let file = a_file(&pool).await;
 
-    assert_eq!(tasks::enqueue(&pool, "purge", &[file]).await.unwrap(), 1);
+    assert_eq!(
+        tasks::enqueue_files(&pool, "observe", &[file])
+            .await
+            .unwrap(),
+        1
+    );
     // 매 회차의 재도출이 중복을 만들지 않는다 — 이게 상태 기반 enqueue를
     // 안전하게 만드는 성질이다.
-    assert_eq!(tasks::enqueue(&pool, "purge", &[file]).await.unwrap(), 0);
+    assert_eq!(
+        tasks::enqueue_files(&pool, "observe", &[file])
+            .await
+            .unwrap(),
+        0
+    );
     // 갈래가 다르면 별개 작업이다.
-    assert_eq!(tasks::enqueue(&pool, "observe", &[file]).await.unwrap(), 1);
+    assert_eq!(
+        tasks::enqueue_files(&pool, "copy", &[file]).await.unwrap(),
+        1
+    );
     // 빈 목록은 아무것도 하지 않는다.
-    assert_eq!(tasks::enqueue(&pool, "purge", &[]).await.unwrap(), 0);
+    assert_eq!(
+        tasks::enqueue_files(&pool, "observe", &[]).await.unwrap(),
+        0
+    );
 
     let depth = tasks::depth(&pool, 5).await.unwrap();
     assert_eq!((depth.queued, depth.active), (2, 0));
@@ -81,10 +97,12 @@ async fn enqueue_is_idempotent_per_kind_and_file(pool: PgPool) {
 async fn a_task_is_claimed_by_exactly_one_worker(pool: PgPool) {
     wire(&pool).await;
     let file = a_file(&pool).await;
-    tasks::enqueue(&pool, "purge", &[file]).await.unwrap();
+    tasks::enqueue_files(&pool, "observe", &[file])
+        .await
+        .unwrap();
 
     let first = tasks::claim(&pool, "w1").await.unwrap().expect("claimed");
-    assert_eq!(first.file_id, file);
+    assert_eq!(first.file_id, Some(file));
     assert_eq!(first.attempts, 1);
     // 이미 잡힌 작업은 다른 워커에게 보이지 않는다 — 배타성은 락이 아니라
     // 행 상태가 준다.
@@ -103,7 +121,9 @@ async fn a_task_is_claimed_by_exactly_one_worker(pool: PgPool) {
 async fn failure_returns_the_task_to_the_queue_after_a_backoff(pool: PgPool) {
     wire(&pool).await;
     let file = a_file(&pool).await;
-    tasks::enqueue(&pool, "purge", &[file]).await.unwrap();
+    tasks::enqueue_files(&pool, "observe", &[file])
+        .await
+        .unwrap();
 
     let claimed = tasks::claim(&pool, "w1").await.unwrap().expect("claimed");
     tasks::fail(&pool, claimed.id, "storage unreachable", 3600)
@@ -128,7 +148,9 @@ async fn failure_returns_the_task_to_the_queue_after_a_backoff(pool: PgPool) {
 async fn an_expired_claim_returns_to_the_queue(pool: PgPool) {
     wire(&pool).await;
     let file = a_file(&pool).await;
-    tasks::enqueue(&pool, "purge", &[file]).await.unwrap();
+    tasks::enqueue_files(&pool, "observe", &[file])
+        .await
+        .unwrap();
     tasks::claim(&pool, "dead-pod")
         .await
         .unwrap()
@@ -149,14 +171,16 @@ async fn an_expired_claim_returns_to_the_queue(pool: PgPool) {
         .await
         .unwrap()
         .expect("claimed");
-    assert_eq!(taken.file_id, file);
+    assert_eq!(taken.file_id, Some(file));
 }
 
 #[sqlx::test(migrations = "./migrations")]
 async fn stuck_tasks_are_visible_by_attempt_count(pool: PgPool) {
     wire(&pool).await;
     let file = a_file(&pool).await;
-    tasks::enqueue(&pool, "purge", &[file]).await.unwrap();
+    tasks::enqueue_files(&pool, "observe", &[file])
+        .await
+        .unwrap();
     sqlx::query("UPDATE tasks SET attempts = 7")
         .execute(&pool)
         .await
@@ -173,7 +197,9 @@ async fn stuck_tasks_are_visible_by_attempt_count(pool: PgPool) {
 async fn tasks_vanish_with_their_file(pool: PgPool) {
     wire(&pool).await;
     let file = a_file(&pool).await;
-    tasks::enqueue(&pool, "purge", &[file]).await.unwrap();
+    tasks::enqueue_files(&pool, "observe", &[file])
+        .await
+        .unwrap();
 
     // 파일 행 정리가 큐를 알 필요가 없다 — FK CASCADE가 잔여 작업을 치운다.
     sqlx::query("DELETE FROM leases WHERE file_id = $1")
@@ -181,7 +207,7 @@ async fn tasks_vanish_with_their_file(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("DELETE FROM locations WHERE file_id = $1")
+    sqlx::query("DELETE FROM placements WHERE file_id = $1")
         .bind(file)
         .execute(&pool)
         .await

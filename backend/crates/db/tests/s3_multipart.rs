@@ -196,12 +196,13 @@ async fn abort_reclaims_pending_and_is_idempotent(pool: PgPool) {
     let (state, _, _) = file_row(&pool, created.file_id).await;
     assert_eq!(state, "reclaimed");
     // location이 사라지고 write lease가 만료된다.
-    let location: Option<uuid::Uuid> =
-        sqlx::query_scalar("SELECT file_id FROM locations WHERE file_id = $1")
-            .bind(created.file_id)
-            .fetch_optional(&pool)
-            .await
-            .unwrap();
+    let location: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT file_id FROM placements WHERE file_id = $1 AND role = 'primary'",
+    )
+    .bind(created.file_id)
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
     assert!(location.is_none());
     let lease_state: String = sqlx::query_scalar("SELECT state FROM leases WHERE id = $1")
         .bind(created.lease_id)

@@ -139,11 +139,13 @@ async fn reclaim_cancels_when_renewed_after_snapshot(pool: PgPool) {
     assert!(!files::finalize_reclaim(&pool, &candidate).await.unwrap());
     assert_eq!(file_state(&pool, file.file_id).await, "pending");
     assert_eq!(lease_state(&pool, file.lease_id).await, "issued");
-    let locations: i64 = sqlx::query_scalar("SELECT count(*) FROM locations WHERE file_id = $1")
-        .bind(file.file_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let locations: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM placements WHERE file_id = $1 AND role = 'primary'",
+    )
+    .bind(file.file_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(locations, 1);
 }
 

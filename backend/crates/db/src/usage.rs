@@ -19,7 +19,8 @@ pub struct StorageUsage {
     pub active_bytes: i64,
     /// 이동 중 채워지는 자리 — 실물이 있을 수도 있다.
     pub incoming_bytes: i64,
-    /// 버려졌지만 아직 실물이 남은 것 — 디스크를 먹는 중이다.
+    /// 실물이 남았지만 더는 쓰이지 않는 것 — 버려졌거나, 지워졌는데 아직
+    /// 판단자가 버리기 전이다. 어느 쪽이든 디스크를 먹는 중이다.
     pub collecting_bytes: i64,
     pub reserved_files: i64,
     pub active_files: i64,
@@ -39,13 +40,17 @@ pub async fn by_storage(pool: &PgPool) -> Result<Vec<StorageUsage>, sqlx::Error>
              AS active_bytes, \
          coalesce(sum(f.declared_size) FILTER (WHERE p.role = 'staging'), 0)::bigint \
              AS incoming_bytes, \
-         coalesce(sum(f.declared_size) FILTER (WHERE p.role = 'dropped'), 0)::bigint \
+         coalesce(sum(f.declared_size) FILTER ( \
+             WHERE p.role = 'dropped' \
+             OR (p.role = 'primary' AND f.state = 'deleted')), 0)::bigint \
              AS collecting_bytes, \
          count(f.id) FILTER (WHERE p.role = 'primary' AND f.state = 'pending') \
              AS reserved_files, \
          count(f.id) FILTER (WHERE p.role = 'primary' AND f.state = 'active') \
              AS active_files, \
-         count(f.id) FILTER (WHERE p.role = 'dropped') AS collecting_files \
+         count(f.id) FILTER ( \
+             WHERE p.role = 'dropped' \
+             OR (p.role = 'primary' AND f.state = 'deleted')) AS collecting_files \
          FROM storages s \
          LEFT JOIN placements p ON p.storage_id = s.id \
          LEFT JOIN files f ON f.id = p.file_id \
