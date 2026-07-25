@@ -1,26 +1,30 @@
-//! 파일별 집행 작업 — 도출(scan)은 reconciler가, 집행(execute)은 워커가 쓴다.
+//! 집행 — 저장소 백엔드를 만지는 일. 도출은 판단자가, 실행은 집행자가 한다.
 //!
-//! 여기 있는 작업은 전부 저장소 백엔드 I/O를 한다. 느리고, 실패하고,
-//! 파일마다 독립이다. 반대로 DB만 만지는 정리는 gc.rs가 맡는다.
+//! 갈래가 셋이고 저장소에 할 수 있는 동사와 1:1이다:
 //!
-//! **한 Task는 쪼개지지 않는 사슬이다.** 상태 전이와 실물 조작이 한 execute
-//! 안에 붙어 있어야 한다 — 갈라놓으면 "실물 없는 active 파일"이나 "장부에
-//! 없는 객체"가 생긴다. 순서는 작업마다 다르다:
-//!   reclaim  전이가 먼저 — 실물을 먼저 지우면 늦은 commit이 전이를 이겨
-//!            실물 없는 active가 남는다.
-//!   purge    실물이 먼저 — deleted는 되돌아오지 않으니 안전하고, 삭제를
-//!            확인한 뒤에만 점유(location)를 놓아야 한다.
+//! ```text
+//!   observe   HEAD     pending 실물이 선언과 맞는지 본다
+//!   copy      GET+PUT  staging 자리를 채우고 정본을 교체한다
+//!   delete    DELETE   dropped 실물을 없앤다
+//! ```
 //!
-//! 집행자는 스냅샷이 아니라 지금의 상태를 본다 — execute는 file_id로 후보를
-//! 다시 읽고, 그 사이 조건에서 빠졌으면 조용히 건너뛴다. 도출과 집행 사이는
-//! 큐를 거치며 벌어지고 집행은 다른 파드에서 일어나므로, 이 재조회가 낡은
-//! 재료로 실물을 건드리지 않게 하는 유일한 장치다.
+//! 상태 전이만 하는 일(소프트 삭제 집행, 만료 중단)은 여기 없다 — 실물을 안
+//! 만지므로 판단자가 직접 한다.
+//!
+//! **한 작업은 쪼개지지 않는 사슬이다.** 집행자는 집은 작업을 끝까지 간다.
+//! 다만 원자성은 DB 전이에만 있다 — 복사를 트랜잭션에 넣을 수 없으므로,
+//! 복사를 멱등(같은 키 덮어쓰기)으로 만들고 교체를 조건부·원자적으로 두어
+//! at-least-once 실행의 결과가 정확히 한 번과 같게 한다.
+//!
+//! 집행자는 스냅샷이 아니라 집행 시점의 상태를 본다 — 대상으로 재료를 다시
+//! 읽고, 조건에서 빠졌으면 조용히 건너뛴다. 도출과 집행은 큐를 거치며
+//! 벌어지고 다른 파드에서 일어나므로, 이 재조회가 낡은 재료로 실물을
+//! 건드리지 않게 하는 유일한 장치다.
 
 use std::sync::Arc;
 
 use filegate_core::Crypto;
-use filegate_db::files::{self, SweepCandidate};
-use filegate_db::{PgPool, moves, registry};
+use filegate_db::{PgPool, files, placements, registry};
 use filegate_infra::{Address, S3ClientCache, fs as fs_backend, s3_delete_object, s3_head_object};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
@@ -37,64 +41,47 @@ pub struct Context<'a> {
 
 /// 집행 갈래 — 큐의 `kind` 컬럼과 같은 어휘다.
 pub const OBSERVE: &str = "observe";
-pub const RECLAIM: &str = "reclaim";
-pub const PURGE: &str = "purge";
-pub const MOVE: &str = "move";
-pub const MOVE_CLEANUP: &str = "move_cleanup";
+pub const COPY: &str = "copy";
+pub const DELETE: &str = "delete";
 
-/// 스왑 뒤 source 실물을 지우기까지의 지연. 발급된 읽기 URL은 저장소가
-/// 서명해 DB와 무관하게 자기 수명까지 유효하므로, 그 수명이 지나기 전에
-/// 실물을 지우면 살아 있는 URL이 404가 된다. 읽기 lease 수명과 같이 둔다.
-const DELETE_DELAY: std::time::Duration = crate::lease::READ_LEASE_TTL;
+/// 정본을 교체한 뒤 옛 실물을 지우기까지의 유예. 발급된 읽기 URL은 저장소가
+/// 서명해 DB와 무관하게 자기 수명까지 유효하므로, 그 전에 지우면 살아 있는
+/// URL이 404가 된다. 읽기 lease 수명과 한 상수를 공유한다.
+pub const HANDOVER_DELAY: std::time::Duration = crate::lease::READ_LEASE_TTL;
 
-/// 한 갈래의 도출 결과 — 큐에 넣을 대상 id들. 재료는 담지 않는다.
-pub struct Scanned {
-    pub kind: &'static str,
-    pub file_ids: Vec<Uuid>,
+/// 집행 대상 — 갈래에 따라 파일이거나 실물 주소다.
+#[derive(Debug, Clone)]
+pub enum Target {
+    File(Uuid),
+    Object {
+        storage_id: String,
+        object_key: String,
+    },
 }
 
-/// 상태를 훑어 이번 회차의 작업을 도출한다 (갈래마다 유계 배치).
-///
-/// 파일 갈래 셋의 대상은 서로소다 — observe는 lease가 살아 있는 pending,
-/// reclaim은 만료된 pending, purge는 deleted다. 이동 갈래 둘은 저널의 진행
-/// 상태에서 갈리므로 역시 서로소다. 한 갈래의 스캔이 실패해도 나머지는
-/// 진행한다.
-pub async fn scan(pool: &PgPool, limit: i64) -> Vec<Scanned> {
-    let mut out = Vec::new();
-    for (kind, ids) in [
-        (OBSERVE, files::observed_commit_ids(pool, limit).await),
-        (RECLAIM, files::expired_pending_ids(pool, limit).await),
-        (PURGE, files::purgeable_ids(pool, limit).await),
-        (MOVE, moves::pending_ids(pool, limit).await),
-        (MOVE_CLEANUP, moves::cleanup_ids(pool, limit).await),
-    ] {
-        match ids {
-            Ok(file_ids) => out.push(Scanned { kind, file_ids }),
-            Err(error) => tracing::error!(event = "reconciler.scan_failed", kind, %error),
-        }
-    }
-    out
-}
-
-/// 작업 하나를 통째로 집행한다. Err는 "이번엔 못 했다" — 워커가 backoff를
+/// 작업 하나를 통째로 집행한다. Err는 "이번엔 못 했다" — 집행자가 backoff를
 /// 두고 큐로 되돌린다 (전부 멱등이라 재시도가 안전하다). 조건부 전이에
 /// 졌거나 대상이 이미 사라진 경우는 실패가 아니라 Ok다 — 할 일이 없어진
 /// 것이므로 큐에서 지운다.
-pub async fn execute(ctx: &Context<'_>, kind: &str, file_id: Uuid) -> anyhow::Result<()> {
-    match kind {
-        OBSERVE => observe(ctx, file_id).await,
-        RECLAIM => reclaim(ctx, file_id).await,
-        PURGE => purge(ctx, file_id).await,
-        MOVE => move_object(ctx, file_id).await,
-        MOVE_CLEANUP => move_cleanup(ctx, file_id).await,
-        other => Err(anyhow::anyhow!("unknown task kind '{other}'")),
+pub async fn execute(ctx: &Context<'_>, kind: &str, target: &Target) -> anyhow::Result<()> {
+    match (kind, target) {
+        (OBSERVE, Target::File(id)) => observe(ctx, *id).await,
+        (COPY, Target::File(id)) => copy(ctx, *id).await,
+        (
+            DELETE,
+            Target::Object {
+                storage_id,
+                object_key,
+            },
+        ) => delete(ctx, storage_id, object_key).await,
+        (kind, target) => Err(anyhow::anyhow!("task kind '{kind}' cannot take {target:?}")),
     }
 }
 
 /// 실물 관찰 → 선언 대조 → 확정. commit 핸들러와 같은 게이트다 (spec 00):
 /// 크기 일치 + (선언 시) md5 = ETag. 중계는 스트림 중 실측을, 직결은 내부
 /// 주소의 head_object를 대조한다. 실물 미도착·불일치·전이 패배는 pending에
-/// 남긴다 — 도착 전이면 다음 회차가 다시 보고, 끝내 안 맞으면 만료 회수가
+/// 남긴다 — 도착 전이면 다음 회차가 다시 보고, 끝내 안 맞으면 만료 중단이
 /// 처리한다 (commit 검증 실패와 같은 결말).
 async fn observe(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
     let Some(candidate) = files::observed_commit_candidate(ctx.pool, file_id).await? else {
@@ -132,141 +119,90 @@ async fn observe(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 만료 회수 (spec 00 — pending의 capacity 해제 지점). 전이가 먼저다:
-/// reclaimed로 잠근 뒤에만 실물을 지운다. 늦은 commit이 이겼거나 스냅샷
-/// 이후 lease가 갱신됐으면 전이가 0행이라 실물을 건드리지 않는다.
-/// 전이 후 물리 삭제가 실패하면 고아 객체가 남지만 — 회계는 이미 정확하고,
-/// 실물 없는 active보다 훨씬 싼 실패다.
-async fn reclaim(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
-    let Some(candidate) = files::expired_pending_one(ctx.pool, file_id).await? else {
-        return Ok(());
-    };
-    if !files::finalize_reclaim(ctx.pool, &candidate).await? {
-        return Ok(());
-    }
-    if let Err(error) = sweep_object(ctx, &candidate).await {
-        tracing::warn!(
-            event = "reconciler.orphan_object",
-            file = %file_id,
-            storage = %candidate.storage_id,
-            %error,
-        );
-    }
-    tracing::info!(event = "file.reclaimed", file = %file_id);
-    Ok(())
-}
-
-/// purge (spec 00 — deleted의 capacity 해제 지점). 실물이 먼저다 — 삭제를
-/// 확인한 뒤에만 location을 놓는다. 이미 purge됐으면 전이가 0행(멱등).
-async fn purge(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
-    let Some(candidate) = files::purgeable_one(ctx.pool, file_id).await? else {
-        return Ok(());
-    };
-    sweep_object(ctx, &candidate).await?;
-    if files::finalize_purge(ctx.pool, &candidate).await? {
-        tracing::info!(event = "file.purged", file = %file_id);
-    }
-    Ok(())
-}
-
-/// 이동 집행 — 복사하고 포인터를 바꾼다. 황금률: dest 복사가 끝나고 스왑이
-/// 커밋되기 전에는 source를 절대 건드리지 않는다. source 실물은 스왑 뒤
-/// 지연이 지나야(move_cleanup) 사라진다.
+/// 준비된 자리를 채우고 정본을 교체한다.
 ///
-/// 스왑에 지면(경합) 이동을 조용히 버린다 — 삭제·덮어쓰기·취소가 이겼다는
-/// 뜻이고, 이긴 쪽은 언제나 요청 경로다. 그때 남는 dest 잔여물은 여기서
-/// 치운다.
-async fn move_object(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
-    let Some(row) = moves::get(ctx.pool, file_id).await? else {
+/// 황금률: dest 복사가 끝나고 교체가 커밋되기 전에는 source를 절대 건드리지
+/// 않는다. 옛 실물은 교체 뒤 유예가 지나야(delete 갈래) 사라진다.
+///
+/// 교체에 지면 이동이 무산된 것이다 — 삭제·덮어쓰기·취소가 이겼다는 뜻이고,
+/// 이긴 쪽은 언제나 요청 경로다. 그때 staging을 버려짐으로 넘기면 방금 쓴
+/// 실물이 delete 갈래에 잡힌다. 여기서 직접 지우지 않는 이유는 지우는 일이
+/// 이미 한 갈래로 있기 때문이다.
+async fn copy(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
+    let Some(staging) = placements::staging_of(ctx.pool, file_id).await? else {
         return Ok(()); // 취소됐다
     };
-    if row.state != "requested" {
-        return Ok(()); // 이미 스왑됐다 — 남은 일은 뒷정리뿐
-    }
+    let Some(primary) = placements::primary_of(ctx.pool, file_id).await? else {
+        // 정본이 없다 — 파일이 사라지는 중이다. 준비하던 자리를 버린다.
+        placements::drop_staging(ctx.pool, file_id).await?;
+        return Ok(());
+    };
 
     crate::storage_access::copy_object(
         ctx.pool,
         ctx.crypto,
         ctx.s3_clients,
         ctx.spool_slots,
-        &row.source_storage_id,
-        &row.dest_storage_id,
-        &row.object_key,
+        &primary.storage_id,
+        &staging.storage_id,
+        &staging.object_key,
     )
     .await?;
 
-    if moves::finalize_swap(ctx.pool, &row, DELETE_DELAY.as_secs() as i64).await? {
+    if placements::promote_staging(ctx.pool, file_id, HANDOVER_DELAY.as_secs() as i64).await? {
         tracing::info!(
-            event = "move.swapped",
+            event = "file.moved",
             file = %file_id,
-            dest = %row.dest_storage_id,
+            from = %primary.storage_id,
+            to = %staging.storage_id,
         );
         return Ok(());
     }
 
-    // 졌다 — 방금 쓴 dest 객체는 장부에 없는 잔여물이다. 지우고 종결한다.
-    crate::storage_access::delete_object_at(
-        ctx.pool,
-        ctx.crypto,
-        ctx.s3_clients,
-        &row.dest_storage_id,
-        &row.object_key,
-    )
-    .await?;
-    moves::finish(ctx.pool, &row, "lost").await?;
-    tracing::info!(event = "move.lost", file = %file_id);
+    // 졌다. 방금 쓴 실물은 아무도 안 가리키므로 버려짐으로 넘겨 정리에 맡긴다.
+    placements::drop_staging(ctx.pool, file_id).await?;
+    placements::record_lost(ctx.pool, file_id, &primary.storage_id, &staging.storage_id).await?;
+    tracing::info!(event = "file.move_lost", file = %file_id);
     Ok(())
 }
 
-/// 스왑 뒤 정리 — 발급된 읽기 URL의 수명이 지난 뒤에만 source 실물을 지운다.
-/// 지우고 나서만 저널을 종결한다. 삭제가 실패하면 저널이 남아 다음 회차가
-/// 다시 도출한다 (멱등: 없는 대상 삭제도 성공).
-async fn move_cleanup(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
-    let Some(row) = moves::get(ctx.pool, file_id).await? else {
-        return Ok(());
+/// 버려진 실물을 지우고 배치 행을 거둔다 — 이 순서가 뒤집히면 실물이 장부
+/// 밖으로 떨어진다 (ADR 007). 두 백엔드 모두 없는 대상에 성공하므로 멱등이고,
+/// 삭제가 실패하면 행이 남아 다음 회차가 다시 도출한다.
+///
+/// multipart 잔여물 회수 재료는 버릴 때 배치 행에 실렸다 — lease가 GC된
+/// 뒤에도 벤더 세션을 중단할 수 있어야 한다.
+async fn delete(ctx: &Context<'_>, storage_id: &str, object_key: &str) -> anyhow::Result<()> {
+    let Some(placement) = placements::at(ctx.pool, storage_id, object_key).await? else {
+        return Ok(()); // 이미 거둬졌다
     };
-    if row.state != "swapped" {
+    if placement.role != placements::DROPPED {
+        // 같은 자리가 다시 쓰이고 있다 — 지우면 안 된다.
         return Ok(());
     }
-    crate::storage_access::delete_object_at(
-        ctx.pool,
-        ctx.crypto,
-        ctx.s3_clients,
-        &row.source_storage_id,
-        &row.object_key,
-    )
-    .await?;
-    moves::finish(ctx.pool, &row, "moved").await?;
-    tracing::info!(event = "move.done", file = %file_id);
-    Ok(())
-}
 
-/// 실물 제거 — 등록부에서 백엔드를 복원해 내부 경로로 지운다.
-/// s3 DeleteObject·fs remove 모두 없는 대상에 성공하므로 멱등이다.
-/// multipart 회수 재료가 있으면 함께 치운다 (spec 02): s3는 벤더 세션
-/// 중단(중단하지 않은 미완성 part는 보이지 않게 과금된다), fs는 offset
-/// 기록 중이던 대상 임시 파일.
-async fn sweep_object(ctx: &Context<'_>, candidate: &SweepCandidate) -> anyhow::Result<()> {
-    let row = registry::get_storage(ctx.pool, &candidate.storage_id)
+    let row = registry::get_storage(ctx.pool, storage_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("storage '{}' not registered", candidate.storage_id))?;
+        .ok_or_else(|| anyhow::anyhow!("storage '{storage_id}' not registered"))?;
     match crate::storage_access::backend_from_row(ctx.crypto, &row)? {
         crate::storage_access::StorageBackend::S3 { spec, .. } => {
-            let storage = ctx
-                .s3_clients
-                .get(&candidate.storage_id, &spec, Address::Internal);
-            if let Some(upload_id) = &candidate.upload_id {
-                filegate_infra::s3_abort_multipart(&storage, &candidate.object_key, upload_id)
-                    .await?;
+            let storage = ctx.s3_clients.get(storage_id, &spec, Address::Internal);
+            if let Some(upload_id) = &placement.upload_id {
+                filegate_infra::s3_abort_multipart(&storage, object_key, upload_id).await?;
             }
-            s3_delete_object(&storage, &candidate.object_key).await
+            s3_delete_object(&storage, object_key).await?;
         }
         crate::storage_access::StorageBackend::Fs { root } => {
-            if let Some(lease_id) = &candidate.write_lease_id {
+            if let Some(lease_id) = &placement.lease_id {
                 let temp = fs_backend::multipart_temp(&root, &lease_id.to_string());
                 fs_backend::abort_write(&temp).await;
             }
-            fs_backend::delete(&root, &candidate.object_key).await
+            fs_backend::delete(&root, object_key).await?;
         }
     }
+
+    if placements::collect(ctx.pool, storage_id, object_key).await? {
+        tracing::info!(event = "object.collected", storage = %storage_id, key = %object_key);
+    }
+    Ok(())
 }

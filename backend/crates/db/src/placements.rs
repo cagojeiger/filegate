@@ -306,10 +306,7 @@ pub async fn staging_ids(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, sqlx::E
 /// 그 파일의 copy 작업이 큐에 남아 있으면 건너뛴다. 복사 중인 실물을 다른
 /// 집행자가 지우면, 복사가 끝난 뒤 행 없는 실물이 남는다. 시간으로 막으면 큰
 /// 파일에서 깨지므로 작업 유무로 막는다.
-pub async fn collectible(
-    pool: &PgPool,
-    limit: i64,
-) -> Result<Vec<(String, String)>, sqlx::Error> {
+pub async fn collectible(pool: &PgPool, limit: i64) -> Result<Vec<(String, String)>, sqlx::Error> {
     sqlx::query_as(
         "SELECT p.storage_id, p.object_key FROM placements p \
          WHERE p.role = 'dropped' AND p.drop_after <= now() \
@@ -384,4 +381,80 @@ async fn diagnose(
         // 전제는 맞는데 0행 — 그 사이에 상태가 바뀌었다. 재요청하면 된다.
         StageOutcome::NotMovable
     })
+}
+
+/// 이동 이력 보존 정리 — 대여 이력과 같은 결이다. PK가 없는 로그라 ctid로 자른다.
+pub async fn prune_move_history(
+    pool: &PgPool,
+    retention_secs: i64,
+    limit: i64,
+) -> Result<u64, sqlx::Error> {
+    let deleted = sqlx::query(
+        "DELETE FROM move_history WHERE ctid IN ( \
+         SELECT ctid FROM move_history \
+         WHERE at < now() - $1 * interval '1 second' LIMIT $2)",
+    )
+    .bind(retention_secs)
+    .bind(limit)
+    .execute(pool)
+    .await?;
+    Ok(deleted.rows_affected())
+}
+
+/// 종결된 이동 한 건 (원장).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct MoveHistoryRow {
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub file_id: Uuid,
+    pub source_storage_id: String,
+    pub dest_storage_id: String,
+    pub size: i64,
+    pub outcome: String,
+}
+
+pub async fn move_history(pool: &PgPool, limit: i64) -> Result<Vec<MoveHistoryRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT at, file_id, source_storage_id, dest_storage_id, size, outcome \
+         FROM move_history ORDER BY at DESC LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+/// 진행 중인 이동 목록 — 운영자 조회. staging 자리가 곧 진행 중 이동이다.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct InFlightMove {
+    pub file_id: Uuid,
+    pub source_storage_id: String,
+    pub dest_storage_id: String,
+}
+
+pub async fn in_flight_moves(pool: &PgPool, limit: i64) -> Result<Vec<InFlightMove>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT s.file_id, p.storage_id AS source_storage_id, \
+                s.storage_id AS dest_storage_id \
+         FROM placements s \
+         JOIN placements p ON p.file_id = s.file_id AND p.role = 'primary' \
+         WHERE s.role = 'staging' ORDER BY s.created_at LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn in_flight_move(
+    pool: &PgPool,
+    file_id: Uuid,
+) -> Result<Option<InFlightMove>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT s.file_id, p.storage_id AS source_storage_id, \
+                s.storage_id AS dest_storage_id \
+         FROM placements s \
+         JOIN placements p ON p.file_id = s.file_id AND p.role = 'primary' \
+         WHERE s.role = 'staging' AND s.file_id = $1",
+    )
+    .bind(file_id)
+    .fetch_optional(pool)
+    .await
 }

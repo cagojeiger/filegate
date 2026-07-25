@@ -19,7 +19,7 @@
 
 use std::time::Duration;
 
-use filegate_db::{PgPool, tasks};
+use filegate_db::{PgPool, files, placements, tasks};
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
@@ -81,14 +81,45 @@ async fn run(pool: &PgPool) {
     // INSERT뿐이고, 안전은 이동 메커니즘이 보증한다.
     policy::evaluate(pool).await;
 
+    // 소프트 삭제의 집행 — 지운 파일의 정본을 버림으로 넘긴다. 실물을 안
+    // 만지므로 파일별 작업이 아니라 한 문장이다 (ADR 007). 실물은 아래 도출이
+    // delete 작업으로 넘긴다.
+    match placements::drop_deleted_primaries(pool, ENQUEUE_LIMIT).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(event = "file.purged", count),
+        Err(error) => tracing::error!(event = "reconciler.gc_failed", kind = "purge", %error),
+    }
+
+    // 만료 중단 — 쓰기 lease가 만료된 pending의 예약을 푼다. 전이와 정본
+    // 버리기가 한 트랜잭션이고, lease 갱신과의 경합은 그 안의 조건부 전이가
+    // 끊는다. 역시 실물을 안 만진다.
+    abort_expired(pool).await;
+
     // 상태에서 집행 대상을 도출해 큐에 넣는다. 이미 큐에 있으면 무시된다.
-    for scanned in task::scan(pool, ENQUEUE_LIMIT).await {
-        match tasks::enqueue(pool, scanned.kind, &scanned.file_ids).await {
+    enqueue_files(
+        pool,
+        task::OBSERVE,
+        files::observed_commit_ids(pool, ENQUEUE_LIMIT).await,
+    )
+    .await;
+    enqueue_files(
+        pool,
+        task::COPY,
+        placements::staging_ids(pool, ENQUEUE_LIMIT).await,
+    )
+    .await;
+    match placements::collectible(pool, ENQUEUE_LIMIT).await {
+        Ok(objects) => match tasks::enqueue_objects(pool, task::DELETE, &objects).await {
             Ok(0) => {}
-            Ok(count) => tracing::info!(event = "reconciler.enqueued", kind = scanned.kind, count),
-            Err(error) => {
-                tracing::error!(event = "reconciler.enqueue_failed", kind = scanned.kind, %error)
+            Ok(count) => {
+                tracing::info!(event = "reconciler.enqueued", kind = task::DELETE, count)
             }
+            Err(error) => {
+                tracing::error!(event = "reconciler.enqueue_failed", kind = task::DELETE, %error)
+            }
+        },
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", kind = task::DELETE, %error)
         }
     }
 
@@ -97,4 +128,53 @@ async fn run(pool: &PgPool) {
 
     // 공유 fs root의 임시 파일 — 락 승자 하나만 훑는다.
     gc::sweep_shared_temps(pool).await;
+}
+
+/// 만료된 pending을 중단한다 — 전이가 이기면 정본이 버려짐으로 넘어가고,
+/// 실물은 다음 도출이 delete 작업으로 집는다. 늦은 commit이 이겼거나 스냅샷
+/// 이후 lease가 갱신됐으면 전이가 0행이라 아무것도 바뀌지 않는다.
+async fn abort_expired(pool: &PgPool) {
+    let ids = match files::expired_pending_ids(pool, ENQUEUE_LIMIT).await {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", kind = "abort", %error);
+            return;
+        }
+    };
+    for file_id in ids {
+        // 집행 직전에 다시 읽는다 — 도출과 집행 사이에 갱신됐을 수 있다.
+        let candidate = match files::expired_pending_one(pool, file_id).await {
+            Ok(Some(candidate)) => candidate,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::error!(event = "reconciler.gc_failed", kind = "abort", %error);
+                continue;
+            }
+        };
+        match files::finalize_reclaim(pool, &candidate).await {
+            Ok(true) => tracing::info!(event = "file.aborted", file = %file_id),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::error!(event = "reconciler.gc_failed", kind = "abort", %error)
+            }
+        }
+    }
+}
+
+/// 도출 결과를 큐에 넣는다 — 스캔 실패와 삽입 실패를 같은 자리에서 기록한다.
+async fn enqueue_files(
+    pool: &PgPool,
+    kind: &str,
+    scanned: Result<Vec<uuid::Uuid>, filegate_db::DbError>,
+) {
+    match scanned {
+        Ok(file_ids) => match tasks::enqueue_files(pool, kind, &file_ids).await {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(event = "reconciler.enqueued", kind, count),
+            Err(error) => {
+                tracing::error!(event = "reconciler.enqueue_failed", kind, %error)
+            }
+        },
+        Err(error) => tracing::error!(event = "reconciler.scan_failed", kind, %error),
+    }
 }

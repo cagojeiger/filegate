@@ -11,12 +11,14 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// 워커가 집어온 작업 한 건.
-#[derive(Debug, Clone)]
+/// 집행자가 집어온 작업 한 건. 대상은 갈래에 따라 파일이거나 실물 주소다.
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ClaimedTask {
     pub id: Uuid,
     pub kind: String,
-    pub file_id: Uuid,
+    pub file_id: Option<Uuid>,
+    pub storage_id: Option<String>,
+    pub object_key: Option<String>,
     /// 이번 시도가 몇 번째인가 (claim이 증가시킨 뒤의 값). 관측용이다.
     pub attempts: i32,
 }
@@ -32,17 +34,46 @@ pub struct Depth {
 
 /// 도출한 대상을 큐에 넣는다. 이미 있으면 아무것도 하지 않는다 — 매 회차의
 /// 재도출이 중복을 만들지 않는다. 반환은 실제로 새로 들어간 개수다.
-pub async fn enqueue(pool: &PgPool, kind: &str, file_ids: &[Uuid]) -> Result<u64, sqlx::Error> {
+pub async fn enqueue_files(
+    pool: &PgPool,
+    kind: &str,
+    file_ids: &[Uuid],
+) -> Result<u64, sqlx::Error> {
     if file_ids.is_empty() {
         return Ok(0);
     }
     let inserted = sqlx::query(
         "INSERT INTO tasks (kind, file_id) \
          SELECT $1, unnest($2::uuid[]) \
-         ON CONFLICT (kind, file_id) DO NOTHING",
+         ON CONFLICT DO NOTHING",
     )
     .bind(kind)
     .bind(file_ids)
+    .execute(pool)
+    .await?;
+    Ok(inserted.rows_affected())
+}
+
+/// 실물 주소를 대상으로 넣는다 — 지울 실물은 이미 어떤 파일의 정본도 아니라
+/// 파일로 가리킬 이유가 없다.
+pub async fn enqueue_objects(
+    pool: &PgPool,
+    kind: &str,
+    objects: &[(String, String)],
+) -> Result<u64, sqlx::Error> {
+    if objects.is_empty() {
+        return Ok(0);
+    }
+    let storages: Vec<&str> = objects.iter().map(|(s, _)| s.as_str()).collect();
+    let keys: Vec<&str> = objects.iter().map(|(_, k)| k.as_str()).collect();
+    let inserted = sqlx::query(
+        "INSERT INTO tasks (kind, storage_id, object_key) \
+         SELECT $1, s, k FROM unnest($2::text[], $3::text[]) AS t(s, k) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(kind)
+    .bind(&storages)
+    .bind(&keys)
     .execute(pool)
     .await?;
     Ok(inserted.rows_affected())
@@ -55,23 +86,17 @@ pub async fn enqueue(pool: &PgPool, kind: &str, file_ids: &[Uuid]) -> Result<u64
 /// 끝나므로 집행이 아무리 길어도 커넥션을 쥐지 않는다 — 대신 집행 중
 /// 파드가 죽으면 `claimed_at`이 회수의 근거가 된다.
 pub async fn claim(pool: &PgPool, worker: &str) -> Result<Option<ClaimedTask>, sqlx::Error> {
-    let row: Option<(Uuid, String, Uuid, i32)> = sqlx::query_as(
+    sqlx::query_as(
         "UPDATE tasks SET state = 'active', claimed_at = now(), claimed_by = $1, \
          attempts = attempts + 1 \
          WHERE id = ( \
              SELECT id FROM tasks WHERE state = 'queued' AND run_at <= now() \
              ORDER BY run_at FOR UPDATE SKIP LOCKED LIMIT 1) \
-         RETURNING id, kind, file_id, attempts",
+         RETURNING id, kind, file_id, storage_id, object_key, attempts",
     )
     .bind(worker)
     .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|(id, kind, file_id, attempts)| ClaimedTask {
-        id,
-        kind,
-        file_id,
-        attempts,
-    }))
+    .await
 }
 
 /// 집행 완료 — 행을 지운다. 다음 회차가 상태를 다시 보고, 아직 할 일이

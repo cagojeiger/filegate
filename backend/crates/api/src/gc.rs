@@ -76,8 +76,12 @@ pub async fn run(pool: &PgPool) {
     }
 
     // 이동 이력 보존 정리 — 대여 이력과 같은 기준이다.
-    match filegate_db::moves::prune_history(pool, HISTORY_RETENTION.as_secs() as i64, BATCH_LIMIT)
-        .await
+    match filegate_db::placements::prune_move_history(
+        pool,
+        HISTORY_RETENTION.as_secs() as i64,
+        BATCH_LIMIT,
+    )
+    .await
     {
         Ok(0) => {}
         Ok(count) => tracing::info!(event = "reconciler.move_history_pruned", count),
