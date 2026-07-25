@@ -7,6 +7,7 @@ mod cors;
 mod error;
 mod gc;
 mod lease;
+mod policy;
 mod reconciler;
 mod routes;
 mod s3;
