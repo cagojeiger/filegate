@@ -111,7 +111,16 @@ async fn run(
 }
 
 async fn execute(ctx: &task::Context<'_>, pool: &PgPool, claimed: &tasks::ClaimedTask) {
-    match task::execute(ctx, &claimed.kind, claimed.file_id).await {
+    let target = match target_of(claimed) {
+        Some(target) => target,
+        None => {
+            // 갈래와 대상이 어긋난 행 — 집행할 수 없으니 큐에서 뺀다.
+            tracing::error!(event = "worker.bad_target", task = %claimed.id, kind = %claimed.kind);
+            let _ = tasks::finish(pool, claimed.id).await;
+            return;
+        }
+    };
+    match task::execute(ctx, &claimed.kind, &target).await {
         // 집행했거나, 할 일이 없어졌다 — 어느 쪽이든 큐에서 지운다. 아직 할
         // 일이 남았으면 다음 회차의 도출이 다시 넣는다.
         Ok(()) => {
@@ -123,7 +132,6 @@ async fn execute(ctx: &task::Context<'_>, pool: &PgPool, claimed: &tasks::Claime
             tracing::warn!(
                 event = "worker.task_failed",
                 kind = %claimed.kind,
-                file = %claimed.file_id,
                 attempts = claimed.attempts,
                 %error,
             );
@@ -132,6 +140,19 @@ async fn execute(ctx: &task::Context<'_>, pool: &PgPool, claimed: &tasks::Claime
                 tracing::error!(event = "worker.fail_failed", task = %claimed.id, %error);
             }
         }
+    }
+}
+
+/// 큐 행에서 집행 대상을 꺼낸다 — 스키마 CHECK가 짝을 보장하지만, 어긋난
+/// 행을 만나면 무한 재시도 대신 큐에서 뺀다.
+fn target_of(claimed: &tasks::ClaimedTask) -> Option<task::Target> {
+    match (claimed.file_id, &claimed.storage_id, &claimed.object_key) {
+        (_, Some(storage_id), Some(object_key)) => Some(task::Target::Object {
+            storage_id: storage_id.clone(),
+            object_key: object_key.clone(),
+        }),
+        (Some(file_id), _, _) => Some(task::Target::File(file_id)),
+        _ => None,
     }
 }
 

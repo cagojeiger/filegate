@@ -157,7 +157,7 @@ pub(super) async fn put_object(
     }
 
     // 확정 — 스트림 실측이 곧 관찰이다. 전이가 지면(false) pending이 그 사이
-    // 만료 회수됐다는 뜻이다 (좁은 경합). 성공을 보고하고 매핑을 걸면 도달
+    // 만료 중단됐다는 뜻이다 (좁은 경합). 성공을 보고하고 매핑을 걸면 도달
     // 불가 객체가 되므로, 재시도 신호(503)로 돌려준다.
     if !files::finalize_commit(&state.pool, created.file_id, &md5_hex)
         .await
@@ -385,7 +385,7 @@ fn object_headers(headers: &mut HeaderMap, file: &files::FileAccess, content_len
     headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
 }
 
-/// DeleteObject — 매핑 제거 + detach 결정을 delete_key가 한 트랜잭션에서
+/// DeleteObject — 매핑 제거 + 소프트 삭제 결정을 delete_key가 한 트랜잭션에서
 /// 한다 (물리 purge는 reconciler). 멱등 204.
 pub(super) async fn delete_object(
     state: &AppState,

@@ -168,24 +168,6 @@ async fn stream_source_to_temp(
     Ok(())
 }
 
-/// 특정 storage의 객체를 지운다 — 이동의 뒷정리(스왑 후 source, 경합 패배 시
-/// dest)에 쓴다. 두 백엔드 모두 없는 대상에 성공하므로 멱등이다.
-pub async fn delete_object_at(
-    pool: &filegate_db::PgPool,
-    crypto: &Crypto,
-    s3_clients: &S3ClientCache,
-    storage_id: &str,
-    object_key: &str,
-) -> anyhow::Result<()> {
-    match backend_of(pool, crypto, storage_id).await? {
-        StorageBackend::S3 { spec, .. } => {
-            let storage = s3_clients.get(storage_id, &spec, Address::Internal);
-            filegate_infra::s3_delete_object(&storage, object_key).await
-        }
-        StorageBackend::Fs { root } => filegate_infra::fs::delete(&root, object_key).await,
-    }
-}
-
 pub fn backend_from_row(
     crypto: &Crypto,
     row: &StorageRow,

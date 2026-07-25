@@ -379,9 +379,9 @@ pub(super) async fn stat(
     let stat = files::stat(&state.pool, &client.0, file_id)
         .await?
         .ok_or_else(|| not_found("file not found"))?;
-    // reclaimed는 내부 상태다 — 클라이언트 계약은 pending|active|deleted
+    // aborted는 내부 상태다 — 클라이언트 계약은 pending|active|deleted
     // 셋뿐이고(spec 00), 회수된 파일은 파일이 된 적이 없다.
-    if stat.state == "reclaimed" {
+    if stat.state == "aborted" {
         return Err(not_found("file not found"));
     }
     Ok(Json(StatOut {
@@ -392,13 +392,13 @@ pub(super) async fn stat(
     .into_response())
 }
 
-/// delete = detach 결정 기록 (spec 00). 물리 purge는 reconciler 몫이다.
+/// delete = 소프트 삭제 결정 기록 (spec 00). 물리 purge는 reconciler 몫이다.
 pub(super) async fn delete(
     State(state): State<AppState>,
     Extension(client): Extension<ClientId>,
     Path(file_id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    match files::mark_deleted(&state.pool, &client.0, file_id).await? {
+    match files::soft_delete(&state.pool, &client.0, file_id).await? {
         DeleteOutcome::Deleted => {
             tracing::info!(event = "file.deleted", file = %file_id, client = %client.0);
             Ok(deleted_response(file_id))

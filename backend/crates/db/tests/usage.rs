@@ -85,11 +85,11 @@ async fn by_storage_lists_every_storage_with_ledger(pool: PgPool) {
     assert_eq!(s.kind, "s3");
     assert_eq!(s.capacity_bytes, 1000);
     assert_eq!(
-        (s.reserved_bytes, s.active_bytes, s.purge_pending_bytes),
+        (s.reserved_bytes, s.active_bytes, s.collecting_bytes),
         (0, 0, 0)
     );
     assert_eq!(
-        (s.reserved_files, s.active_files, s.purge_pending_files),
+        (s.reserved_files, s.active_files, s.collecting_files),
         (0, 0, 0)
     );
 }
@@ -109,7 +109,7 @@ async fn by_storage_pairs_bucket_bytes_with_file_counts(pool: PgPool) {
     files::finalize_commit(&pool, to_delete.file_id, "etag")
         .await
         .unwrap();
-    files::mark_deleted(&pool, "c", to_delete.file_id)
+    files::soft_delete(&pool, "c", to_delete.file_id)
         .await
         .unwrap(); // → purge_pending
 
@@ -118,11 +118,11 @@ async fn by_storage_pairs_bucket_bytes_with_file_counts(pool: PgPool) {
     // 버킷: reserved=50(pending), active=300(100+200), purge_pending=300.
     assert_eq!(s.reserved_bytes, 50);
     assert_eq!(s.active_bytes, 300);
-    assert_eq!(s.purge_pending_bytes, 300);
+    assert_eq!(s.collecting_bytes, 300);
     // 파일 수는 버킷과 짝: reserved 1, active 2, purge_pending 1.
     assert_eq!(s.reserved_files, 1);
     assert_eq!(s.active_files, 2);
-    assert_eq!(s.purge_pending_files, 1);
+    assert_eq!(s.collecting_files, 1);
 }
 
 // ── by_client ───────────────────────────────────────────────

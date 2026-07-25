@@ -104,13 +104,14 @@ pub async fn candidates(
              WHERE kind = 'read' GROUP BY file_id) \
          SELECT f.id AS file_id, f.declared_size \
          FROM files f \
-         JOIN locations l ON l.file_id = f.id \
+         JOIN placements l ON l.file_id = f.id AND l.role = 'primary' \
          LEFT JOIN last_read r ON r.file_id = f.id \
          WHERE f.state = 'active' AND l.storage_id = $1 \
            AND ($2::bigint IS NULL OR f.declared_size >= $2) \
            AND ($3::bigint IS NULL OR \
                 now() - COALESCE(r.at, f.committed_at) >= $3 * interval '1 second') \
-           AND NOT EXISTS (SELECT 1 FROM object_moves m WHERE m.file_id = f.id) \
+           AND NOT EXISTS (SELECT 1 FROM placements s \
+                           WHERE s.file_id = f.id AND s.role = 'staging') \
            AND NOT EXISTS (SELECT 1 FROM move_history h WHERE h.file_id = f.id \
                            AND h.at > now() - $4 * interval '1 second') \
          ORDER BY COALESCE(r.at, f.committed_at) ASC, f.declared_size DESC \
@@ -134,14 +135,14 @@ pub async fn enqueue_move(
     dest_storage_id: &str,
 ) -> Result<bool, sqlx::Error> {
     let inserted = sqlx::query(
-        "INSERT INTO object_moves (file_id, source_storage_id, dest_storage_id, object_key) \
-         SELECT l.file_id, l.storage_id, dst.id, l.object_key \
-         FROM locations l \
-         JOIN files f ON f.id = l.file_id AND f.state = 'active' \
-         JOIN storages src ON src.id = l.storage_id \
+        "INSERT INTO placements (file_id, storage_id, object_key, role) \
+         SELECT p.file_id, dst.id, p.object_key, 'staging' \
+         FROM placements p \
+         JOIN files f ON f.id = p.file_id AND f.state = 'active' \
+         JOIN storages src ON src.id = p.storage_id \
          JOIN storages dst ON dst.id = $2 AND dst.kind = src.kind \
-         WHERE l.file_id = $1 AND l.storage_id <> dst.id \
-         ON CONFLICT (file_id) DO NOTHING",
+         WHERE p.file_id = $1 AND p.role = 'primary' AND p.storage_id <> dst.id \
+         ON CONFLICT DO NOTHING",
     )
     .bind(file_id)
     .bind(dest_storage_id)
@@ -158,9 +159,11 @@ pub async fn enqueue_move(
 /// 못하면 필요한 양의 몇 배가 쌓인다.
 pub async fn in_flight_bytes(pool: &PgPool) -> Result<Vec<(String, i64)>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT m.source_storage_id, COALESCE(sum(f.declared_size), 0)::bigint \
-         FROM object_moves m JOIN files f ON f.id = m.file_id \
-         WHERE m.state = 'requested' GROUP BY m.source_storage_id",
+        "SELECT p.storage_id, COALESCE(sum(f.declared_size), 0)::bigint \
+         FROM placements s \
+         JOIN placements p ON p.file_id = s.file_id AND p.role = 'primary' \
+         JOIN files f ON f.id = s.file_id \
+         WHERE s.role = 'staging' GROUP BY p.storage_id",
     )
     .fetch_all(pool)
     .await

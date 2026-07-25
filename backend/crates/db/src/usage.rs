@@ -17,10 +17,14 @@ pub struct StorageUsage {
     pub capacity_bytes: i64,
     pub reserved_bytes: i64,
     pub active_bytes: i64,
-    pub purge_pending_bytes: i64,
+    /// 이동 중 채워지는 자리 — 실물이 있을 수도 있다.
+    pub incoming_bytes: i64,
+    /// 실물이 남았지만 더는 쓰이지 않는 것 — 버려졌거나, 지워졌는데 아직
+    /// 판단자가 버리기 전이다. 어느 쪽이든 디스크를 먹는 중이다.
+    pub collecting_bytes: i64,
     pub reserved_files: i64,
     pub active_files: i64,
-    pub purge_pending_files: i64,
+    pub collecting_files: i64,
 }
 
 /// storage별 사용량 — 등록된 모든 storage를 id 순으로, 조회 시점 집계.
@@ -28,18 +32,28 @@ pub struct StorageUsage {
 pub async fn by_storage(pool: &PgPool) -> Result<Vec<StorageUsage>, sqlx::Error> {
     sqlx::query_as(
         "SELECT s.id AS storage_id, s.kind, s.capacity_bytes, \
-         coalesce(sum(f.declared_size) FILTER (WHERE f.state = 'pending'), 0)::bigint \
+         coalesce(sum(f.declared_size) \
+             FILTER (WHERE p.role = 'primary' AND f.state = 'pending'), 0)::bigint \
              AS reserved_bytes, \
-         coalesce(sum(f.declared_size) FILTER (WHERE f.state = 'active'), 0)::bigint \
+         coalesce(sum(f.declared_size) \
+             FILTER (WHERE p.role = 'primary' AND f.state = 'active'), 0)::bigint \
              AS active_bytes, \
-         coalesce(sum(f.declared_size) FILTER (WHERE f.state = 'deleted'), 0)::bigint \
-             AS purge_pending_bytes, \
-         count(f.id) FILTER (WHERE f.state = 'pending') AS reserved_files, \
-         count(f.id) FILTER (WHERE f.state = 'active') AS active_files, \
-         count(f.id) FILTER (WHERE f.state = 'deleted') AS purge_pending_files \
+         coalesce(sum(f.declared_size) FILTER (WHERE p.role = 'staging'), 0)::bigint \
+             AS incoming_bytes, \
+         coalesce(sum(f.declared_size) FILTER ( \
+             WHERE p.role = 'dropped' \
+             OR (p.role = 'primary' AND f.state = 'deleted')), 0)::bigint \
+             AS collecting_bytes, \
+         count(f.id) FILTER (WHERE p.role = 'primary' AND f.state = 'pending') \
+             AS reserved_files, \
+         count(f.id) FILTER (WHERE p.role = 'primary' AND f.state = 'active') \
+             AS active_files, \
+         count(f.id) FILTER ( \
+             WHERE p.role = 'dropped' \
+             OR (p.role = 'primary' AND f.state = 'deleted')) AS collecting_files \
          FROM storages s \
-         LEFT JOIN locations l ON l.storage_id = s.id \
-         LEFT JOIN files f ON f.id = l.file_id \
+         LEFT JOIN placements p ON p.storage_id = s.id \
+         LEFT JOIN files f ON f.id = p.file_id \
          GROUP BY s.id, s.kind, s.capacity_bytes \
          ORDER BY s.id",
     )
@@ -64,7 +78,7 @@ pub async fn by_client(pool: &PgPool) -> Result<Vec<ClientUsage>, sqlx::Error> {
         "SELECT f.client_id, l.storage_id, count(*) AS active_files, \
          coalesce(sum(f.declared_size), 0)::bigint AS active_bytes \
          FROM files f \
-         JOIN locations l ON l.file_id = f.id \
+         JOIN placements l ON l.file_id = f.id AND l.role = 'primary' \
          WHERE f.state = 'active' \
          GROUP BY f.client_id, l.storage_id \
          ORDER BY f.client_id, l.storage_id",
@@ -96,7 +110,7 @@ pub async fn record_snapshot(pool: &PgPool, day: chrono::NaiveDate) -> Result<u6
          SELECT $1, l.storage_id, f.client_id, \
          coalesce(sum(f.declared_size), 0)::bigint, count(*) \
          FROM files f \
-         JOIN locations l ON l.file_id = f.id \
+         JOIN placements l ON l.file_id = f.id AND l.role = 'primary' \
          WHERE f.state = 'active' \
          AND f.created_at < (($1::date + 1)::timestamp AT TIME ZONE 'UTC') \
          GROUP BY l.storage_id, f.client_id \

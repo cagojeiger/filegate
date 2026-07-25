@@ -68,14 +68,14 @@
 ### delete — 삭제 결정
 
 - 입력: file_id.
-- 처리: 서비스의 detach 결정을 기록한다. 물리 purge는 reconciler가 요청 경로 밖에서 집행한다 (공리 결정·집행 분리).
+- 처리: 서비스의 소프트 삭제 결정을 기록한다. 물리 정리는 요청 경로 밖에서 집행한다 (공리 결정·집행 분리).
 - 상태: `active` → `deleted`. 이후 read·commit은 실패한다.
-- purge는 멱등하다 (실측). capacity는 purge 시점에 해제한다.
+- 정리는 두 걸음이다 (ADR 007): 판단자가 정본 배치를 버려짐으로 넘기면 그 시점에 점유가 풀리고, 집행자가 실물을 지운 뒤에야 배치 행이 사라진다. 그 사이의 바이트는 "정리 대기"로 관찰된다 — 디스크는 아직 차 있기 때문이다. 두 걸음 모두 멱등하다.
 
 ### usage — 운영자 용량 조회
 
 - 운영자 표면이다. 클라이언트 자격증명으로는 호출할 수 없다. 읽기 전용 — 쓰기 표면은 Terraform 단독이다.
-- storage별: capacity 한도, 예약량(pending 합), 확정량(active 합), purge 대기 점유(deleted·미purge), 남은 여유(= 한도 − 앞의 셋), 그리고 각 버킷과 짝을 이루는 파일 수(pending·active·purge 대기).
+- storage별: capacity 한도, 예약량(pending 정본), 확정량(active 정본), 이동 중(열린 자리), 정리 대기(버려졌거나 지워졌는데 실물이 남은 것), 남은 여유(= 한도 − 예약 − 확정 − 정리 대기), 그리고 각 버킷과 짝을 이루는 파일 수. 이동 중은 여유에서 빼지 않는다 — 곧 정본이 되거나 버려지므로 이중으로 세면 안 된다.
 - (client × storage)별: 활성 점유(파일 수·바이트) — 여러 client가 한 storage를 공유할 때 각자의 몫을 가른다.
 - 전부 조회 시점 집계다 (저장 카운터 없음). 이 관찰이 배치·tiering 판단의 입력이다.
 - 일별 스냅샷(usage_snapshot): 점유(stock)의 과거는 소급 계산이 불가하므로(purge가 행을 지운다) reconciler가 매일 UTC 자정 이후 첫 tick에 어제 종점의 (storage×client) 활성 점유를 박제한다. 멱등이고, 이미 찍힌 날은 불변이다. 자정에 서버가 없었으면 첫 tick에 늦게 찍히는 근사치며, 통째로 놓친 날은 소급하지 않는다 — 지어낼 수 없는 값이다. flow(대여) 시계열은 lease_history 몫. 조회는 `/api/admin/v1/usage/history?days=N`.
@@ -129,20 +129,21 @@ sequenceDiagram
 ## 상태
 
 ```text
-create ──▶ pending ──commit──▶ active ──delete──▶ deleted ──purge──▶ (해제)
-             │                                        (reconciler)
-             └── lease 만료 ──▶ 회수
+create ──▶ pending ──commit──▶ active ──delete──▶ deleted ──정리──▶ (해제)
+             │                                         (판단자·집행자)
+             └── lease 만료 ──▶ aborted
 ```
 
 - `pending`: 발급됨·미확정. 검증 실패한 commit도 여기 남아 만료 회수로 정리한다.
 - `active`: 확정됨, read 가능.
-- `deleted`: detach 결정됨, purge 전까지 실물이 남는다.
-- 관찰량에서 빠지는 지점은 location 제거다: pending의 만료 회수, deleted의 purge — "남은 location = 현재 점유"라 별도 정산이 없다.
-- **종착 행 보존**: reclaimed와 purge가 끝난 deleted 행은 90일(대여 이력과 같은 보존 기준) 뒤 reconciler가 정리한다. 점유(location)나 원장(lease)이 남은 행은 정리하지 않는다 — purge와 lease GC가 자연히 먼저다. 행이 모두 정리된 client는 등록 해제가 가능하다.
+- `deleted`: 소프트 삭제 결정됨, 정리가 끝날 때까지 실물이 남는다.
+- `aborted`: 확정된 적 없이 버려짐 (만료 중단·명시적 Abort). 클라이언트에겐 파일이 된 적이 없다 — stat이 404로 답한다.
+- 점유에서 빠지는 지점은 정본을 버리는 갱신이다: pending의 만료 중단, deleted의 정리. 실물은 그 뒤에도 유예만큼 남고 "정리 대기"로 보인다 — 배치 행이 실물을 붙들고 있기 때문이다 (ADR 007). 별도 정산 카운터는 없다.
+- **종착 행 보존**: aborted와 정리가 끝난 deleted 행은 90일(대여 이력과 같은 보존 기준) 뒤 정리한다. 배치나 원장(lease)이 남은 행은 정리하지 않는다 — 배치가 남았다는 것은 실물이 남았다는 뜻이고, 파일 행을 먼저 지우면 배치까지 함께 사라져 실물이 유실된다. 행이 모두 정리된 client는 등록 해제가 가능하다.
 
 ## 물리 배치와 이름 규약
 
-키는 만들 때 규칙으로 조합하고, **location 행에 저장한다**. 읽기·삭제는
+키는 만들 때 규칙으로 조합하고, **배치 행에 저장한다**. 읽기·삭제는
 항상 저장된 키를 따른다 — 규칙이 바뀌어도 기존 객체는 영원히 동작한다.
 DB의 ID는 평범하게 둔다(uuid v4) — 정보 압축은 전부 경로·이름 계층의 일이다.
 
@@ -187,7 +188,7 @@ fs:       fg/{client}/{yyyy}/{mm}/{zz}/{file_id}[.ext]
 | 점유 시계열(usage_snapshot)·대여 이력(lease_history) | 소실 | 박제·기록된 관찰은 재계산 불가 — pg_dump가 유일한 보호 |
 | 파일의 의미(어느 노트의 첨부인지) | 완전 | 서비스 DB의 file_id (ADR 003 — 서비스가 두 번째 장부) |
 | 배치(client.storage_id) | 소실 | 객체 키엔 client_id만 있다 — 어느 storage였는지는 Terraform 재적용으로 복원 |
-| deleted(미purge) 결정 | 소실 | detach는 DB에만 있는 결정 — 전부 active로 과잉 복구되고, 서비스가 재삭제하면 끝 |
+| deleted(미정리) 결정 | 소실 | 소프트 삭제는 DB에만 있는 결정 — 전부 active로 과잉 복구되고, 서비스가 재삭제하면 끝 |
 
 복구의 오류 방향은 항상 **과잉 복구**다(직결의 미커밋 객체·삭제 결정이
 active로 살아남) — 데이터를 잃는 방향의 오류는 구조적으로 없다.

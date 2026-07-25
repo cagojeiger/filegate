@@ -27,7 +27,7 @@ const LEASE_RETENTION: Duration = Duration::from_secs(24 * 3600);
 /// 최근 3개월만 유지한다 (설계 결정). lease GC와 독립이다.
 const HISTORY_RETENTION: Duration = Duration::from_secs(90 * 24 * 3600);
 
-/// 종착 파일 행(reclaimed·purge 완료 deleted)의 보존 기간 — stat 계약의
+/// 종착 파일 행(aborted·purge 완료 deleted)의 보존 기간 — stat 계약의
 /// 유계다 (spec 00). 이력과 같은 3개월 — 관찰 보존의 단일 기준.
 const FILE_RETENTION: Duration = HISTORY_RETENTION;
 
@@ -76,8 +76,12 @@ pub async fn run(pool: &PgPool) {
     }
 
     // 이동 이력 보존 정리 — 대여 이력과 같은 기준이다.
-    match filegate_db::moves::prune_history(pool, HISTORY_RETENTION.as_secs() as i64, BATCH_LIMIT)
-        .await
+    match filegate_db::placements::prune_move_history(
+        pool,
+        HISTORY_RETENTION.as_secs() as i64,
+        BATCH_LIMIT,
+    )
+    .await
     {
         Ok(0) => {}
         Ok(count) => tracing::info!(event = "reconciler.move_history_pruned", count),

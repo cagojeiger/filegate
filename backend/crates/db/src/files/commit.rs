@@ -88,7 +88,7 @@ pub struct ObservedCommitCandidate {
 
 /// 도출과 집행이 같은 조건을 보게 하는 단일 정의.
 const OBSERVED_COMMIT_SOURCE: &str = "FROM files f \
-     JOIN locations l ON l.file_id = f.id \
+     JOIN placements l ON l.file_id = f.id AND l.role = 'primary' \
      JOIN leases le ON le.file_id = f.id AND le.kind = 'write' \
      WHERE f.state = 'pending' AND f.part_size IS NULL \
      AND le.state = 'issued' AND le.expires_at > now()";
@@ -120,7 +120,7 @@ pub async fn observed_commit_candidate(
     // 위 조회 이후 location이 사라졌으면(경합 회수) 후보가 아니다.
     let storage: Option<StorageRow> = sqlx::query_as(&format!(
         "SELECT {STORAGE_COLUMNS} FROM storages s \
-         JOIN locations l ON l.storage_id = s.id WHERE l.file_id = $1"
+         JOIN placements l ON l.storage_id = s.id WHERE l.file_id = $1 AND l.role = 'primary'"
     ))
     .bind(file_id)
     .fetch_optional(pool)

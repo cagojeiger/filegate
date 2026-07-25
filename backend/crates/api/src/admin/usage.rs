@@ -21,13 +21,17 @@ struct UsageOut {
     capacity_bytes: i64,
     reserved_bytes: i64,
     active_bytes: i64,
-    purge_pending_bytes: i64,
-    /// 한도 − (예약 + 확정 + purge 대기).
+    /// 이동 중 채워지는 자리 — 실물이 있을 수도 있다 (ADR 007).
+    incoming_bytes: i64,
+    /// 버려졌지만 아직 실물이 남은 것 — 디스크를 먹는 중이다.
+    collecting_bytes: i64,
+    /// 한도 − (예약 + 정본 + 정리 대기). 이동 중은 빼지 않는다 — 곧 정본이
+    /// 되거나 버려지므로 이중으로 세면 안 된다.
     remaining_bytes: i64,
-    /// 버킷과 짝을 이루는 파일 수 (pending↔reserved, active, deleted↔purge_pending).
+    /// 버킷과 짝을 이루는 파일 수.
     reserved_files: i64,
     active_files: i64,
-    purge_pending_files: i64,
+    collecting_files: i64,
 }
 
 pub(super) async fn report(State(state): State<AppState>) -> Result<Response, ApiError> {
@@ -38,16 +42,17 @@ pub(super) async fn report(State(state): State<AppState>) -> Result<Response, Ap
             remaining_bytes: row.capacity_bytes
                 - row.reserved_bytes
                 - row.active_bytes
-                - row.purge_pending_bytes,
+                - row.collecting_bytes,
             storage_id: row.storage_id,
             kind: row.kind,
             capacity_bytes: row.capacity_bytes,
             reserved_bytes: row.reserved_bytes,
             active_bytes: row.active_bytes,
-            purge_pending_bytes: row.purge_pending_bytes,
+            collecting_bytes: row.collecting_bytes,
+            incoming_bytes: row.incoming_bytes,
             reserved_files: row.reserved_files,
             active_files: row.active_files,
-            purge_pending_files: row.purge_pending_files,
+            collecting_files: row.collecting_files,
         })
         .collect();
     Ok(Json(out).into_response())
