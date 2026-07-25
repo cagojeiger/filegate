@@ -22,6 +22,7 @@ use std::time::Duration;
 use filegate_core::Crypto;
 use filegate_db::{PgPool, tasks};
 use filegate_infra::S3ClientCache;
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -47,6 +48,7 @@ pub fn spawn(
     pool: PgPool,
     crypto: Arc<Crypto>,
     s3_clients: Arc<S3ClientCache>,
+    spool_slots: Arc<Semaphore>,
     concurrency: usize,
     shutdown: CancellationToken,
 ) -> Vec<JoinHandle<()>> {
@@ -59,10 +61,11 @@ pub fn spawn(
             let pool = pool.clone();
             let crypto = crypto.clone();
             let s3_clients = s3_clients.clone();
+            let spool_slots = spool_slots.clone();
             let shutdown = shutdown.clone();
             let name = format!("{pod}/{slot}");
             tokio::spawn(async move {
-                run(&pool, &crypto, &s3_clients, &name, &shutdown).await;
+                run(&pool, &crypto, &s3_clients, &spool_slots, &name, &shutdown).await;
                 tracing::debug!(event = "worker.stopped", worker = %name);
             })
         })
@@ -73,6 +76,7 @@ async fn run(
     pool: &PgPool,
     crypto: &Crypto,
     s3_clients: &S3ClientCache,
+    spool_slots: &Arc<Semaphore>,
     name: &str,
     shutdown: &CancellationToken,
 ) {
@@ -80,6 +84,7 @@ async fn run(
         pool,
         crypto,
         s3_clients,
+        spool_slots,
     };
     loop {
         // 집기 전에만 종료를 본다 — 집은 뒤엔 사슬을 끝까지 간다.
