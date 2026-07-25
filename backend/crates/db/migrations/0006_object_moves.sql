@@ -19,8 +19,14 @@ CREATE TABLE object_moves (
     -- 키는 storage 무관이라 그대로 재사용한다 — 대상이 결정적이므로 재복사가
     -- 멱등이고, 스왑은 포인터 교체만으로 끝난다.
     object_key        text NOT NULL,
+    -- requested  집행 대기          → dest에 복사하고 포인터를 바꾼다
+    -- swapped    스왑 커밋됨        → 지연 뒤 source 실물을 지운다
+    -- canceled   취소됨             → dest에 남은 복사본을 지운다
+    -- 취소가 행을 지우지 않고 종착 상태로 두는 이유는 뒷정리의 근거가 상태에
+    -- 있어야 하기 때문이다. 지워버리면 이미 복사된 dest 실물이 장부 밖에
+    -- 남는다 — 무엇을 지울지 아무도 모르게 된다.
     state             text NOT NULL DEFAULT 'requested'
-                      CHECK (state IN ('requested', 'swapped')),
+                      CHECK (state IN ('requested', 'swapped', 'canceled')),
     -- 스왑 뒤 source 실물을 지울 수 있는 시각. 발급된 읽기 URL의 수명이
     -- 지나야 한다 — 그 전에 지우면 유효한 URL이 404가 된다.
     delete_after      timestamptz,

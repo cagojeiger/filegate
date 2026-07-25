@@ -150,9 +150,9 @@ async fn requests_that_cannot_be_honoured_say_why(pool: PgPool) {
     ));
 
     // 확정되지 않은 파일은 옮길 수 없다.
-    files::mark_deleted(&pool, "c", file).await.unwrap();
+    files::soft_delete(&pool, "c", file).await.unwrap();
     let other = active_file(&pool).await;
-    files::mark_deleted(&pool, "c", other).await.unwrap();
+    files::soft_delete(&pool, "c", other).await.unwrap();
     assert!(matches!(
         moves::request(&pool, other, "b").await.unwrap(),
         RequestOutcome::NotMovable
@@ -199,7 +199,7 @@ async fn the_request_path_wins_every_race_with_the_swap(pool: PgPool) {
     let deleted = active_file(&pool).await;
     moves::request(&pool, deleted, "b").await.unwrap();
     let row = moves::get(&pool, deleted).await.unwrap().unwrap();
-    files::mark_deleted(&pool, "c", deleted).await.unwrap();
+    files::soft_delete(&pool, "c", deleted).await.unwrap();
     assert!(!moves::finalize_swap(&pool, &row, DELAY).await.unwrap());
     assert_eq!(location_of(&pool, deleted).await, "a");
 
@@ -214,6 +214,37 @@ async fn the_request_path_wins_every_race_with_the_swap(pool: PgPool) {
     ));
     assert!(!moves::finalize_swap(&pool, &row, DELAY).await.unwrap());
     assert_eq!(location_of(&pool, canceled).await, "a");
+}
+
+/// 취소는 행을 지우지 않는다 — 집행이 이미 dest에 복사를 마친 뒤일 수 있고,
+/// 그 실물을 지울 근거가 이 행뿐이다. 지워버리면 장부 밖 객체가 남는다.
+#[sqlx::test(migrations = "./migrations")]
+async fn cancel_leaves_a_trace_so_the_copy_can_be_cleaned_up(pool: PgPool) {
+    wire(&pool).await;
+    let file = active_file(&pool).await;
+    moves::request(&pool, file, "b").await.unwrap();
+
+    assert!(matches!(
+        moves::cancel(&pool, file).await.unwrap(),
+        CancelOutcome::Canceled
+    ));
+    // 행이 종착 상태로 남아 무엇을 지울지 말해준다.
+    let row = moves::get(&pool, file).await.unwrap().expect("trace kept");
+    assert_eq!(row.state, "canceled");
+    // 다시 집행되지는 않는다.
+    assert!(moves::pending_ids(&pool, 10).await.unwrap().is_empty());
+    // 뒷정리 대상이 된다 — 지연을 기다리지 않는다 (dest 복사본은 아무도 안 본다).
+    assert_eq!(moves::cleanup_ids(&pool, 10).await.unwrap(), vec![file]);
+    // 재취소는 멱등이다.
+    assert!(matches!(
+        moves::cancel(&pool, file).await.unwrap(),
+        CancelOutcome::Canceled
+    ));
+
+    moves::finish(&pool, &row, "lost").await.unwrap();
+    assert!(moves::get(&pool, file).await.unwrap().is_none());
+    let history = moves::history(&pool, 10).await.unwrap();
+    assert_eq!(history[0].outcome, "lost");
 }
 
 #[sqlx::test(migrations = "./migrations")]

@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use filegate_core::Crypto;
-use filegate_db::files::{self, SweepCandidate};
+use filegate_db::files::{self, ObjectRef};
 use filegate_db::{PgPool, moves, registry};
 use filegate_infra::{Address, S3ClientCache, fs as fs_backend, s3_delete_object, s3_head_object};
 use tokio::sync::Semaphore;
@@ -37,7 +37,7 @@ pub struct Context<'a> {
 
 /// 집행 갈래 — 큐의 `kind` 컬럼과 같은 어휘다.
 pub const OBSERVE: &str = "observe";
-pub const RECLAIM: &str = "reclaim";
+pub const ABORT: &str = "abort";
 pub const PURGE: &str = "purge";
 pub const MOVE: &str = "move";
 pub const MOVE_CLEANUP: &str = "move_cleanup";
@@ -56,14 +56,14 @@ pub struct Scanned {
 /// 상태를 훑어 이번 회차의 작업을 도출한다 (갈래마다 유계 배치).
 ///
 /// 파일 갈래 셋의 대상은 서로소다 — observe는 lease가 살아 있는 pending,
-/// reclaim은 만료된 pending, purge는 deleted다. 이동 갈래 둘은 저널의 진행
+/// abort는 만료된 pending, purge는 deleted다. 이동 갈래 둘은 저널의 진행
 /// 상태에서 갈리므로 역시 서로소다. 한 갈래의 스캔이 실패해도 나머지는
 /// 진행한다.
 pub async fn scan(pool: &PgPool, limit: i64) -> Vec<Scanned> {
     let mut out = Vec::new();
     for (kind, ids) in [
         (OBSERVE, files::observed_commit_ids(pool, limit).await),
-        (RECLAIM, files::expired_pending_ids(pool, limit).await),
+        (ABORT, files::expired_pending_ids(pool, limit).await),
         (PURGE, files::purgeable_ids(pool, limit).await),
         (MOVE, moves::pending_ids(pool, limit).await),
         (MOVE_CLEANUP, moves::cleanup_ids(pool, limit).await),
@@ -83,7 +83,7 @@ pub async fn scan(pool: &PgPool, limit: i64) -> Vec<Scanned> {
 pub async fn execute(ctx: &Context<'_>, kind: &str, file_id: Uuid) -> anyhow::Result<()> {
     match kind {
         OBSERVE => observe(ctx, file_id).await,
-        RECLAIM => reclaim(ctx, file_id).await,
+        ABORT => abort(ctx, file_id).await,
         PURGE => purge(ctx, file_id).await,
         MOVE => move_object(ctx, file_id).await,
         MOVE_CLEANUP => move_cleanup(ctx, file_id).await,
@@ -94,7 +94,7 @@ pub async fn execute(ctx: &Context<'_>, kind: &str, file_id: Uuid) -> anyhow::Re
 /// 실물 관찰 → 선언 대조 → 확정. commit 핸들러와 같은 게이트다 (spec 00):
 /// 크기 일치 + (선언 시) md5 = ETag. 중계는 스트림 중 실측을, 직결은 내부
 /// 주소의 head_object를 대조한다. 실물 미도착·불일치·전이 패배는 pending에
-/// 남긴다 — 도착 전이면 다음 회차가 다시 보고, 끝내 안 맞으면 만료 회수가
+/// 남긴다 — 도착 전이면 다음 회차가 다시 보고, 끝내 안 맞으면 만료 중단가
 /// 처리한다 (commit 검증 실패와 같은 결말).
 async fn observe(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
     let Some(candidate) = files::observed_commit_candidate(ctx.pool, file_id).await? else {
@@ -132,16 +132,16 @@ async fn observe(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 만료 회수 (spec 00 — pending의 capacity 해제 지점). 전이가 먼저다:
-/// reclaimed로 잠근 뒤에만 실물을 지운다. 늦은 commit이 이겼거나 스냅샷
+/// 만료 중단 (spec 00 — pending의 capacity 해제 지점). 전이가 먼저다:
+/// aborted로 잠근 뒤에만 실물을 지운다. 늦은 commit이 이겼거나 스냅샷
 /// 이후 lease가 갱신됐으면 전이가 0행이라 실물을 건드리지 않는다.
 /// 전이 후 물리 삭제가 실패하면 고아 객체가 남지만 — 회계는 이미 정확하고,
 /// 실물 없는 active보다 훨씬 싼 실패다.
-async fn reclaim(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
+async fn abort(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
     let Some(candidate) = files::expired_pending_one(ctx.pool, file_id).await? else {
         return Ok(());
     };
-    if !files::finalize_reclaim(ctx.pool, &candidate).await? {
+    if !files::finalize_abort(ctx.pool, &candidate).await? {
         return Ok(());
     }
     if let Err(error) = sweep_object(ctx, &candidate).await {
@@ -152,7 +152,7 @@ async fn reclaim(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
             %error,
         );
     }
-    tracing::info!(event = "file.reclaimed", file = %file_id);
+    tracing::info!(event = "file.aborted", file = %file_id);
     Ok(())
 }
 
@@ -204,7 +204,9 @@ async fn move_object(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // 졌다 — 방금 쓴 dest 객체는 장부에 없는 잔여물이다. 지우고 종결한다.
+    // 졌다 — 방금 쓴 dest 객체는 장부에 없는 잔여물이다. 취소로 진 것이면
+    // 저널이 canceled로 남아 뒷정리 갈래가 같은 일을 하므로 맡긴다. 그 외
+    // (삭제·덮어쓰기에 진 것)는 저널이 사라질 근거가 없으니 여기서 끝낸다.
     crate::storage_access::delete_object_at(
         ctx.pool,
         ctx.crypto,
@@ -218,35 +220,43 @@ async fn move_object(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 스왑 뒤 정리 — 발급된 읽기 URL의 수명이 지난 뒤에만 source 실물을 지운다.
+/// 뒷정리 — 쓸모없어진 복사본 하나를 지우고 종결한다. 어느 쪽을 지우는지는
+/// 저널의 종착 상태가 가른다:
+///   swapped   이동이 성공했다 → source를 지운다. 발급된 읽기 URL의 수명이
+///             지난 뒤에만 도출되므로, 살아 있는 URL이 404가 되지 않는다.
+///   canceled  이동이 무산됐다 → dest에 남았을 복사본을 지운다. 취소가 행을
+///             지우지 않는 이유가 이것이다 — 지울 대상을 아는 근거가 이 행뿐이다.
+///
 /// 지우고 나서만 저널을 종결한다. 삭제가 실패하면 저널이 남아 다음 회차가
 /// 다시 도출한다 (멱등: 없는 대상 삭제도 성공).
 async fn move_cleanup(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
     let Some(row) = moves::get(ctx.pool, file_id).await? else {
         return Ok(());
     };
-    if row.state != "swapped" {
-        return Ok(());
-    }
+    let (storage_id, outcome) = match row.state.as_str() {
+        "swapped" => (&row.source_storage_id, "moved"),
+        "canceled" => (&row.dest_storage_id, "lost"),
+        _ => return Ok(()), // 아직 집행 전 — 뒷정리할 것이 없다
+    };
     crate::storage_access::delete_object_at(
         ctx.pool,
         ctx.crypto,
         ctx.s3_clients,
-        &row.source_storage_id,
+        storage_id,
         &row.object_key,
     )
     .await?;
-    moves::finish(ctx.pool, &row, "moved").await?;
-    tracing::info!(event = "move.done", file = %file_id);
+    moves::finish(ctx.pool, &row, outcome).await?;
+    tracing::info!(event = "move.done", file = %file_id, outcome);
     Ok(())
 }
 
 /// 실물 제거 — 등록부에서 백엔드를 복원해 내부 경로로 지운다.
 /// s3 DeleteObject·fs remove 모두 없는 대상에 성공하므로 멱등이다.
-/// multipart 회수 재료가 있으면 함께 치운다 (spec 02): s3는 벤더 세션
+/// multipart 중단 재료가 있으면 함께 치운다 (spec 02): s3는 벤더 세션
 /// 중단(중단하지 않은 미완성 part는 보이지 않게 과금된다), fs는 offset
 /// 기록 중이던 대상 임시 파일.
-async fn sweep_object(ctx: &Context<'_>, candidate: &SweepCandidate) -> anyhow::Result<()> {
+async fn sweep_object(ctx: &Context<'_>, candidate: &ObjectRef) -> anyhow::Result<()> {
     let row = registry::get_storage(ctx.pool, &candidate.storage_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("storage '{}' not registered", candidate.storage_id))?;

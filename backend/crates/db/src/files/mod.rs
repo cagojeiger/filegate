@@ -11,7 +11,7 @@
 //!   create     선언 해석 → pending 기록 + object_key 규칙 (capacity 검사 없음)
 //!   access     조회 전용 (commit 검증·read 해석·stat·byte lease·실측 기록)
 //!   commit     pending→active 확정 정산
-//!   sweep      detach·만료 회수·purge·lease GC (reconciler 스캔)
+//!   sweep      소프트 삭제·만료 중단·purge·lease GC (reconciler 스캔)
 //!   multipart  part 원장 (벤더 핸들·중계 secret·승격 직렬화)
 //!   geometry   part 기하 파생 (순수 함수)
 
@@ -37,8 +37,7 @@ pub use multipart::{
     has_done_parts, record_part_done, write_lease,
 };
 pub use sweep::{
-    DeleteOutcome, SweepCandidate, active_multipart_lease_ids, expire_read_leases,
-    expired_pending_ids, expired_pending_one, finalize_purge, finalize_reclaim, mark_deleted,
-    prune_history, prune_terminal_files, prune_terminal_leases, purgeable_ids, purgeable_one,
-    reclaim_pending,
+    DeleteOutcome, ObjectRef, abort_pending, active_multipart_lease_ids, expire_read_leases,
+    expired_pending_ids, expired_pending_one, finalize_abort, finalize_purge, prune_history,
+    prune_terminal_files, prune_terminal_leases, purgeable_ids, purgeable_one, soft_delete,
 };

@@ -525,7 +525,7 @@ pub async fn complete_multipart(
     strip_etag(output.e_tag(), "complete_multipart")
 }
 
-/// 중단 — 미완성 part의 점유·과금을 제거한다 (회수 경로, spec 02).
+/// 중단 — 미완성 part의 점유·과금을 제거한다 (중단 경로, spec 02).
 /// 이미 없는 세션(NoSuchUpload)도 성공 — 회수는 멱등하다.
 pub async fn abort_multipart(
     storage: &S3Storage,

@@ -1,4 +1,4 @@
-//! 삭제 결정과 reconciler의 스캔·정리 — detach, 만료 회수, purge, lease GC.
+//! 삭제 결정과 reconciler의 스캔·정리 — 소프트 삭제, 만료 중단, purge, lease GC.
 //!
 //! 물리 집행은 요청 경로 밖의 reconciler 몫이다 (결정·집행 분리). 여기는
 //! 상태 전이만 하고, 실물 삭제에 필요한 위치 정보를 함께 낸다. 사용량은
@@ -12,14 +12,14 @@ pub enum DeleteOutcome {
     Deleted,
     /// 이미 deleted — 멱등.
     AlreadyDeleted,
-    /// pending·reclaimed — 확정된 적 없는 파일은 detach 대상이 아니다.
+    /// pending·aborted — 확정된 적 없는 파일은 소프트 삭제 대상이 아니다.
     NotCommitted,
     NotFound,
 }
 
-/// detach 결정 기록 (spec 00): active → deleted. 물리 purge는 reconciler가
+/// 소프트 삭제 결정 기록 (spec 00): active → deleted. 물리 purge는 reconciler가
 /// 요청 경로 밖에서 집행한다 (결정·집행 분리).
-pub async fn mark_deleted(
+pub async fn soft_delete(
     pool: &PgPool,
     client_id: &str,
     file_id: Uuid,
@@ -44,8 +44,8 @@ pub async fn mark_deleted(
             .fetch_optional(pool)
             .await?;
     Ok(match state.as_deref() {
-        // reclaimed는 내부 상태 — 클라이언트에겐 파일이 된 적이 없다 (404).
-        None | Some("reclaimed") => DeleteOutcome::NotFound,
+        // aborted는 내부 상태 — 클라이언트에겐 파일이 된 적이 없다 (404).
+        None | Some("aborted") => DeleteOutcome::NotFound,
         Some("deleted") => DeleteOutcome::AlreadyDeleted,
         Some(_) => DeleteOutcome::NotCommitted,
     })
@@ -55,13 +55,13 @@ pub async fn mark_deleted(
 
 /// 회수·purge 대상 한 건 — 물리 삭제에 필요한 위치 정보까지.
 #[derive(Debug)]
-pub struct SweepCandidate {
+pub struct ObjectRef {
     pub file_id: Uuid,
     pub storage_id: String,
     pub object_key: String,
-    /// multipart 회수 재료 (spec 02) — 벤더 Abort용 세션 핸들.
+    /// multipart 중단 재료 (spec 02) — 벤더 Abort용 세션 핸들.
     pub upload_id: Option<String>,
-    /// multipart fs 회수 재료 — 대상 임시 파일(.fg-tmp-mp-{lease}) 식별.
+    /// multipart fs 중단 재료 — 대상 임시 파일(.fg-tmp-mp-{lease}) 식별.
     pub write_lease_id: Option<Uuid>,
 }
 
@@ -72,7 +72,7 @@ const EXPIRED_PENDING_SOURCE: &str = "FROM files f \
      JOIN locations l ON l.file_id = f.id \
      WHERE f.state = 'pending' AND le.state = 'issued' AND le.expires_at < now()";
 
-/// 쓰기 lease가 만료된 pending 파일들 (spec 00: 만료 회수 대상). 도출은
+/// 쓰기 lease가 만료된 pending 파일들 (spec 00: 만료 중단 대상). 도출은
 /// id만 낸다 — 집행에 쓸 재료는 집행자가 그때의 상태로 다시 읽는다.
 pub async fn expired_pending_ids(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, sqlx::Error> {
     sqlx::query_scalar(&format!("SELECT f.id {EXPIRED_PENDING_SOURCE} LIMIT $1"))
@@ -81,13 +81,13 @@ pub async fn expired_pending_ids(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>,
         .await
 }
 
-/// 회수 후보 한 건을 집행 직전에 다시 읽는다. 도출과 집행 사이에 늦은
+/// 중단 후보 한 건을 집행 직전에 다시 읽는다. 도출과 집행 사이에 늦은
 /// commit·lease 갱신이 끼어들었으면 조건에서 빠져 None이다 — 집행자는
 /// 스냅샷이 아니라 지금의 상태를 본다.
 pub async fn expired_pending_one(
     pool: &PgPool,
     file_id: Uuid,
-) -> Result<Option<SweepCandidate>, sqlx::Error> {
+) -> Result<Option<ObjectRef>, sqlx::Error> {
     let row: Option<(Uuid, String, String, Option<String>, Uuid)> = sqlx::query_as(&format!(
         "SELECT f.id, l.storage_id, l.object_key, le.upload_id, le.id \
          {EXPIRED_PENDING_SOURCE} AND f.id = $1"
@@ -95,7 +95,7 @@ pub async fn expired_pending_one(
     .bind(file_id)
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(|row| SweepCandidate {
+    Ok(row.map(|row| ObjectRef {
         file_id: row.0,
         storage_id: row.1,
         object_key: row.2,
@@ -104,17 +104,14 @@ pub async fn expired_pending_one(
     }))
 }
 
-/// 만료 회수 확정: pending → reclaimed 전이가 이기면 lease 만료 +
+/// 만료 중단 확정: pending → aborted 전이가 이기면 lease 만료 +
 /// location 제거. 늦은 commit과의 경합은 이 조건부 전이 하나로 끊긴다.
-pub async fn finalize_reclaim(
-    pool: &PgPool,
-    candidate: &SweepCandidate,
-) -> Result<bool, sqlx::Error> {
+pub async fn finalize_abort(pool: &PgPool, candidate: &ObjectRef) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
     // files 행을 먼저 잠근다 — finalize_commit과 같은 잠금 순서(files→leases)라
     // 교착이 없다. 늦은 commit이 이겼다면 여기서 0행이다.
     let transitioned =
-        sqlx::query("UPDATE files SET state = 'reclaimed' WHERE id = $1 AND state = 'pending'")
+        sqlx::query("UPDATE files SET state = 'aborted' WHERE id = $1 AND state = 'pending'")
             .bind(candidate.file_id)
             .execute(&mut *tx)
             .await?;
@@ -147,15 +144,15 @@ pub async fn finalize_reclaim(
 }
 
 /// 명시적 Abort의 회수 (spec 03) — 만료를 기다리지 않고 pending multipart를
-/// 되돈다. finalize_reclaim과 같은 전이(pending→reclaimed + lease 만료 +
+/// 되돈다. finalize_abort과 같은 전이(pending→aborted + lease 만료 +
 /// location 제거)지만, 사용자가 세션을 명시적으로 버렸으므로 lease 만료
-/// 재확인이 없다. 조건부 pending→reclaimed라 reconciler의 만료 회수와
+/// 재확인이 없다. 조건부 pending→aborted라 reconciler의 만료 중단와
 /// 경합해도 하나만 이긴다 — 진 쪽은 false(멱등). lease_parts는 lease가 남는
 /// 동안 유지되다 GC(CASCADE)로 사라진다 — Abort의 물리 정리는 호출자 몫이다.
-pub async fn reclaim_pending(pool: &PgPool, file_id: Uuid) -> Result<bool, sqlx::Error> {
+pub async fn abort_pending(pool: &PgPool, file_id: Uuid) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let transitioned =
-        sqlx::query("UPDATE files SET state = 'reclaimed' WHERE id = $1 AND state = 'pending'")
+        sqlx::query("UPDATE files SET state = 'aborted' WHERE id = $1 AND state = 'pending'")
             .bind(file_id)
             .execute(&mut *tx)
             .await?;
@@ -190,10 +187,7 @@ pub async fn purgeable_ids(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, sqlx:
 }
 
 /// purge 후보 한 건을 집행 직전에 다시 읽는다 — 이미 purge됐으면 None.
-pub async fn purgeable_one(
-    pool: &PgPool,
-    file_id: Uuid,
-) -> Result<Option<SweepCandidate>, sqlx::Error> {
+pub async fn purgeable_one(pool: &PgPool, file_id: Uuid) -> Result<Option<ObjectRef>, sqlx::Error> {
     let row: Option<(Uuid, String, String)> = sqlx::query_as(&format!(
         "SELECT f.id, l.storage_id, l.object_key {PURGEABLE_SOURCE} AND f.id = $1"
     ))
@@ -205,10 +199,7 @@ pub async fn purgeable_one(
 
 /// purge 확정: location을 제거한다 — "남은 행 = 현재 점유"의 그 행이
 /// 사라지는 지점이다. 이미 없으면(이중 purge) false — 멱등.
-pub async fn finalize_purge(
-    pool: &PgPool,
-    candidate: &SweepCandidate,
-) -> Result<bool, sqlx::Error> {
+pub async fn finalize_purge(pool: &PgPool, candidate: &ObjectRef) -> Result<bool, sqlx::Error> {
     let removed = sqlx::query("DELETE FROM locations WHERE file_id = $1")
         .bind(candidate.file_id)
         .execute(pool)
@@ -216,9 +207,9 @@ pub async fn finalize_purge(
     Ok(removed.rows_affected() > 0)
 }
 
-/// purge 후보는 확정을 지난 파일이라 multipart 잔여물이 없다 — 회수 재료는 None.
-fn candidate_from(row: (Uuid, String, String)) -> SweepCandidate {
-    SweepCandidate {
+/// purge 후보는 확정을 지난 파일이라 multipart 잔여물이 없다 — 중단 재료는 None.
+fn candidate_from(row: (Uuid, String, String)) -> ObjectRef {
+    ObjectRef {
         file_id: row.0,
         storage_id: row.1,
         object_key: row.2,
@@ -229,7 +220,7 @@ fn candidate_from(row: (Uuid, String, String)) -> SweepCandidate {
 
 /// 진행 중 multipart 조립 파일(.fg-tmp-mp-{lease})을 temp sweep에서 보호하기
 /// 위한 활성 lease 목록 — pending 파일의 issued write lease만. 확정·회수된
-/// 것은 조립 파일이 이미 rename되었거나 회수 경로가 지운다. part 재개가 물리
+/// 것은 조립 파일이 이미 rename되었거나 중단 경로가 지운다. part 재개가 물리
 /// 쓰기 없이 lease만 갱신할 수 있어 mtime 노화로는 진행 중과 크래시를 못
 /// 가르므로, sweep은 이 목록으로 활성 조립 파일을 명시적으로 제외한다.
 pub async fn active_multipart_lease_ids(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
@@ -278,7 +269,7 @@ pub async fn prune_terminal_leases(
     Ok(deleted.rows_affected())
 }
 
-/// 종착 파일 행 정리 — 보존 기간을 지난 reclaimed·purge 완료 deleted 행을
+/// 종착 파일 행 정리 — 보존 기간을 지난 aborted·purge 완료 deleted 행을
 /// 배치 삭제한다 (spec 00: stat 계약은 보존 기간까지). location(점유)이나
 /// lease(원장)가 남은 행은 건드리지 않는다 — purge와 lease GC가 먼저다.
 /// 이 정리가 있어야 files의 무한 누적이 멎고, 이력이 쌓인 client도 행이
@@ -291,7 +282,7 @@ pub async fn prune_terminal_files(
     let deleted = sqlx::query(
         "DELETE FROM files WHERE id IN ( \
          SELECT f.id FROM files f \
-         WHERE f.state IN ('deleted', 'reclaimed') \
+         WHERE f.state IN ('deleted', 'aborted') \
          AND COALESCE(f.deleted_at, f.created_at) < now() - $1 * interval '1 second' \
          AND NOT EXISTS (SELECT 1 FROM locations l WHERE l.file_id = f.id) \
          AND NOT EXISTS (SELECT 1 FROM leases le WHERE le.file_id = f.id) \

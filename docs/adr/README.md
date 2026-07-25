@@ -19,7 +19,7 @@ ADR은 방향, 구조, 원칙만 담는다. 범위별 오퍼레이션 계약은 
 | **quota** | 운영자가 클라이언트별로 정한 용량 몫. 운영자 내부 가드레일이며 클라이언트에게 노출되지 않는다 |
 | **capacity** | storage 등록에 적힌 용량 기준선. 집행하지 않는다 — usage 관찰의 비교선일 뿐 ([spec 00](../spec/00-operations.md)) |
 | **reconciler** | 요청 경로 밖에서 물리 상태를 정리하는 작업 |
-| **detach / purge** | 삭제의 두 단계. detach는 서비스의 결정, purge는 reconciler의 물리 집행 |
+| **소프트 삭제 / purge** | 삭제의 두 단계. 소프트 삭제는 서비스의 결정, purge는 reconciler의 물리 집행 |
 | **tiering** | capacity 압박 시 파일 location을 옮기는 재배치. reconciler가 집행한다 |
 
 ## 목록

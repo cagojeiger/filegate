@@ -218,7 +218,7 @@ async fn key_mapping_dies_with_the_file_row(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    assert!(files::finalize_reclaim(&pool, &candidate).await.unwrap());
+    assert!(files::finalize_abort(&pool, &candidate).await.unwrap());
     files::prune_terminal_leases(&pool, 0, 10).await.unwrap();
     sqlx::query("UPDATE files SET created_at = now() - interval '91 days' WHERE id = $1")
         .bind(file.file_id)

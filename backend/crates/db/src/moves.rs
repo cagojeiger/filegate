@@ -171,26 +171,35 @@ pub async fn pending_ids(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, sqlx::E
     .await
 }
 
-/// 삭제 대기 — 스왑이 끝나고 읽기 URL 수명이 지난 이동.
+/// 뒷정리 대기 — 진 쪽의 복사본을 지울 이동. 둘 다 "쓸모없어진 실물 하나를
+/// 지우고 종결한다"는 같은 일이고, 어느 쪽을 지우는지만 상태가 가른다.
+///   swapped   지연이 지났다 → source를 지운다 (이동 성공)
+///   canceled  취소됐다      → dest를 지운다   (이동 무산)
 pub async fn cleanup_ids(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT file_id FROM object_moves \
-         WHERE state = 'swapped' AND delete_after <= now() \
-         ORDER BY delete_after LIMIT $1",
+         WHERE (state = 'swapped' AND delete_after <= now()) OR state = 'canceled' \
+         ORDER BY created_at LIMIT $1",
     )
     .bind(limit)
     .fetch_all(pool)
     .await
 }
 
-/// 취소 — 아직 스왑 전이면 의도를 지운다. 스왑 뒤면 되돌릴 수 없다
+/// 취소 — 아직 스왑 전이면 종착 상태로 넘긴다. 스왑 뒤면 되돌릴 수 없다
 /// (포인터가 이미 dest를 가리키고, 남은 일은 source 정리뿐이다).
+///
+/// 행을 지우지 않는 것이 중요하다. 집행이 이미 dest에 복사를 마친 뒤일 수
+/// 있고, 그 실물을 지울 근거는 이 행뿐이다 — 지워버리면 장부 밖 객체가
+/// 남는다. 뒷정리는 이 상태에서 파생된다.
 pub async fn cancel(pool: &PgPool, file_id: Uuid) -> Result<CancelOutcome, sqlx::Error> {
-    let removed =
-        sqlx::query("DELETE FROM object_moves WHERE file_id = $1 AND state = 'requested'")
-            .bind(file_id)
-            .execute(pool)
-            .await?;
+    let removed = sqlx::query(
+        "UPDATE object_moves SET state = 'canceled' \
+         WHERE file_id = $1 AND state = 'requested'",
+    )
+    .bind(file_id)
+    .execute(pool)
+    .await?;
     if removed.rows_affected() > 0 {
         return Ok(CancelOutcome::Canceled);
     }
@@ -199,7 +208,9 @@ pub async fn cancel(pool: &PgPool, file_id: Uuid) -> Result<CancelOutcome, sqlx:
             .bind(file_id)
             .fetch_optional(pool)
             .await?;
-    Ok(match exists {
+    Ok(match exists.as_deref() {
+        // 이미 취소된 것을 다시 취소하면 그대로 성공이다 (멱등).
+        Some("canceled") => CancelOutcome::Canceled,
         Some(_) => CancelOutcome::TooLate,
         None => CancelOutcome::NotFound,
     })

@@ -188,13 +188,9 @@ async fn abort_reclaims_pending_and_is_idempotent(pool: PgPool) {
         .await
         .unwrap();
     // Abort: 만료를 기다리지 않고 pending을 회수한다 (명시적 중단).
-    assert!(
-        files::reclaim_pending(&pool, created.file_id)
-            .await
-            .unwrap()
-    );
+    assert!(files::abort_pending(&pool, created.file_id).await.unwrap());
     let (state, _, _) = file_row(&pool, created.file_id).await;
-    assert_eq!(state, "reclaimed");
+    assert_eq!(state, "aborted");
     // location이 사라지고 write lease가 만료된다.
     let location: Option<uuid::Uuid> =
         sqlx::query_scalar("SELECT file_id FROM locations WHERE file_id = $1")
@@ -210,11 +206,7 @@ async fn abort_reclaims_pending_and_is_idempotent(pool: PgPool) {
         .unwrap();
     assert_eq!(lease_state, "expired");
     // 멱등 — 두 번째 회수는 false (이미 회수됨).
-    assert!(
-        !files::reclaim_pending(&pool, created.file_id)
-            .await
-            .unwrap()
-    );
+    assert!(!files::abort_pending(&pool, created.file_id).await.unwrap());
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -225,16 +217,12 @@ async fn abort_after_complete_does_not_reclaim(pool: PgPool) {
     files::finalize_multipart_commit(&pool, created.file_id, 10, "e-1")
         .await
         .unwrap();
-    assert!(
-        !files::reclaim_pending(&pool, created.file_id)
-            .await
-            .unwrap()
-    );
+    assert!(!files::abort_pending(&pool, created.file_id).await.unwrap());
     let (state, _, _) = file_row(&pool, created.file_id).await;
     assert_eq!(state, "active");
 }
 
-// ── reconciler 회수 재료 ───────────────────────────────────
+// ── reconciler 중단 재료 ───────────────────────────────────
 
 #[sqlx::test(migrations = "./migrations")]
 async fn expired_multipart_is_protected_and_reclaimable(pool: PgPool) {
@@ -243,7 +231,7 @@ async fn expired_multipart_is_protected_and_reclaimable(pool: PgPool) {
     let created = open_multipart(&pool).await;
     let protected = files::active_multipart_lease_ids(&pool).await.unwrap();
     assert_eq!(protected, vec![created.lease_id]);
-    // 만료되면 reconciler의 만료 회수가 줍는다 (벤더 Abort 재료 포함).
+    // 만료되면 reconciler의 만료 중단가 줍는다 (벤더 Abort 재료 포함).
     sqlx::query("UPDATE leases SET expires_at = now() - interval '1 hour' WHERE file_id = $1")
         .bind(created.file_id)
         .execute(&pool)
@@ -263,7 +251,7 @@ async fn expired_multipart_is_protected_and_reclaimable(pool: PgPool) {
         vec![created.lease_id]
     );
     // 회수가 lease를 expired로 닫은 뒤에야 보호 목록에서 빠진다.
-    assert!(files::finalize_reclaim(&pool, &candidate).await.unwrap());
+    assert!(files::finalize_abort(&pool, &candidate).await.unwrap());
     assert!(
         files::active_multipart_lease_ids(&pool)
             .await
