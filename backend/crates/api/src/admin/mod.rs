@@ -8,8 +8,6 @@
 //! 상태 코드 번역은 error에 산다.
 
 mod clients;
-mod files;
-mod moves;
 mod storages;
 mod usage;
 
@@ -53,11 +51,6 @@ pub fn admin_routes() -> Router<AppState> {
             "/clients/{id}/s3-credentials/{access_key_id}",
             axum::routing::delete(clients::s3_credential_delete),
         )
-        .route("/moves", get(moves::list).post(moves::request_move))
-        .route("/moves/history", get(moves::history))
-        .route("/moves/{file_id}", get(moves::get).delete(moves::cancel))
-        .route("/files", get(files::list))
-        .route("/files/{id}", get(files::get))
 }
 
 /// 운영자 토큰 검사. 실패는 단일한 401 — 토큰 존재 여부를 구분해 주지 않는다.
