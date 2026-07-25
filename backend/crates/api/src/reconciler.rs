@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
 
-use crate::{gc, task};
+use crate::{gc, policy, task};
 
 /// 한 회차에 갈래별로 큐에 넣는 최대 건수 (유계 배치, docs/stack).
 /// 이미 큐에 있는 대상은 멱등 enqueue가 걸러내므로, 이 값은 큐 크기의
@@ -75,6 +75,11 @@ async fn run(pool: &PgPool) {
         Ok(count) => tracing::warn!(event = "reconciler.tasks_requeued", count),
         Err(error) => tracing::error!(event = "reconciler.gc_failed", kind = "requeue", %error),
     }
+
+    // 배치 정책 — 조건에 맞는 파일의 이동 의도를 저널에 넣는다. 도출보다
+    // 앞이라 갓 생성된 이동이 같은 회차에 큐로 간다. 바이트·벤더 호출 없이
+    // INSERT뿐이고, 안전은 이동 메커니즘이 보증한다.
+    policy::evaluate(pool).await;
 
     // 상태에서 집행 대상을 도출해 큐에 넣는다. 이미 큐에 있으면 무시된다.
     for scanned in task::scan(pool, ENQUEUE_LIMIT).await {
