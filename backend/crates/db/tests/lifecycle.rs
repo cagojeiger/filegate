@@ -229,6 +229,72 @@ async fn observed_commit_scan_targets_live_single_put_pending(pool: PgPool) {
     assert_eq!(candidate.storage.id, "s");
 }
 
+/// 단건 로더는 도출 시점이 아니라 집행 시점의 상태를 답한다 — 그 사이
+/// 조건에서 빠진 파일은 None이라, 집행자가 낡은 재료로 실물을 건드리지
+/// 않는다. 도출과 집행이 벌어질수록(집행자를 늘리면 더 벌어진다) 이 성질이
+/// 안전의 전제가 된다.
+#[sqlx::test(migrations = "./migrations")]
+async fn execution_loaders_answer_with_the_state_at_execution_time(pool: PgPool) {
+    wire(&pool, 1000).await;
+
+    // 관찰 후보였다가 확정되면 더는 후보가 아니다.
+    let observed_file = create_ok(&pool, 100).await;
+    assert!(
+        files::observed_commit_candidate(&pool, observed_file.file_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    files::finalize_commit(&pool, observed_file.file_id, "etag")
+        .await
+        .unwrap();
+    assert!(
+        files::observed_commit_candidate(&pool, observed_file.file_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // 회수 후보였다가 늦은 commit이 이기면 더는 후보가 아니다.
+    let reclaim_file = create_ok(&pool, 100).await;
+    sqlx::query("UPDATE leases SET expires_at = now() - interval '1 hour' WHERE file_id = $1")
+        .bind(reclaim_file.file_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        files::expired_pending_one(&pool, reclaim_file.file_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    files::finalize_commit(&pool, reclaim_file.file_id, "etag")
+        .await
+        .unwrap();
+    assert!(
+        files::expired_pending_one(&pool, reclaim_file.file_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // purge 후보였다가 이미 purge됐으면 더는 후보가 아니다.
+    files::mark_deleted(&pool, "c", observed_file.file_id)
+        .await
+        .unwrap();
+    let candidate = files::purgeable_one(&pool, observed_file.file_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(files::finalize_purge(&pool, &candidate).await.unwrap());
+    assert!(
+        files::purgeable_one(&pool, observed_file.file_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 const RETENTION_90D: i64 = 90 * 24 * 3600;
 
 #[sqlx::test(migrations = "./migrations")]

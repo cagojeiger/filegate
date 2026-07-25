@@ -92,6 +92,22 @@ pub async fn observed_commit_candidates(
     pool: &PgPool,
     limit: i64,
 ) -> Result<Vec<ObservedCommitCandidate>, sqlx::Error> {
+    observed_commit_rows(pool, None, limit).await
+}
+
+/// 관찰 후보 한 건을 집행 직전에 다시 읽는다 — 그 사이 확정·회수됐으면 None.
+pub async fn observed_commit_candidate(
+    pool: &PgPool,
+    file_id: Uuid,
+) -> Result<Option<ObservedCommitCandidate>, sqlx::Error> {
+    Ok(observed_commit_rows(pool, Some(file_id), 1).await?.pop())
+}
+
+async fn observed_commit_rows(
+    pool: &PgPool,
+    file_id: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<ObservedCommitCandidate>, sqlx::Error> {
     let rows: Vec<(Uuid, i64, Option<String>, String)> = sqlx::query_as(
         "SELECT f.id, f.declared_size, f.declared_md5, l.object_key \
          FROM files f \
@@ -99,8 +115,10 @@ pub async fn observed_commit_candidates(
          JOIN leases le ON le.file_id = f.id AND le.kind = 'write' \
          WHERE f.state = 'pending' AND f.part_size IS NULL \
          AND le.state = 'issued' AND le.expires_at > now() \
-         LIMIT $1",
+         AND ($1::uuid IS NULL OR f.id = $1) \
+         LIMIT $2",
     )
+    .bind(file_id)
     .bind(limit)
     .fetch_all(pool)
     .await?;

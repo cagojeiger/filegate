@@ -70,14 +70,34 @@ pub async fn expired_pending(
     pool: &PgPool,
     limit: i64,
 ) -> Result<Vec<SweepCandidate>, sqlx::Error> {
+    expired_pending_rows(pool, None, limit).await
+}
+
+/// 회수 후보 한 건을 집행 직전에 다시 읽는다. 도출과 집행 사이에 늦은
+/// commit·lease 갱신이 끼어들었으면 조건에서 빠져 None이다 — 집행자는
+/// 스냅샷이 아니라 지금의 상태를 본다.
+pub async fn expired_pending_one(
+    pool: &PgPool,
+    file_id: Uuid,
+) -> Result<Option<SweepCandidate>, sqlx::Error> {
+    Ok(expired_pending_rows(pool, Some(file_id), 1).await?.pop())
+}
+
+async fn expired_pending_rows(
+    pool: &PgPool,
+    file_id: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<SweepCandidate>, sqlx::Error> {
     let rows: Vec<(Uuid, String, String, Option<String>, Uuid)> = sqlx::query_as(
         "SELECT f.id, l.storage_id, l.object_key, le.upload_id, le.id \
          FROM files f \
          JOIN leases le ON le.file_id = f.id AND le.kind = 'write' \
          JOIN locations l ON l.file_id = f.id \
          WHERE f.state = 'pending' AND le.state = 'issued' AND le.expires_at < now() \
-         LIMIT $1",
+         AND ($1::uuid IS NULL OR f.id = $1) \
+         LIMIT $2",
     )
+    .bind(file_id)
     .bind(limit)
     .fetch_all(pool)
     .await?;
@@ -169,11 +189,28 @@ pub async fn reclaim_pending(pool: &PgPool, file_id: Uuid) -> Result<bool, sqlx:
 /// purge 대상 — deleted인데 location이 남은 파일들. purge가 끝난 deleted는
 /// location이 없어 자연히 스캔에서 빠진다.
 pub async fn purgeable(pool: &PgPool, limit: i64) -> Result<Vec<SweepCandidate>, sqlx::Error> {
+    purgeable_rows(pool, None, limit).await
+}
+
+/// purge 후보 한 건을 집행 직전에 다시 읽는다 — 이미 purge됐으면 None.
+pub async fn purgeable_one(
+    pool: &PgPool,
+    file_id: Uuid,
+) -> Result<Option<SweepCandidate>, sqlx::Error> {
+    Ok(purgeable_rows(pool, Some(file_id), 1).await?.pop())
+}
+
+async fn purgeable_rows(
+    pool: &PgPool,
+    file_id: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<SweepCandidate>, sqlx::Error> {
     let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
         "SELECT f.id, l.storage_id, l.object_key \
          FROM files f JOIN locations l ON l.file_id = f.id \
-         WHERE f.state = 'deleted' LIMIT $1",
+         WHERE f.state = 'deleted' AND ($1::uuid IS NULL OR f.id = $1) LIMIT $2",
     )
+    .bind(file_id)
     .bind(limit)
     .fetch_all(pool)
     .await?;
