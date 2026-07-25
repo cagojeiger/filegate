@@ -94,10 +94,15 @@ async fn serve() -> anyhow::Result<()> {
         std::time::Duration::from_secs(config.server.reconciler_interval_secs),
         shutdown.clone(),
     );
+    // 요청 경로의 중계 업로드와 워커의 이동 복사가 같은 로컬 디스크를 쓴다 —
+    // 예산이 하나여야 한 쪽이 볼륨을 채워 다른 쪽을 무너뜨리지 않는다.
+    let spool_slots =
+        std::sync::Arc::new(tokio::sync::Semaphore::new(spool::SPOOL_CONCURRENCY_LIMIT));
     let workers = worker::spawn(
         pool.clone(),
         crypto.clone(),
         s3_clients.clone(),
+        spool_slots.clone(),
         config.server.worker_concurrency,
         shutdown.clone(),
     );
@@ -113,9 +118,7 @@ async fn serve() -> anyhow::Result<()> {
         part_promotions: std::sync::Arc::new(tokio::sync::Semaphore::new(
             blobs::PART_PROMOTION_LIMIT,
         )),
-        spool_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(
-            spool::SPOOL_CONCURRENCY_LIMIT,
-        )),
+        spool_slots,
     };
 
     let http_shutdown = shutdown.clone().cancelled_owned();

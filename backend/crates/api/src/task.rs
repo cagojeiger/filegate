@@ -16,10 +16,13 @@
 //! 큐를 거치며 벌어지고 집행은 다른 파드에서 일어나므로, 이 재조회가 낡은
 //! 재료로 실물을 건드리지 않게 하는 유일한 장치다.
 
+use std::sync::Arc;
+
 use filegate_core::Crypto;
 use filegate_db::files::{self, SweepCandidate};
-use filegate_db::{PgPool, registry};
+use filegate_db::{PgPool, moves, registry};
 use filegate_infra::{Address, S3ClientCache, fs as fs_backend, s3_delete_object, s3_head_object};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 /// 집행에 필요한 것들 — DB와 저장소 접근 재료.
@@ -27,12 +30,22 @@ pub struct Context<'a> {
     pub pool: &'a PgPool,
     pub crypto: &'a Crypto,
     pub s3_clients: &'a S3ClientCache,
+    /// 요청 경로의 중계 업로드와 공유하는 스풀 예산 — 같은 로컬 디스크를
+    /// 쓰므로 한도가 하나여야 한다.
+    pub spool_slots: &'a Arc<Semaphore>,
 }
 
 /// 집행 갈래 — 큐의 `kind` 컬럼과 같은 어휘다.
 pub const OBSERVE: &str = "observe";
 pub const RECLAIM: &str = "reclaim";
 pub const PURGE: &str = "purge";
+pub const MOVE: &str = "move";
+pub const MOVE_CLEANUP: &str = "move_cleanup";
+
+/// 스왑 뒤 source 실물을 지우기까지의 지연. 발급된 읽기 URL은 저장소가
+/// 서명해 DB와 무관하게 자기 수명까지 유효하므로, 그 수명이 지나기 전에
+/// 실물을 지우면 살아 있는 URL이 404가 된다. 읽기 lease 수명과 같이 둔다.
+const DELETE_DELAY: std::time::Duration = crate::lease::READ_LEASE_TTL;
 
 /// 한 갈래의 도출 결과 — 큐에 넣을 대상 id들. 재료는 담지 않는다.
 pub struct Scanned {
@@ -42,15 +55,18 @@ pub struct Scanned {
 
 /// 상태를 훑어 이번 회차의 작업을 도출한다 (갈래마다 유계 배치).
 ///
-/// 세 갈래의 대상은 서로소다 — observe는 lease가 살아 있는 pending,
-/// reclaim은 만료된 pending, purge는 deleted다. 한 파일이 두 갈래에 동시에
-/// 뽑히지 않는다. 한 갈래의 스캔이 실패해도 나머지는 진행한다.
+/// 파일 갈래 셋의 대상은 서로소다 — observe는 lease가 살아 있는 pending,
+/// reclaim은 만료된 pending, purge는 deleted다. 이동 갈래 둘은 저널의 진행
+/// 상태에서 갈리므로 역시 서로소다. 한 갈래의 스캔이 실패해도 나머지는
+/// 진행한다.
 pub async fn scan(pool: &PgPool, limit: i64) -> Vec<Scanned> {
     let mut out = Vec::new();
     for (kind, ids) in [
         (OBSERVE, files::observed_commit_ids(pool, limit).await),
         (RECLAIM, files::expired_pending_ids(pool, limit).await),
         (PURGE, files::purgeable_ids(pool, limit).await),
+        (MOVE, moves::pending_ids(pool, limit).await),
+        (MOVE_CLEANUP, moves::cleanup_ids(pool, limit).await),
     ] {
         match ids {
             Ok(file_ids) => out.push(Scanned { kind, file_ids }),
@@ -69,6 +85,8 @@ pub async fn execute(ctx: &Context<'_>, kind: &str, file_id: Uuid) -> anyhow::Re
         OBSERVE => observe(ctx, file_id).await,
         RECLAIM => reclaim(ctx, file_id).await,
         PURGE => purge(ctx, file_id).await,
+        MOVE => move_object(ctx, file_id).await,
+        MOVE_CLEANUP => move_cleanup(ctx, file_id).await,
         other => Err(anyhow::anyhow!("unknown task kind '{other}'")),
     }
 }
@@ -148,6 +166,78 @@ async fn purge(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
     if files::finalize_purge(ctx.pool, &candidate).await? {
         tracing::info!(event = "file.purged", file = %file_id);
     }
+    Ok(())
+}
+
+/// 이동 집행 — 복사하고 포인터를 바꾼다. 황금률: dest 복사가 끝나고 스왑이
+/// 커밋되기 전에는 source를 절대 건드리지 않는다. source 실물은 스왑 뒤
+/// 지연이 지나야(move_cleanup) 사라진다.
+///
+/// 스왑에 지면(경합) 이동을 조용히 버린다 — 삭제·덮어쓰기·취소가 이겼다는
+/// 뜻이고, 이긴 쪽은 언제나 요청 경로다. 그때 남는 dest 잔여물은 여기서
+/// 치운다.
+async fn move_object(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
+    let Some(row) = moves::get(ctx.pool, file_id).await? else {
+        return Ok(()); // 취소됐다
+    };
+    if row.state != "requested" {
+        return Ok(()); // 이미 스왑됐다 — 남은 일은 뒷정리뿐
+    }
+
+    crate::storage_access::copy_object(
+        ctx.pool,
+        ctx.crypto,
+        ctx.s3_clients,
+        ctx.spool_slots,
+        &row.source_storage_id,
+        &row.dest_storage_id,
+        &row.object_key,
+    )
+    .await?;
+
+    if moves::finalize_swap(ctx.pool, &row, DELETE_DELAY.as_secs() as i64).await? {
+        tracing::info!(
+            event = "move.swapped",
+            file = %file_id,
+            dest = %row.dest_storage_id,
+        );
+        return Ok(());
+    }
+
+    // 졌다 — 방금 쓴 dest 객체는 장부에 없는 잔여물이다. 지우고 종결한다.
+    crate::storage_access::delete_object_at(
+        ctx.pool,
+        ctx.crypto,
+        ctx.s3_clients,
+        &row.dest_storage_id,
+        &row.object_key,
+    )
+    .await?;
+    moves::finish(ctx.pool, &row, "lost").await?;
+    tracing::info!(event = "move.lost", file = %file_id);
+    Ok(())
+}
+
+/// 스왑 뒤 정리 — 발급된 읽기 URL의 수명이 지난 뒤에만 source 실물을 지운다.
+/// 지우고 나서만 저널을 종결한다. 삭제가 실패하면 저널이 남아 다음 회차가
+/// 다시 도출한다 (멱등: 없는 대상 삭제도 성공).
+async fn move_cleanup(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
+    let Some(row) = moves::get(ctx.pool, file_id).await? else {
+        return Ok(());
+    };
+    if row.state != "swapped" {
+        return Ok(());
+    }
+    crate::storage_access::delete_object_at(
+        ctx.pool,
+        ctx.crypto,
+        ctx.s3_clients,
+        &row.source_storage_id,
+        &row.object_key,
+    )
+    .await?;
+    moves::finish(ctx.pool, &row, "moved").await?;
+    tracing::info!(event = "move.done", file = %file_id);
     Ok(())
 }
 

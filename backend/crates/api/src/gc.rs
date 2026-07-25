@@ -75,6 +75,17 @@ pub async fn run(pool: &PgPool) {
         }
     }
 
+    // 이동 이력 보존 정리 — 대여 이력과 같은 기준이다.
+    match filegate_db::moves::prune_history(pool, HISTORY_RETENTION.as_secs() as i64, BATCH_LIMIT)
+        .await
+    {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(event = "reconciler.move_history_pruned", count),
+        Err(error) => {
+            tracing::error!(event = "reconciler.gc_failed", kind = "prune_move_history", %error)
+        }
+    }
+
     // 일별 사용량 스냅샷 — 어제(UTC)의 종점 점유를 박제한다 (spec 00).
     // stock의 과거는 소급 계산이 불가하므로 매일 남긴다. 이미 찍힌 날은 0.
     // 자정에 서버가 없었으면 첫 회차에 늦게 찍히는 근사치고, 그제 이전의
