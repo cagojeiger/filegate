@@ -76,6 +76,9 @@ SDK 정상 경로에 나오지 않는다.
   대칭이다. ETag = 실측 MD5, 따옴표 포함.
 - GET은 단일 구간 `Range: bytes=a-b`를 지원한다 — 206/416. boto3
   `download_file`(병렬 Range 다운로드)의 전제다.
+- GET·HEAD의 서명된 `response-content-disposition`·`response-content-type`·
+  `response-cache-control` 쿼리는 응답 헤더를 덮어쓴다. 퍼센트 디코딩 뒤 유효한
+  HTTP 헤더 값이 아니면 400 `InvalidArgument`로 거부한다.
 - checksum 재계산(CRC32 대조)은 하지 않는다 — 무결성은 크기·MD5 실측이
   담당하고, checksum 헤더는 서명 검증의 일부로만 쓰인다.
 - 모든 접근은 lease 원장을 지난다 (ADR 002) — 표면이 내부적으로 lease를

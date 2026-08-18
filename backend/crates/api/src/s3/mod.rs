@@ -100,9 +100,9 @@ async fn dispatch(
             handlers::put_object(&state, &client_id, &bucket, &key, &parts.headers, body).await
         }
         (&Method::GET, ..) => {
-            handlers::get_object(&state, &client_id, &bucket, &key, &parts.headers).await
+            handlers::get_object(&state, &client_id, &bucket, &key, &parts.headers, query).await
         }
-        (&Method::HEAD, ..) => handlers::head_object(&state, &client_id, &key).await,
+        (&Method::HEAD, ..) => handlers::head_object(&state, &client_id, &key, query).await,
         (&Method::DELETE, ..) => handlers::delete_object(&state, &client_id, &bucket, &key).await,
         _ => Err(xml::xml_error(
             StatusCode::METHOD_NOT_ALLOWED,
