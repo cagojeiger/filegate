@@ -312,6 +312,14 @@ async fn promotion_must_name_the_place_the_worker_filled(pool: PgPool) {
         "쓴 적 없는 자리가 승격됐다 — 바이트를 가진 쪽이 회수된다"
     );
 
+    // 실패한 집행자의 정리도 자기가 채운 자리만 겨냥한다. 이미 버려진 cold는
+    // 그대로고, 뒤이어 접수된 other 요청은 취소되면 안 된다.
+    assert!(
+        !placements::drop_staging_at(&pool, file, &filled.storage_id)
+            .await
+            .unwrap()
+    );
+
     // 정본은 그대로다. 새로 열린 자리는 다음 집행자가 제대로 채운다.
     let primary = placements::primary_of(&pool, file).await.unwrap().unwrap();
     assert_eq!(primary.storage_id, "hot");

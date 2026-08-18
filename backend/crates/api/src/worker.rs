@@ -116,7 +116,7 @@ async fn execute(ctx: &task::Context<'_>, pool: &PgPool, name: &str, claimed: &t
         None => {
             // 갈래와 대상이 어긋난 행 — 집행할 수 없으니 큐에서 뺀다.
             tracing::error!(event = "worker.bad_target", task = %claimed.id, kind = %claimed.kind);
-            let _ = tasks::finish(pool, claimed.id, name).await;
+            let _ = tasks::finish(pool, claimed.id, name, claimed.attempts).await;
             return;
         }
     };
@@ -124,7 +124,7 @@ async fn execute(ctx: &task::Context<'_>, pool: &PgPool, name: &str, claimed: &t
         // 집행했거나, 할 일이 없어졌다 — 어느 쪽이든 큐에서 지운다. 아직 할
         // 일이 남았으면 다음 회차의 도출이 다시 넣는다.
         Ok(()) => {
-            if let Err(error) = tasks::finish(pool, claimed.id, name).await {
+            if let Err(error) = tasks::finish(pool, claimed.id, name, claimed.attempts).await {
                 tracing::error!(event = "worker.finish_failed", task = %claimed.id, %error);
             }
         }
@@ -136,8 +136,15 @@ async fn execute(ctx: &task::Context<'_>, pool: &PgPool, name: &str, claimed: &t
                 %error,
             );
             let backoff = backoff_secs(claimed.attempts);
-            if let Err(error) =
-                tasks::fail(pool, claimed.id, name, &error.to_string(), backoff).await
+            if let Err(error) = tasks::fail(
+                pool,
+                claimed.id,
+                name,
+                claimed.attempts,
+                &error.to_string(),
+                backoff,
+            )
+            .await
             {
                 tracing::error!(event = "worker.fail_failed", task = %claimed.id, %error);
             }

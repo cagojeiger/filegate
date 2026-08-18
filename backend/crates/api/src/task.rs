@@ -134,7 +134,7 @@ async fn copy(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
     };
     let Some(primary) = placements::primary_of(ctx.pool, file_id).await? else {
         // 정본이 없다 — 파일이 사라지는 중이다. 준비하던 자리를 버린다.
-        placements::drop_staging(ctx.pool, file_id).await?;
+        placements::drop_staging_at(ctx.pool, file_id, &staging.storage_id).await?;
         return Ok(());
     };
 
@@ -163,7 +163,7 @@ async fn copy(ctx: &Context<'_>, file_id: Uuid) -> anyhow::Result<()> {
     }
 
     // 졌다. 방금 쓴 실물은 아무도 안 가리키므로 버려짐으로 넘겨 정리에 맡긴다.
-    placements::drop_staging(ctx.pool, file_id).await?;
+    placements::drop_staging_at(ctx.pool, file_id, &staging.storage_id).await?;
     placements::record_lost(ctx.pool, file_id, &primary.storage_id, &staging.storage_id).await?;
     tracing::info!(event = "file.move_lost", file = %file_id);
     Ok(())

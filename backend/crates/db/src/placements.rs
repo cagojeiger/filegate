@@ -151,6 +151,24 @@ pub async fn drop_staging(pool: &PgPool, file_id: Uuid) -> Result<bool, sqlx::Er
     Ok(dropped.rows_affected() > 0)
 }
 
+/// 집행자가 채우던 준비 자리만 버린다. 복사 중 이동 요청이 교체됐으면 새
+/// staging은 건드리지 않는다.
+pub async fn drop_staging_at(
+    pool: &PgPool,
+    file_id: Uuid,
+    storage_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let dropped = sqlx::query(
+        "UPDATE placements SET role = 'dropped', drop_after = now() \
+         WHERE file_id = $1 AND storage_id = $2 AND role = 'staging'",
+    )
+    .bind(file_id)
+    .bind(storage_id)
+    .execute(pool)
+    .await?;
+    Ok(dropped.rows_affected() > 0)
+}
+
 /// purge 집행 — soft delete된 파일의 정본을 한 문장으로 버린다.
 ///
 /// 실물을 안 만지므로 판단자의 몫이고, 파일별 작업이 아니라 벌크다.

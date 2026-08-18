@@ -112,7 +112,9 @@ async fn a_task_is_claimed_by_exactly_one_worker(pool: PgPool) {
     assert_eq!((depth.queued, depth.active), (0, 1));
 
     // 집행 완료 — 행이 사라진다. 할 일이 남았으면 다음 도출이 다시 넣는다.
-    tasks::finish(&pool, first.id, "w1").await.unwrap();
+    tasks::finish(&pool, first.id, "w1", first.attempts)
+        .await
+        .unwrap();
     let depth = tasks::depth(&pool, 5).await.unwrap();
     assert_eq!((depth.queued, depth.active), (0, 0));
 }
@@ -126,9 +128,16 @@ async fn failure_returns_the_task_to_the_queue_after_a_backoff(pool: PgPool) {
         .unwrap();
 
     let claimed = tasks::claim(&pool, "w1").await.unwrap().expect("claimed");
-    tasks::fail(&pool, claimed.id, "w1", "storage unreachable", 3600)
-        .await
-        .unwrap();
+    tasks::fail(
+        &pool,
+        claimed.id,
+        "w1",
+        claimed.attempts,
+        "storage unreachable",
+        3600,
+    )
+    .await
+    .unwrap();
 
     // backoff가 지나기 전에는 아무도 집지 못한다 — 장애 중 폭주를 막는다.
     assert!(tasks::claim(&pool, "w1").await.unwrap().is_none());
@@ -233,7 +242,7 @@ async fn a_stale_worker_cannot_touch_a_task_someone_else_now_holds(pool: PgPool)
         .await
         .unwrap();
 
-    let first = tasks::claim(&pool, "zombie")
+    let first = tasks::claim(&pool, "same-worker")
         .await
         .unwrap()
         .expect("claimed");
@@ -243,22 +252,37 @@ async fn a_stale_worker_cannot_touch_a_task_someone_else_now_holds(pool: PgPool)
         .await
         .unwrap();
     tasks::requeue_expired(&pool, 300).await.unwrap();
-    let second = tasks::claim(&pool, "live").await.unwrap().expect("claimed");
+    let second = tasks::claim(&pool, "same-worker")
+        .await
+        .unwrap()
+        .expect("claimed");
     assert_eq!(second.id, first.id);
+    assert_eq!(second.attempts, first.attempts + 1);
 
-    // 좀비가 뒤늦게 끝났다 — 남의 작업을 지우면 안 된다.
-    tasks::finish(&pool, first.id, "zombie").await.unwrap();
+    // 이름까지 같은 좀비가 뒤늦게 끝났다 — 새 claim을 지우면 안 된다.
+    tasks::finish(&pool, first.id, "same-worker", first.attempts)
+        .await
+        .unwrap();
     let depth = tasks::depth(&pool, 5).await.unwrap();
     assert_eq!(depth.active, 1, "좀비가 진행 중인 작업을 큐에서 지웠다");
 
     // 좀비의 실패 보고도 남의 작업을 풀면 안 된다.
-    tasks::fail(&pool, first.id, "zombie", "late failure", 30)
-        .await
-        .unwrap();
+    tasks::fail(
+        &pool,
+        first.id,
+        "same-worker",
+        first.attempts,
+        "late failure",
+        30,
+    )
+    .await
+    .unwrap();
     let depth = tasks::depth(&pool, 5).await.unwrap();
     assert_eq!(depth.active, 1, "좀비가 진행 중인 작업을 큐로 되돌렸다");
 
     // 정당한 소유자는 종결할 수 있다.
-    tasks::finish(&pool, second.id, "live").await.unwrap();
+    tasks::finish(&pool, second.id, "same-worker", second.attempts)
+        .await
+        .unwrap();
     assert_eq!(tasks::depth(&pool, 5).await.unwrap().active, 0);
 }
