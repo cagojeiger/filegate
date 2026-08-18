@@ -112,7 +112,9 @@ async fn a_task_is_claimed_by_exactly_one_worker(pool: PgPool) {
     assert_eq!((depth.queued, depth.active), (0, 1));
 
     // 집행 완료 — 행이 사라진다. 할 일이 남았으면 다음 도출이 다시 넣는다.
-    tasks::finish(&pool, first.id).await.unwrap();
+    tasks::finish(&pool, first.id, "w1", first.attempts)
+        .await
+        .unwrap();
     let depth = tasks::depth(&pool, 5).await.unwrap();
     assert_eq!((depth.queued, depth.active), (0, 0));
 }
@@ -126,9 +128,16 @@ async fn failure_returns_the_task_to_the_queue_after_a_backoff(pool: PgPool) {
         .unwrap();
 
     let claimed = tasks::claim(&pool, "w1").await.unwrap().expect("claimed");
-    tasks::fail(&pool, claimed.id, "storage unreachable", 3600)
-        .await
-        .unwrap();
+    tasks::fail(
+        &pool,
+        claimed.id,
+        "w1",
+        claimed.attempts,
+        "storage unreachable",
+        3600,
+    )
+    .await
+    .unwrap();
 
     // backoff가 지나기 전에는 아무도 집지 못한다 — 장애 중 폭주를 막는다.
     assert!(tasks::claim(&pool, "w1").await.unwrap().is_none());
@@ -220,4 +229,60 @@ async fn tasks_vanish_with_their_file(pool: PgPool) {
 
     let depth = tasks::depth(&pool, 5).await.unwrap();
     assert_eq!((depth.queued, depth.active), (0, 0));
+}
+
+/// claim 은 펜싱 토큰이다 — 만료돼 남이 이어받은 작업을 뒤늦게 끝난 좀비가
+/// 종결하거나 되돌리면, 진행 중인 집행이 큐에서 사라지거나 둘이 같은 일을
+/// 동시에 하게 된다.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_stale_worker_cannot_touch_a_task_someone_else_now_holds(pool: PgPool) {
+    wire(&pool).await;
+    let file = a_file(&pool).await;
+    tasks::enqueue_files(&pool, "observe", &[file])
+        .await
+        .unwrap();
+
+    let first = tasks::claim(&pool, "same-worker")
+        .await
+        .unwrap()
+        .expect("claimed");
+    // claim 이 만료돼 회수되고, 살아 있는 파드가 이어받는다.
+    sqlx::query("UPDATE tasks SET claimed_at = now() - interval '1 hour'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    tasks::requeue_expired(&pool, 300).await.unwrap();
+    let second = tasks::claim(&pool, "same-worker")
+        .await
+        .unwrap()
+        .expect("claimed");
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.attempts, first.attempts + 1);
+
+    // 이름까지 같은 좀비가 뒤늦게 끝났다 — 새 claim을 지우면 안 된다.
+    tasks::finish(&pool, first.id, "same-worker", first.attempts)
+        .await
+        .unwrap();
+    let depth = tasks::depth(&pool, 5).await.unwrap();
+    assert_eq!(depth.active, 1, "좀비가 진행 중인 작업을 큐에서 지웠다");
+
+    // 좀비의 실패 보고도 남의 작업을 풀면 안 된다.
+    tasks::fail(
+        &pool,
+        first.id,
+        "same-worker",
+        first.attempts,
+        "late failure",
+        30,
+    )
+    .await
+    .unwrap();
+    let depth = tasks::depth(&pool, 5).await.unwrap();
+    assert_eq!(depth.active, 1, "좀비가 진행 중인 작업을 큐로 되돌렸다");
+
+    // 정당한 소유자는 종결할 수 있다.
+    tasks::finish(&pool, second.id, "same-worker", second.attempts)
+        .await
+        .unwrap();
+    assert_eq!(tasks::depth(&pool, 5).await.unwrap().active, 0);
 }
