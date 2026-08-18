@@ -167,7 +167,7 @@ pub async fn delete_key(
     Ok(removed)
 }
 
-/// active → deleted 전이 (소프트 삭제 결정, spec 00). 물리 purge는 reconciler.
+/// active → deleted 전이 (detach 결정, spec 00). 물리 purge는 reconciler.
 /// 소유 검사는 생략한다 — 호출자가 이미 자기 키 매핑을 통해 소유를 증명했다.
 /// active가 아니면 0행 (이미 정리됐거나 pending — 어느 쪽이든 할 일 없음).
 async fn detach_active(

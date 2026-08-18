@@ -387,7 +387,7 @@ pub(super) async fn complete_multipart(
 
     // 확정 — 실물이 이미 있다(벤더 Complete·fs rename). declared_size를 실측
     // 합으로 함께 확정한다 (create의 sentinel 0을 갱신). 전이가 지면 pending이
-    // 그 사이 만료 중단됐다는 뜻 — 재시도 신호로 돌려준다 (단일 PUT과 같은 좁은
+    // 그 사이 만료 회수됐다는 뜻 — 재시도 신호로 돌려준다 (단일 PUT과 같은 좁은
     // 경합, 업로드된 실물은 sweep이 뒤처리한다).
     if !files::finalize_multipart_commit(&state.pool, file_id, total, &etag)
         .await
@@ -444,10 +444,10 @@ pub(super) async fn abort_multipart(
 
     // DB 회수 먼저 (전이 우선, reclaim과 같은 순서) — 진 경합은 이미 회수된
     // 것이라 물리를 건드리지 않는다. object_key·storage는 회수 전 스냅샷을 쓴다.
-    let aborted = files::abort_pending(&state.pool, file_id)
+    let reclaimed = files::reclaim_pending(&state.pool, file_id)
         .await
         .map_err(|e| xml_internal("reclaim", e))?;
-    if aborted && let Some(lease) = lease {
+    if reclaimed && let Some(lease) = lease {
         match &backend {
             StorageBackend::S3 { spec, .. } => {
                 if let Some(vendor) = &lease.upload_id {

@@ -9,7 +9,6 @@
 )]
 
 use filegate_db::files::{self, CreateOutcome, CreateSpec, CreatedFile};
-use filegate_db::placements;
 use filegate_db::registry::{self, StorageRow};
 use filegate_db::s3_registry as s3;
 
@@ -214,20 +213,13 @@ async fn key_mapping_dies_with_the_file_row(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let ids = files::expired_pending_ids(&pool, 10).await.unwrap();
-    let candidate = files::expired_pending_one(&pool, ids[0])
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(files::finalize_abort(&pool, &candidate).await.unwrap());
-    files::prune_terminal_leases(&pool, 0, 10).await.unwrap();
-    // 버려진 배치가 실물을 붙들고 있는 동안은 파일 행을 지울 수 없다 —
-    // 지우면 CASCADE 로 배치까지 사라져 실물이 유실된다 (ADR 007).
-    for (storage_id, object_key) in placements::collectible(&pool, 10).await.unwrap() {
-        placements::collect(&pool, &storage_id, &object_key)
+    let candidates = files::expired_pending(&pool, 10).await.unwrap();
+    assert!(
+        files::finalize_reclaim(&pool, &candidates[0])
             .await
-            .unwrap();
-    }
+            .unwrap()
+    );
+    files::prune_terminal_leases(&pool, 0, 10).await.unwrap();
     sqlx::query("UPDATE files SET created_at = now() - interval '91 days' WHERE id = $1")
         .bind(file.file_id)
         .execute(&pool)
