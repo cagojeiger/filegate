@@ -50,20 +50,7 @@ pub async fn run() -> anyhow::Result<ExitCode> {
     println!();
     println!("CLIENTS  {}", clients.len());
 
-    // 집행 큐 — queued/active는 정상 상태고, stuck은 자가치유가 안 되고
-    // 있다는 신호다 (종착 상태를 두지 않으므로 누적 시도 횟수가 유일한 신호).
-    let queue = filegate_db::tasks::depth(&pool, crate::worker::STUCK_ATTEMPTS).await?;
-    let stuck = if queue.stuck > 0 {
-        format!("   STUCK {}", queue.stuck)
-    } else {
-        String::new()
-    };
-    println!(
-        "TASKS    queued {} · active {}{}",
-        queue.queued, queue.active, stuck
-    );
-
-    let all_ok = checks.iter().all(|check| check.ok()) && queue.stuck == 0;
+    let all_ok = checks.iter().all(|check| check.ok());
     Ok(if all_ok {
         ExitCode::SUCCESS
     } else {

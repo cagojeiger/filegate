@@ -86,7 +86,7 @@ async fn open_records_pending_with_unknown_size(pool: PgPool) {
     assert_eq!(lease.lease_id, created.lease_id);
     // 관찰 확정 후보에서 빠진다 — 완료는 선언(Complete)이다 (part_size 표식).
     assert!(
-        files::observed_commit_ids(&pool, 10)
+        files::observed_commit_candidates(&pool, 10)
             .await
             .unwrap()
             .is_empty()
@@ -188,17 +188,20 @@ async fn abort_reclaims_pending_and_is_idempotent(pool: PgPool) {
         .await
         .unwrap();
     // Abort: 만료를 기다리지 않고 pending을 회수한다 (명시적 중단).
-    assert!(files::abort_pending(&pool, created.file_id).await.unwrap());
+    assert!(
+        files::reclaim_pending(&pool, created.file_id)
+            .await
+            .unwrap()
+    );
     let (state, _, _) = file_row(&pool, created.file_id).await;
-    assert_eq!(state, "aborted");
+    assert_eq!(state, "reclaimed");
     // location이 사라지고 write lease가 만료된다.
-    let location: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT file_id FROM placements WHERE file_id = $1 AND role = 'primary'",
-    )
-    .bind(created.file_id)
-    .fetch_optional(&pool)
-    .await
-    .unwrap();
+    let location: Option<uuid::Uuid> =
+        sqlx::query_scalar("SELECT file_id FROM locations WHERE file_id = $1")
+            .bind(created.file_id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
     assert!(location.is_none());
     let lease_state: String = sqlx::query_scalar("SELECT state FROM leases WHERE id = $1")
         .bind(created.lease_id)
@@ -207,7 +210,11 @@ async fn abort_reclaims_pending_and_is_idempotent(pool: PgPool) {
         .unwrap();
     assert_eq!(lease_state, "expired");
     // 멱등 — 두 번째 회수는 false (이미 회수됨).
-    assert!(!files::abort_pending(&pool, created.file_id).await.unwrap());
+    assert!(
+        !files::reclaim_pending(&pool, created.file_id)
+            .await
+            .unwrap()
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -218,7 +225,11 @@ async fn abort_after_complete_does_not_reclaim(pool: PgPool) {
     files::finalize_multipart_commit(&pool, created.file_id, 10, "e-1")
         .await
         .unwrap();
-    assert!(!files::abort_pending(&pool, created.file_id).await.unwrap());
+    assert!(
+        !files::reclaim_pending(&pool, created.file_id)
+            .await
+            .unwrap()
+    );
     let (state, _, _) = file_row(&pool, created.file_id).await;
     assert_eq!(state, "active");
 }
@@ -232,19 +243,16 @@ async fn expired_multipart_is_protected_and_reclaimable(pool: PgPool) {
     let created = open_multipart(&pool).await;
     let protected = files::active_multipart_lease_ids(&pool).await.unwrap();
     assert_eq!(protected, vec![created.lease_id]);
-    // 만료되면 reconciler의 만료 중단가 줍는다 (벤더 Abort 재료 포함).
+    // 만료되면 reconciler의 만료 회수가 줍는다 (벤더 Abort 재료 포함).
     sqlx::query("UPDATE leases SET expires_at = now() - interval '1 hour' WHERE file_id = $1")
         .bind(created.file_id)
         .execute(&pool)
         .await
         .unwrap();
-    let ids = files::expired_pending_ids(&pool, 10).await.unwrap();
-    assert_eq!(ids, vec![created.file_id]);
-    let candidate = files::expired_pending_one(&pool, ids[0])
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(candidate.write_lease_id, Some(created.lease_id));
+    let candidates = files::expired_pending(&pool, 10).await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].file_id, created.file_id);
+    assert_eq!(candidates[0].write_lease_id, Some(created.lease_id));
     // 만료 시각이 지나도 lease가 아직 issued면 보호는 유지된다 — 회수(전이)가
     // 조립 파일 sweep보다 먼저다 (그래야 재개 경합에서 손상본이 안 커밋된다).
     assert_eq!(
@@ -252,7 +260,11 @@ async fn expired_multipart_is_protected_and_reclaimable(pool: PgPool) {
         vec![created.lease_id]
     );
     // 회수가 lease를 expired로 닫은 뒤에야 보호 목록에서 빠진다.
-    assert!(files::finalize_abort(&pool, &candidate).await.unwrap());
+    assert!(
+        files::finalize_reclaim(&pool, &candidates[0])
+            .await
+            .unwrap()
+    );
     assert!(
         files::active_multipart_lease_ids(&pool)
             .await

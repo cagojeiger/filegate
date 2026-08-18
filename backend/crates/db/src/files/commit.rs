@@ -86,50 +86,42 @@ pub struct ObservedCommitCandidate {
     pub storage: StorageRow,
 }
 
-/// 도출과 집행이 같은 조건을 보게 하는 단일 정의.
-const OBSERVED_COMMIT_SOURCE: &str = "FROM files f \
-     JOIN placements l ON l.file_id = f.id AND l.role = 'primary' \
-     JOIN leases le ON le.file_id = f.id AND le.kind = 'write' \
-     WHERE f.state = 'pending' AND f.part_size IS NULL \
-     AND le.state = 'issued' AND le.expires_at > now()";
-
 /// multipart는 후보가 아니다 — 완료는 벤더도 선언(Complete)이다 (spec 02).
 /// 만료된 lease도 제외한다 — 그 파일은 회수의 몫이다.
-pub async fn observed_commit_ids(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar(&format!("SELECT f.id {OBSERVED_COMMIT_SOURCE} LIMIT $1"))
-        .bind(limit)
-        .fetch_all(pool)
-        .await
-}
-
-/// 관찰 후보 한 건을 집행 직전에 다시 읽는다 — 그 사이 확정·회수됐으면 None.
-pub async fn observed_commit_candidate(
+pub async fn observed_commit_candidates(
     pool: &PgPool,
-    file_id: Uuid,
-) -> Result<Option<ObservedCommitCandidate>, sqlx::Error> {
-    let row: Option<(Uuid, i64, Option<String>, String)> = sqlx::query_as(&format!(
+    limit: i64,
+) -> Result<Vec<ObservedCommitCandidate>, sqlx::Error> {
+    let rows: Vec<(Uuid, i64, Option<String>, String)> = sqlx::query_as(
         "SELECT f.id, f.declared_size, f.declared_md5, l.object_key \
-         {OBSERVED_COMMIT_SOURCE} AND f.id = $1"
-    ))
-    .bind(file_id)
-    .fetch_optional(pool)
+         FROM files f \
+         JOIN locations l ON l.file_id = f.id \
+         JOIN leases le ON le.file_id = f.id AND le.kind = 'write' \
+         WHERE f.state = 'pending' AND f.part_size IS NULL \
+         AND le.state = 'issued' AND le.expires_at > now() \
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
     .await?;
-    let Some((file_id, declared_size, declared_md5, object_key)) = row else {
-        return Ok(None);
-    };
-    // 위 조회 이후 location이 사라졌으면(경합 회수) 후보가 아니다.
-    let storage: Option<StorageRow> = sqlx::query_as(&format!(
-        "SELECT {STORAGE_COLUMNS} FROM storages s \
-         JOIN placements l ON l.storage_id = s.id WHERE l.file_id = $1 AND l.role = 'primary'"
-    ))
-    .bind(file_id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(storage.map(|storage| ObservedCommitCandidate {
-        file_id,
-        declared_size,
-        declared_md5,
-        object_key,
-        storage,
-    }))
+    let mut out = Vec::with_capacity(rows.len());
+    for (file_id, declared_size, declared_md5, object_key) in rows {
+        // 스냅샷 이후 location이 사라졌으면(경합 회수) 조용히 건너뛴다.
+        let storage: Option<StorageRow> = sqlx::query_as(&format!(
+            "SELECT {STORAGE_COLUMNS} FROM storages s \
+             JOIN locations l ON l.storage_id = s.id WHERE l.file_id = $1"
+        ))
+        .bind(file_id)
+        .fetch_optional(pool)
+        .await?;
+        let Some(storage) = storage else { continue };
+        out.push(ObservedCommitCandidate {
+            file_id,
+            declared_size,
+            declared_md5,
+            object_key,
+            storage,
+        });
+    }
+    Ok(out)
 }

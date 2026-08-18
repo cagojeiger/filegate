@@ -1,23 +1,19 @@
 //! filegate 진입점: env 설정 → PostgreSQL(+마이그레이션) → storage 재검증
-//! → HTTP + reconciler + 워커 → graceful shutdown.
+//! → HTTP + reconciler → graceful shutdown.
 
 mod admin;
 mod blobs;
 mod cors;
 mod error;
-mod gc;
 mod lease;
-mod policy;
 mod reconciler;
 mod routes;
 mod s3;
 mod spool;
 mod status;
 mod storage_access;
-mod task;
 mod v1;
 mod validation;
-mod worker;
 
 use std::io;
 use std::sync::Arc;
@@ -88,23 +84,11 @@ async fn serve() -> anyhow::Result<()> {
     let shutdown = CancellationToken::new();
     // 요청 경로와 reconciler가 같은 캐시를 공유한다 — 같은 storage의 웜 풀.
     let s3_clients = std::sync::Arc::new(filegate_infra::S3ClientCache::default());
-    // 판단자는 클러스터에 하나(락), 집행자는 파드마다 N개(락 없음) —
-    // 파드를 늘리면 집행 용량만 늘어난다.
-    let reconciler = reconciler::spawn(
-        pool.clone(),
-        std::time::Duration::from_secs(config.server.reconciler_interval_secs),
-        shutdown.clone(),
-    );
-    // 요청 경로의 중계 업로드와 워커의 이동 복사가 같은 로컬 디스크를 쓴다 —
-    // 예산이 하나여야 한 쪽이 볼륨을 채워 다른 쪽을 무너뜨리지 않는다.
-    let spool_slots =
-        std::sync::Arc::new(tokio::sync::Semaphore::new(spool::SPOOL_CONCURRENCY_LIMIT));
-    let workers = worker::spawn(
+    let worker = reconciler::spawn(
         pool.clone(),
         crypto.clone(),
         s3_clients.clone(),
-        spool_slots.clone(),
-        config.server.worker_concurrency,
+        std::time::Duration::from_secs(config.server.reconciler_interval_secs),
         shutdown.clone(),
     );
 
@@ -119,7 +103,9 @@ async fn serve() -> anyhow::Result<()> {
         part_promotions: std::sync::Arc::new(tokio::sync::Semaphore::new(
             blobs::PART_PROMOTION_LIMIT,
         )),
-        spool_slots,
+        spool_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            spool::SPOOL_CONCURRENCY_LIMIT,
+        )),
     };
 
     let http_shutdown = shutdown.clone().cancelled_owned();
@@ -146,15 +132,8 @@ async fn serve() -> anyhow::Result<()> {
         None => server.await,
     };
 
-    if let Err(error) = reconciler.await {
+    if let Err(error) = worker.await {
         tracing::warn!(event = "reconciler.join_failed", %error);
-    }
-    // 워커는 집던 작업(쪼개지지 않는 사슬)을 끝내고 나온다 — 강제로 끊으면
-    // 전이와 실물 조작이 갈라진다. 못 끝낸 것은 claim 만료가 큐로 되돌린다.
-    for handle in workers {
-        if let Err(error) = handle.await {
-            tracing::warn!(event = "worker.join_failed", %error);
-        }
     }
     pool.close().await;
     info!(event = "shutdown.complete");

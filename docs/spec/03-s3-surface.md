@@ -43,7 +43,7 @@ SDK 정상 경로에 나오지 않는다.
   id를 버킷 이름으로 쓴다 (ADR 006).
 - **key = 논리키** — 서비스 소유 이름 (ADR 003). 퍼센트 인코딩·유니코드를
   수용하고 디코딩된 형태로 보관한다. 같은 키 재PUT은 덮어쓰기다:
-  매핑이 새 file을 가리키고 옛 file은 소프트 삭제로 넘어간다 — S3의
+  매핑이 새 file을 가리키고 옛 file은 detach로 넘어간다 — S3의
   덮어쓰기 시맨틱을 상태 기계로 번역한 것.
 
 ### 인증 — SigV4
@@ -121,7 +121,7 @@ create가 `declared_size`를 받아 part 기하(개수·명목 크기·offset)�
   확정(no-commit)과 달리 S3 프로토콜이 명시적 완료를 요구하며, spec 00이
   multipart를 관찰-확정에서 이미 제외한다(00:54). filegate 전용 단계가 아니라
   SDK가 원래 부르는 호출이다. 응답 ETag는 합성형(`"<hex>-<part수>"`), 매핑·
-  소프트 삭제는 PutObject와 같다.
+  detach는 PutObject와 같다.
 - **AbortMultipartUpload** `?uploadId=U`: 벤더 세션 중단(s3)·임시 정리(fs) 후
   pending을 회수한다 — 회수 확장(spec 02)과 같은 경로. 멱등.
 
