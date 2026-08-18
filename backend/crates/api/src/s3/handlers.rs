@@ -245,6 +245,67 @@ enum RangeReq {
     Unsatisfiable,
 }
 
+#[derive(Default)]
+struct ResponseOverrides {
+    cache_control: Option<HeaderValue>,
+    content_disposition: Option<HeaderValue>,
+    content_type: Option<HeaderValue>,
+}
+
+#[derive(Debug)]
+struct InvalidResponseOverride;
+
+impl ResponseOverrides {
+    fn from_query(query: &str) -> Result<Self, InvalidResponseOverride> {
+        Ok(Self {
+            cache_control: response_override(query, "response-cache-control")?,
+            content_disposition: response_override(query, "response-content-disposition")?,
+            content_type: response_override(query, "response-content-type")?,
+        })
+    }
+
+    fn apply(self, headers: &mut HeaderMap) {
+        if let Some(value) = self.cache_control {
+            headers.insert(header::CACHE_CONTROL, value);
+        }
+        if let Some(value) = self.content_disposition {
+            headers.insert(header::CONTENT_DISPOSITION, value);
+        }
+        if let Some(value) = self.content_type {
+            headers.insert(header::CONTENT_TYPE, value);
+        }
+    }
+}
+
+/// S3 object response overrides are signed query parameters. Authentication
+/// has already validated the raw query before this decoded value becomes a
+/// response header. HeaderValue rejects controls such as percent-encoded CRLF.
+fn response_override(
+    query: &str,
+    name: &str,
+) -> Result<Option<HeaderValue>, InvalidResponseOverride> {
+    let Some(raw) = query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| *key == name)
+        .map(|(_, value)| value)
+    else {
+        return Ok(None);
+    };
+    let decoded = percent_encoding::percent_decode_str(raw).collect::<Vec<_>>();
+    HeaderValue::from_bytes(&decoded)
+        .map(Some)
+        .map_err(|_| InvalidResponseOverride)
+}
+
+fn invalid_response_override() -> Response {
+    xml_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidArgument",
+        "invalid object response header override",
+    )
+}
+
 fn parse_range(headers: &HeaderMap, total: i64) -> RangeReq {
     let Some(raw) = header_str(headers, "range") else {
         return RangeReq::Full;
@@ -289,7 +350,10 @@ pub(super) async fn get_object(
     bucket: &str,
     key: &str,
     headers: &HeaderMap,
+    query: &str,
 ) -> S3Result {
+    let response_overrides =
+        ResponseOverrides::from_query(query).map_err(|_| invalid_response_override())?;
     let (file_id, file) = resolve(state, client_id, key).await?;
     let backend =
         backend_from_row(&state.crypto, &file.storage).map_err(|e| xml_internal("backend", e))?;
@@ -356,13 +420,22 @@ pub(super) async fn get_object(
         }
     }
     object_headers(response.headers_mut(), &file, len);
+    response_overrides.apply(response.headers_mut());
     Ok(response)
 }
 
-pub(super) async fn head_object(state: &AppState, client_id: &str, key: &str) -> S3Result {
+pub(super) async fn head_object(
+    state: &AppState,
+    client_id: &str,
+    key: &str,
+    query: &str,
+) -> S3Result {
+    let response_overrides =
+        ResponseOverrides::from_query(query).map_err(|_| invalid_response_override())?;
     let (_, file) = resolve(state, client_id, key).await?;
     let mut response = StatusCode::OK.into_response();
     object_headers(response.headers_mut(), &file, file.declared_size);
+    response_overrides.apply(response.headers_mut());
     Ok(response)
 }
 
@@ -471,5 +544,47 @@ mod tests {
             parse_range(&with_range("bytes=0-"), 0),
             RangeReq::Unsatisfiable
         ));
+    }
+
+    #[test]
+    fn response_overrides_decode_rfc5987_and_replace_object_headers() {
+        let query = "response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27meeting%2520notes.webm\
+                     &response-content-type=audio%2Fwebm%3B%20codecs%3Dopus\
+                     &response-cache-control=private%2C%20no-store";
+        let overrides = ResponseOverrides::from_query(query).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+
+        overrides.apply(&mut headers);
+
+        assert_eq!(
+            headers.get(header::CONTENT_DISPOSITION).unwrap(),
+            "attachment; filename*=UTF-8''meeting%20notes.webm"
+        );
+        assert_eq!(
+            headers.get(header::CONTENT_TYPE).unwrap(),
+            "audio/webm; codecs=opus"
+        );
+        assert_eq!(
+            headers.get(header::CACHE_CONTROL).unwrap(),
+            "private, no-store"
+        );
+    }
+
+    #[test]
+    fn response_override_rejects_percent_encoded_crlf() {
+        assert!(
+            ResponseOverrides::from_query(
+                "response-content-disposition=attachment%0D%0AX-Injected%3A%20yes",
+            )
+            .is_err()
+        );
+        assert_eq!(
+            invalid_response_override().status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 }
