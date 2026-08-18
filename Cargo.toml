@@ -52,6 +52,7 @@ futures-util = { version = "0.3", default-features = false }
 subtle = "2"
 hex = "0.4"
 dotenvy = "0.15"
+percent-encoding = "2"
 
 [workspace.lints.clippy]
 await_holding_lock = "warn"

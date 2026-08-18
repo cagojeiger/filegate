@@ -901,6 +901,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "md-5 0.10.6",
+ "percent-encoding",
  "serde",
  "serde_json",
  "sha2 0.10.9",
