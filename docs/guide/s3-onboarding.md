@@ -46,11 +46,15 @@ key는 서비스가 정한다 — 유니코드·공백·특수문자 그대로 �
 - **multipart 지원** — `upload_file`의 임계 초과 자동 전환(Create/UploadPart/
   Complete/Abort)이 그대로 동작한다. part 크기·개수는 SDK가 정하며 filegate가
   실측으로 검증한다 — 큰 파일 업로드·다운로드(`upload_file`/`download_file`)를
-  기본값으로 쓰면 된다.
+  기본값으로 쓰면 된다. Complete/Abort 중 외부 저장소나 DB 한쪽이 일시 실패해도
+  세션 복구 재료를 보존하고 reconciler가 확정·정리를 재시도한다.
 - **ListObjects는 없다** — 어떤 key를 썼는지는 서비스 DB가 안다. 목록이
   필요한 설계라면 네이티브 연동이 맞다.
 
 ## 확인
 
-[scripts/s3-capture.py](../../scripts/s3-capture.py)를 endpoint만 바꿔
-실행하면 전체 수명(업로드→확인→다운로드→Range→삭제→404)이 검증된다.
+[scripts/s3-capture.py](../../scripts/s3-capture.py)에 대상의 `S3_ENDPOINT`,
+`S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`을 넣어 실행하면 단일 객체
+수명(업로드→확인→다운로드→Range→삭제→404), 자동 multipart
+upload/download, key-bound Abort가 함께 검증된다. filegate 자체 검증에는
+`S3_EXPECT_WRONG_KEY_404=1`을 더해 wrong-key Abort의 404 계약도 강제한다.

@@ -12,6 +12,7 @@
 - id는 운영자가 정하는 안정 슬러그다 (`oci-std`, `notegate`). 생성 후 불변 — Terraform·API 모두 이 id로 참조한다.
 - storage는 내부 접근 주소(`endpoint`)와 전송 주체가 쓰는 공개 주소(`public_endpoint`)를 구분한다. 같으면 같은 값을 둔다.
 - 검증은 쓰기 시점이다: 참조 무결성은 FK가, storage 등록은 제출된 자격증명으로 저장 공간 접근을 즉석 확인해 지킨다. 실패한 등록은 거부된다.
+- S3 storage 자격증명은 객체 읽기·쓰기·삭제와 multipart 생성·part 조회/쓰기·완료·중단뿐 아니라 **진행 중 multipart 목록 조회** 권한도 가져야 한다. vendor Create 응답이 불명확하거나 upload_id 기록과 즉시 Abort가 모두 실패하면 reconciler가 파일별 고유 object_key로 열린 세션을 재발견해 중단하는 복구 경로에 쓴다.
 - 삭제는 참조부터다: client가 참조하는 storage는 삭제가 거부된다 (FK). Terraform destroy는 의존 역순이라 이 순서를 자동으로 지킨다.
 - 부팅은 등록된 storage들의 접근을 재검증한다. 실패하면 부팅 중단 (ADR 001).
 

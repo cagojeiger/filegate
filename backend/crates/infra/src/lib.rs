@@ -9,6 +9,7 @@ mod s3;
 
 pub use s3::{
     Address, S3ClientCache, S3Storage, S3StorageSpec, abort_multipart as s3_abort_multipart,
+    abort_multipart_by_key as s3_abort_multipart_by_key,
     complete_multipart as s3_complete_multipart, connect as s3_connect,
     create_multipart as s3_create_multipart, delete_object as s3_delete_object,
     head_object as s3_head_object, list_parts as s3_list_parts, open_read as s3_open_read,

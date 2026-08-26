@@ -8,22 +8,23 @@
 //!   3. read lease GC / 5. 종료 lease GC / 6. 이력 보존 정리 / 8. 종착 파일 정리
 //!   7. 일별 사용량 스냅샷 (전량 집계) / 4. fs 임시 파일 sweep
 //!
-//! 순서가 잡마다 다르다: 회수는 전이(pending→reclaimed)가 먼저다 —
-//! 물리 삭제를 먼저 하면 늦은 commit이 전이 경합을 이겨 "실물 없는
-//! active 파일"이 생길 수 있다. purge는 물리 삭제가 먼저다 — deleted는
-//! 다른 상태로 되돌아갈 수 없어 안전하고, 삭제 확인 후에만 점유를
-//! 해제해야 한다. 어느 쪽이든 실패하면 다음 tick이 다시 줍는다 (멱등).
+//! 순서가 잡마다 다르다. generic 회수는 전이(pending→reclaimed)가 먼저고,
+//! S3 호환 회수는 aborting 선점 뒤 session/location을 보존한 채 물리를 먼저
+//! 지워 실패를 재시도한다. purge도 물리 삭제 뒤 점유를 해제한다. 재시도 가능한
+//! 경로의 물리 작업은 멱등이다.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use filegate_core::Crypto;
 use filegate_db::files::{self, SweepCandidate};
-use filegate_db::{PgPool, registry, usage};
-use filegate_infra::{Address, S3ClientCache, fs as fs_backend, s3_delete_object, s3_head_object};
+use filegate_db::{PgPool, registry, s3_registry as s3reg, usage};
+use filegate_infra::{Address, S3ClientCache, fs as fs_backend, s3_head_object};
 use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
 use tokio_util::sync::CancellationToken;
+
+use crate::lease::WRITE_LEASE_TTL;
 
 /// 한 tick에 잡별로 처리하는 최대 건수 (유계 배치, docs/stack).
 const BATCH_LIMIT: i64 = 20;
@@ -115,6 +116,63 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
         }
         Err(error) => {
             tracing::error!(event = "reconciler.scan_failed", job = "observe_commit", %error)
+        }
+    }
+
+    // S3 Complete는 외부 저장소와 DB 사이를 completing 행으로 잇는다. 요청
+    // 소유자의 갱신 lease가 지난 뒤 실물을 관찰해 성공은 finalize하고,
+    // 실물이 없던 multipart는 재시도 가능하게 open으로 되돌린다.
+    recover_s3_completions(pool, crypto, s3_clients).await;
+
+    // S3 open 만료는 generic reclaim에서 제외한다. 먼저 aborting을 선점하고
+    // session/location을 보존해야 외부 Abort/Delete 실패를 다음 tick에 재시도한다.
+    match s3reg::expired_open_uploads(pool, BATCH_LIMIT).await {
+        Ok(files) => {
+            for file_id in files {
+                match s3reg::claim_expired_abort(pool, file_id).await {
+                    Ok(true) => tracing::debug!(event = "s3.upload_expired", file = %file_id),
+                    Ok(false) => {}
+                    Err(error) => tracing::error!(
+                        event = "reconciler.reclaim_failed",
+                        file = %file_id,
+                        %error,
+                    ),
+                }
+            }
+        }
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", job = "s3_expire", %error)
+        }
+    }
+
+    // 명시적 Abort·만료·완료 복구가 만든 aborting을 멱등 정리한다. 물리
+    // 성공 뒤에만 session/location을 제거하므로 실패는 같은 후보로 남는다.
+    match s3reg::cleanup_candidates(pool, BATCH_LIMIT).await {
+        Ok(candidates) => {
+            for candidate in candidates {
+                match sweep_object(pool, crypto, s3_clients, &candidate).await {
+                    Ok(()) => match s3reg::finalize_abort(pool, candidate.file_id).await {
+                        Ok(true) => tracing::info!(
+                            event = "s3.upload_aborted",
+                            file = %candidate.file_id,
+                        ),
+                        Ok(false) => {}
+                        Err(error) => tracing::error!(
+                            event = "reconciler.reclaim_failed",
+                            file = %candidate.file_id,
+                            %error,
+                        ),
+                    },
+                    Err(error) => tracing::warn!(
+                        event = "reconciler.sweep_failed",
+                        file = %candidate.file_id,
+                        %error,
+                    ),
+                }
+            }
+        }
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", job = "s3_cleanup", %error)
         }
     }
 
@@ -330,6 +388,119 @@ async fn observe_commit(
     Ok(files::finalize_commit(pool, candidate.file_id, &etag).await?)
 }
 
+async fn recover_s3_completions(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
+    let candidates = match s3reg::completion_candidates(pool, BATCH_LIMIT).await {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::error!(event = "reconciler.scan_failed", job = "s3_complete", %error);
+            return;
+        }
+    };
+    for candidate in candidates {
+        let observation = match observe_s3_completion(pool, crypto, s3_clients, &candidate).await {
+            Ok(observation) => observation,
+            Err(error) => {
+                tracing::warn!(
+                    event = "reconciler.observe_failed",
+                    file = %candidate.file_id,
+                    %error,
+                );
+                continue;
+            }
+        };
+        match observation {
+            Some(observed)
+                if observed.size == candidate.expected_size
+                    && observed
+                        .etag
+                        .as_deref()
+                        .is_none_or(|etag| etag.eq_ignore_ascii_case(&candidate.expected_etag)) =>
+            {
+                let finalized = if candidate.multipart {
+                    s3reg::finalize_multipart_upload(
+                        pool,
+                        &candidate.client_id,
+                        &candidate.key,
+                        candidate.file_id,
+                    )
+                    .await
+                } else {
+                    s3reg::finalize_single_upload(
+                        pool,
+                        &candidate.client_id,
+                        &candidate.key,
+                        candidate.file_id,
+                    )
+                    .await
+                };
+                match finalized {
+                    Ok(s3reg::FinalizeOutcome::Finalized { .. }) => tracing::info!(
+                        event = "s3.upload_recovered",
+                        file = %candidate.file_id,
+                    ),
+                    Ok(s3reg::FinalizeOutcome::NotPending) => {}
+                    Err(error) => tracing::error!(
+                        event = "reconciler.commit_failed",
+                        file = %candidate.file_id,
+                        %error,
+                    ),
+                }
+            }
+            None if candidate.multipart => {
+                match s3reg::reopen_completion(
+                    pool,
+                    candidate.file_id,
+                    WRITE_LEASE_TTL.as_secs() as i64,
+                )
+                .await
+                {
+                    Ok(true) => tracing::info!(
+                        event = "s3.completion_reopened",
+                        file = %candidate.file_id,
+                    ),
+                    Ok(false) => {}
+                    Err(error) => tracing::error!(
+                        event = "reconciler.commit_failed",
+                        file = %candidate.file_id,
+                        %error,
+                    ),
+                }
+            }
+            _ => match s3reg::mark_completion_aborting(pool, candidate.file_id).await {
+                Ok(true) => tracing::warn!(
+                    event = "s3.completion_invalid",
+                    file = %candidate.file_id,
+                ),
+                Ok(false) => {}
+                Err(error) => tracing::error!(
+                    event = "reconciler.reclaim_failed",
+                    file = %candidate.file_id,
+                    %error,
+                ),
+            },
+        }
+    }
+}
+
+async fn observe_s3_completion(
+    pool: &PgPool,
+    crypto: &Crypto,
+    s3_clients: &S3ClientCache,
+    candidate: &s3reg::CompletionCandidate,
+) -> anyhow::Result<Option<crate::storage_access::ObjectObservation>> {
+    let row = registry::get_storage(pool, &candidate.storage_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("storage '{}' not registered", candidate.storage_id))?;
+    let backend = crate::storage_access::backend_from_row(crypto, &row)?;
+    crate::storage_access::observe_backend_object(
+        s3_clients,
+        &backend,
+        &candidate.storage_id,
+        &candidate.object_key,
+    )
+    .await
+}
+
 /// 실물 제거 — 등록부에서 백엔드를 복원해 내부 경로로 지운다.
 /// s3 DeleteObject·fs remove 모두 없는 대상에 성공하므로 멱등이다.
 /// multipart 회수 재료가 있으면 함께 치운다 (spec 02): s3는 벤더 세션
@@ -344,21 +515,15 @@ async fn sweep_object(
     let row = registry::get_storage(pool, &candidate.storage_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("storage '{}' not registered", candidate.storage_id))?;
-    match crate::storage_access::backend_from_row(crypto, &row)? {
-        crate::storage_access::StorageBackend::S3 { spec, .. } => {
-            let storage = s3_clients.get(&candidate.storage_id, &spec, Address::Internal);
-            if let Some(upload_id) = &candidate.upload_id {
-                filegate_infra::s3_abort_multipart(&storage, &candidate.object_key, upload_id)
-                    .await?;
-            }
-            s3_delete_object(&storage, &candidate.object_key).await
-        }
-        crate::storage_access::StorageBackend::Fs { root } => {
-            if let Some(lease_id) = &candidate.write_lease_id {
-                let temp = fs_backend::multipart_temp(&root, &lease_id.to_string());
-                fs_backend::abort_write(&temp).await;
-            }
-            fs_backend::delete(&root, &candidate.object_key).await
-        }
-    }
+    let backend = crate::storage_access::backend_from_row(crypto, &row)?;
+    crate::storage_access::cleanup_backend_upload(
+        s3_clients,
+        &backend,
+        &candidate.storage_id,
+        &candidate.object_key,
+        candidate.upload_id.as_deref(),
+        candidate.write_lease_id,
+        candidate.multipart,
+    )
+    .await
 }

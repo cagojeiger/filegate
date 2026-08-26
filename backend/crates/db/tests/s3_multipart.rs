@@ -15,7 +15,10 @@
 
 use filegate_db::files::{self, CreateOutcome, CreateSpec, CreatedFile};
 use filegate_db::registry::{self, StorageRow};
+use filegate_db::s3_registry as s3;
 use sqlx::PgPool;
+
+const KEY: &str = "dir/large.bin";
 
 // ── 픽스처 ──────────────────────────────────────────────────
 
@@ -54,6 +57,21 @@ async fn open_multipart(pool: &PgPool) -> CreatedFile {
         // part_size는 크기-비선언이라 실제 기하가 아니라 multipart 표식이다.
         part_size: Some(64 * 1024 * 1024),
     };
+    match s3::create_upload(pool, spec, KEY).await.unwrap() {
+        CreateOutcome::Created(created) => *created,
+        CreateOutcome::NoClient => panic!("expected Created, got NoClient"),
+    }
+}
+
+async fn open_native_multipart(pool: &PgPool) -> CreatedFile {
+    let spec = CreateSpec {
+        client_id: "c",
+        declared_size: 128 * 1024 * 1024,
+        content_type: None,
+        declared_md5: None,
+        lease_ttl_secs: 900,
+        part_size: Some(64 * 1024 * 1024),
+    };
     match files::create(pool, spec).await.unwrap() {
         CreateOutcome::Created(created) => *created,
         CreateOutcome::NoClient => panic!("expected Created, got NoClient"),
@@ -84,12 +102,46 @@ async fn open_records_pending_with_unknown_size(pool: PgPool) {
         .unwrap()
         .expect("write lease exists");
     assert_eq!(lease.lease_id, created.lease_id);
+    assert!(
+        s3::upload_matches(&pool, "c", KEY, created.file_id, true)
+            .await
+            .unwrap()
+    );
     // 관찰 확정 후보에서 빠진다 — 완료는 선언(Complete)이다 (part_size 표식).
     assert!(
         files::observed_commit_candidates(&pool, 10)
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn upload_id_is_bound_to_client_key_and_s3_mode(pool: PgPool) {
+    wire(&pool).await;
+    let created = open_multipart(&pool).await;
+
+    assert!(
+        !s3::upload_matches(&pool, "c", "dir/other.bin", created.file_id, true)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !s3::upload_matches(&pool, "other", KEY, created.file_id, true)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !s3::upload_matches(&pool, "c", KEY, created.file_id, false)
+            .await
+            .unwrap()
+    );
+
+    let native = open_native_multipart(&pool).await;
+    assert!(
+        !s3::upload_matches(&pool, "c", KEY, native.file_id, true)
+            .await
+            .unwrap()
     );
 }
 
@@ -154,10 +206,34 @@ async fn complete_finalizes_with_summed_size_and_composite_etag(pool: PgPool) {
     // Complete: 실측 합(80)과 합성 ETag로 pending→active. create의 sentinel
     // 0이 실측 합으로 갱신된다.
     let total = 80;
+    // generic multipart 확정은 S3 세션을 건드리지 못한다.
     assert!(
-        files::finalize_multipart_commit(&pool, created.file_id, total, "hexhex-2")
+        !files::finalize_multipart_commit(&pool, created.file_id, total, "hexhex-2")
             .await
             .unwrap()
+    );
+    assert_eq!(
+        s3::claim_completion(
+            &pool,
+            s3::CompletionSpec {
+                client_id: "c",
+                key: KEY,
+                file_id: created.file_id,
+                multipart: true,
+                expected_size: total,
+                expected_etag: "hexhex-2",
+                lease_ttl_secs: 900,
+            },
+        )
+        .await
+        .unwrap(),
+        s3::CompletionClaim::Claimed
+    );
+    assert_eq!(
+        s3::finalize_multipart_upload(&pool, "c", KEY, created.file_id)
+            .await
+            .unwrap(),
+        s3::FinalizeOutcome::Finalized { displaced: None }
     );
     let (state, size, etag) = file_row(&pool, created.file_id).await;
     assert_eq!(state, "active");
@@ -171,31 +247,388 @@ async fn complete_finalizes_with_summed_size_and_composite_etag(pool: PgPool) {
         .unwrap();
     assert_eq!(lease_state, "committed");
     // 이중 Complete는 전이 경합의 패자 — false (멱등 응답의 재료).
+    assert_eq!(
+        s3::finalize_multipart_upload(&pool, "c", KEY, created.file_id)
+            .await
+            .unwrap(),
+        s3::FinalizeOutcome::NotPending
+    );
+    assert_eq!(
+        s3::get_key(&pool, "c", KEY).await.unwrap(),
+        Some(created.file_id)
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn completing_survives_finalize_failure_and_reopens_when_object_is_missing(pool: PgPool) {
+    wire(&pool).await;
+    let created = open_multipart(&pool).await;
+    assert_eq!(
+        s3::claim_completion(
+            &pool,
+            s3::CompletionSpec {
+                client_id: "c",
+                key: KEY,
+                file_id: created.file_id,
+                multipart: true,
+                expected_size: 80,
+                expected_etag: "hexhex-2",
+                lease_ttl_secs: 900,
+            },
+        )
+        .await
+        .unwrap(),
+        s3::CompletionClaim::Claimed
+    );
+
+    // 외부 Complete 뒤 DB finalize가 실패한 경계를 모사해 finalize를 생략한다.
+    // open 작업은 막히지만 같은 예상값의 Complete 재시도는 복구 중임을 안다.
     assert!(
-        !files::finalize_multipart_commit(&pool, created.file_id, total, "hexhex-2")
+        !s3::upload_matches(&pool, "c", KEY, created.file_id, true)
             .await
             .unwrap()
+    );
+    assert!(
+        s3::completion_matches(&pool, "c", KEY, created.file_id, true)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        s3::claim_completion(
+            &pool,
+            s3::CompletionSpec {
+                client_id: "c",
+                key: KEY,
+                file_id: created.file_id,
+                multipart: true,
+                expected_size: 80,
+                expected_etag: "hexhex-2",
+                lease_ttl_secs: 900,
+            },
+        )
+        .await
+        .unwrap(),
+        s3::CompletionClaim::Resuming
+    );
+    assert_eq!(
+        s3::claim_abort(&pool, "c", KEY, created.file_id)
+            .await
+            .unwrap(),
+        s3::AbortClaim::Unavailable
+    );
+
+    sqlx::query("UPDATE leases SET expires_at = now() - interval '1 hour' WHERE file_id = $1")
+        .bind(created.file_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let candidates = s3::completion_candidates(&pool, 10).await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].file_id, created.file_id);
+    assert_eq!(candidates[0].expected_size, 80);
+    assert_eq!(candidates[0].expected_etag, "hexhex-2");
+
+    // reconciler가 실물이 없음을 관찰한 multipart는 open으로 되돌린다.
+    assert!(
+        s3::reopen_completion(&pool, created.file_id, 900)
+            .await
+            .unwrap()
+    );
+    assert!(
+        s3::upload_matches(&pool, "c", KEY, created.file_id, true)
+            .await
+            .unwrap()
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn renewed_completion_cannot_be_recovered_from_a_stale_candidate(pool: PgPool) {
+    wire(&pool).await;
+    let created = open_multipart(&pool).await;
+    assert_eq!(
+        s3::claim_completion(
+            &pool,
+            s3::CompletionSpec {
+                client_id: "c",
+                key: KEY,
+                file_id: created.file_id,
+                multipart: true,
+                expected_size: 80,
+                expected_etag: "hexhex-2",
+                lease_ttl_secs: 900,
+            },
+        )
+        .await
+        .unwrap(),
+        s3::CompletionClaim::Claimed
+    );
+    sqlx::query("UPDATE leases SET expires_at = now() - interval '1 hour' WHERE file_id = $1")
+        .bind(created.file_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(s3::completion_candidates(&pool, 10).await.unwrap().len(), 1);
+
+    // 후보 조회 뒤 소유자가 heartbeat를 보내면 stale reconciler 전이는 져야 한다.
+    assert!(
+        s3::renew_completion_lease(&pool, created.file_id, 900)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !s3::reopen_completion(&pool, created.file_id, 900)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !s3::mark_completion_aborting(&pool, created.file_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        s3::completion_matches(&pool, "c", KEY, created.file_id, true)
+            .await
+            .unwrap()
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn heartbeat_and_expired_recovery_have_exactly_one_winner(pool: PgPool) {
+    wire(&pool).await;
+    let created = open_multipart(&pool).await;
+    assert_eq!(
+        s3::claim_completion(
+            &pool,
+            s3::CompletionSpec {
+                client_id: "c",
+                key: KEY,
+                file_id: created.file_id,
+                multipart: true,
+                expected_size: 80,
+                expected_etag: "hexhex-2",
+                lease_ttl_secs: 900,
+            },
+        )
+        .await
+        .unwrap(),
+        s3::CompletionClaim::Claimed
+    );
+    sqlx::query("UPDATE leases SET expires_at = now() - interval '1 hour' WHERE file_id = $1")
+        .bind(created.file_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (heartbeat, recovery) = tokio::join!(
+        s3::renew_completion_lease(&pool, created.file_id, 900),
+        s3::reopen_completion(&pool, created.file_id, 900),
+    );
+    let heartbeat_won = heartbeat.unwrap();
+    let recovery_won = recovery.unwrap();
+    assert_ne!(heartbeat_won, recovery_won);
+
+    let state: String = sqlx::query_scalar("SELECT state FROM s3_uploads WHERE file_id = $1")
+        .bind(created.file_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, if heartbeat_won { "completing" } else { "open" });
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn claimed_upload_part_fences_complete_until_its_measurement_is_done(pool: PgPool) {
+    wire(&pool).await;
+    let created = open_multipart(&pool).await;
+    files::record_part_done(&pool, created.lease_id, 1, 50, "old-etag")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        s3::claim_upload_part(&pool, "c", KEY, created.file_id, created.lease_id, 1, 900,)
+            .await
+            .unwrap(),
+        s3::UploadPartClaim::Claimed
+    );
+    assert_eq!(
+        s3::claim_upload_part(&pool, "c", KEY, created.file_id, created.lease_id, 1, 900,)
+            .await
+            .unwrap(),
+        s3::UploadPartClaim::Busy
+    );
+    assert_eq!(
+        s3::claim_completion(
+            &pool,
+            s3::CompletionSpec {
+                client_id: "c",
+                key: KEY,
+                file_id: created.file_id,
+                multipart: true,
+                expected_size: 50,
+                expected_etag: "old-etag-1",
+                lease_ttl_secs: 900,
+            },
+        )
+        .await
+        .unwrap(),
+        s3::CompletionClaim::Busy
+    );
+
+    // 실패 시도는 이전 done 값을 되살려 순차 재업로드를 허용한다.
+    s3::cancel_upload_part(&pool, created.file_id, created.lease_id, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        files::done_parts(&pool, created.lease_id).await.unwrap(),
+        vec![(1, 50, "old-etag".to_owned())]
+    );
+
+    assert_eq!(
+        s3::claim_upload_part(&pool, "c", KEY, created.file_id, created.lease_id, 1, 900,)
+            .await
+            .unwrap(),
+        s3::UploadPartClaim::Claimed
+    );
+    assert!(
+        s3::finish_upload_part(&pool, created.file_id, created.lease_id, 1, 60, "new-etag",)
+            .await
+            .unwrap()
+    );
+    let mut guard = match s3::begin_multipart_completion(&pool, "c", KEY, created.file_id)
+        .await
+        .unwrap()
+    {
+        s3::MultipartCompletionStart::Ready(guard) => guard,
+        _ => panic!("finished part must leave completion ready"),
+    };
+    assert_eq!(
+        guard.done_parts().await.unwrap(),
+        vec![(1, 60, "new-etag".to_owned())]
+    );
+    assert_eq!(
+        guard.claim(60, "new-etag-1", 900).await.unwrap(),
+        s3::CompletionClaim::Claimed
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn upload_part_and_complete_claims_have_exactly_one_winner(pool: PgPool) {
+    wire(&pool).await;
+    let created = open_multipart(&pool).await;
+    let (part, complete) = tokio::join!(
+        s3::claim_upload_part(&pool, "c", KEY, created.file_id, created.lease_id, 1, 900,),
+        s3::claim_completion(
+            &pool,
+            s3::CompletionSpec {
+                client_id: "c",
+                key: KEY,
+                file_id: created.file_id,
+                multipart: true,
+                expected_size: 0,
+                expected_etag: "empty-0",
+                lease_ttl_secs: 900,
+            },
+        ),
+    );
+    match (part.unwrap(), complete.unwrap()) {
+        (s3::UploadPartClaim::Claimed, s3::CompletionClaim::Busy)
+        | (s3::UploadPartClaim::Unavailable, s3::CompletionClaim::Claimed) => {}
+        outcome => panic!("part and complete were not fenced: {outcome:?}"),
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn upload_part_and_abort_claims_have_exactly_one_winner(pool: PgPool) {
+    wire(&pool).await;
+    let created = open_multipart(&pool).await;
+    let (part, abort) = tokio::join!(
+        s3::claim_upload_part(&pool, "c", KEY, created.file_id, created.lease_id, 1, 900,),
+        s3::claim_abort(&pool, "c", KEY, created.file_id),
+    );
+    match (part.unwrap(), abort.unwrap()) {
+        (s3::UploadPartClaim::Claimed, s3::AbortClaim::Busy)
+        | (s3::UploadPartClaim::Unavailable, s3::AbortClaim::Claimed) => {}
+        outcome => panic!("part and abort were not fenced: {outcome:?}"),
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn complete_and_abort_claims_have_exactly_one_winner(pool: PgPool) {
+    wire(&pool).await;
+    let created = open_multipart(&pool).await;
+    let (complete, abort) = tokio::join!(
+        s3::claim_completion(
+            &pool,
+            s3::CompletionSpec {
+                client_id: "c",
+                key: KEY,
+                file_id: created.file_id,
+                multipart: true,
+                expected_size: 10,
+                expected_etag: "e-1",
+                lease_ttl_secs: 900,
+            },
+        ),
+        s3::claim_abort(&pool, "c", KEY, created.file_id),
+    );
+    let complete_won = complete.unwrap() == s3::CompletionClaim::Claimed;
+    let abort_won = abort.unwrap() == s3::AbortClaim::Claimed;
+    assert_ne!(complete_won, abort_won);
+
+    let state: String = sqlx::query_scalar("SELECT state FROM s3_uploads WHERE file_id = $1")
+        .bind(created.file_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        state,
+        if complete_won {
+            "completing"
+        } else {
+            "aborting"
+        }
     );
 }
 
 // ── abort → reclaim ────────────────────────────────────────
 
 #[sqlx::test(migrations = "./migrations")]
-async fn abort_reclaims_pending_and_is_idempotent(pool: PgPool) {
+async fn abort_keeps_recovery_material_until_cleanup_is_confirmed(pool: PgPool) {
     wire(&pool).await;
     let created = open_multipart(&pool).await;
     files::record_part_done(&pool, created.lease_id, 1, 50, "aaaa")
         .await
         .unwrap();
-    // Abort: 만료를 기다리지 않고 pending을 회수한다 (명시적 중단).
+    // Abort는 먼저 aborting만 선점한다. 외부 정리가 실패한 것으로 모사해
+    // finalize하지 않으면 session/location/lease가 다음 재시도 재료로 남는다.
+    assert_eq!(
+        s3::claim_abort(&pool, "c", KEY, created.file_id)
+            .await
+            .unwrap(),
+        s3::AbortClaim::Claimed
+    );
+    let (state, _, _) = file_row(&pool, created.file_id).await;
+    assert_eq!(state, "pending");
+    let location: Option<uuid::Uuid> =
+        sqlx::query_scalar("SELECT file_id FROM locations WHERE file_id = $1")
+            .bind(created.file_id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+    assert_eq!(location, Some(created.file_id));
+    let cleanup = s3::cleanup_candidates(&pool, 10).await.unwrap();
+    assert_eq!(cleanup.len(), 1);
+    assert_eq!(cleanup[0].file_id, created.file_id);
+    assert_eq!(cleanup[0].write_lease_id, Some(created.lease_id));
     assert!(
-        files::reclaim_pending(&pool, created.file_id)
+        !files::reclaim_pending(&pool, created.file_id)
             .await
             .unwrap()
     );
+
+    // 물리 정리 성공 뒤에만 DB 회수가 session/location을 제거한다.
+    assert!(s3::finalize_abort(&pool, created.file_id).await.unwrap());
     let (state, _, _) = file_row(&pool, created.file_id).await;
     assert_eq!(state, "reclaimed");
-    // location이 사라지고 write lease가 만료된다.
     let location: Option<uuid::Uuid> =
         sqlx::query_scalar("SELECT file_id FROM locations WHERE file_id = $1")
             .bind(created.file_id)
@@ -209,12 +642,14 @@ async fn abort_reclaims_pending_and_is_idempotent(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(lease_state, "expired");
-    // 멱등 — 두 번째 회수는 false (이미 회수됨).
-    assert!(
-        !files::reclaim_pending(&pool, created.file_id)
+    assert!(!s3::finalize_abort(&pool, created.file_id).await.unwrap());
+    let session_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM s3_uploads WHERE file_id = $1")
+            .bind(created.file_id)
+            .fetch_one(&pool)
             .await
-            .unwrap()
-    );
+            .unwrap();
+    assert_eq!(session_count, 0);
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -222,16 +657,80 @@ async fn abort_after_complete_does_not_reclaim(pool: PgPool) {
     // 이미 Complete된(active) 세션의 Abort는 회수하지 않는다 — pending만 회수.
     wire(&pool).await;
     let created = open_multipart(&pool).await;
-    files::finalize_multipart_commit(&pool, created.file_id, 10, "e-1")
+    assert_eq!(
+        s3::claim_completion(
+            &pool,
+            s3::CompletionSpec {
+                client_id: "c",
+                key: KEY,
+                file_id: created.file_id,
+                multipart: true,
+                expected_size: 10,
+                expected_etag: "e-1",
+                lease_ttl_secs: 900,
+            },
+        )
+        .await
+        .unwrap(),
+        s3::CompletionClaim::Claimed
+    );
+    s3::finalize_multipart_upload(&pool, "c", KEY, created.file_id)
         .await
         .unwrap();
-    assert!(
-        !files::reclaim_pending(&pool, created.file_id)
+    assert_eq!(
+        s3::claim_abort(&pool, "c", KEY, created.file_id)
             .await
-            .unwrap()
+            .unwrap(),
+        s3::AbortClaim::Unavailable
     );
     let (state, _, _) = file_row(&pool, created.file_id).await;
     assert_eq!(state, "active");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn wrong_key_complete_cannot_activate_or_map_upload(pool: PgPool) {
+    wire(&pool).await;
+    let created = open_multipart(&pool).await;
+
+    assert_eq!(
+        s3::claim_completion(
+            &pool,
+            s3::CompletionSpec {
+                client_id: "c",
+                key: "dir/other.bin",
+                file_id: created.file_id,
+                multipart: true,
+                expected_size: 10,
+                expected_etag: "e-1",
+                lease_ttl_secs: 900,
+            },
+        )
+        .await
+        .unwrap(),
+        s3::CompletionClaim::Unavailable
+    );
+    assert_eq!(
+        s3::finalize_multipart_upload(&pool, "c", "dir/other.bin", created.file_id)
+            .await
+            .unwrap(),
+        s3::FinalizeOutcome::NotPending
+    );
+    let (state, size, etag) = file_row(&pool, created.file_id).await;
+    assert_eq!(state, "pending");
+    assert_eq!(size, 0);
+    assert!(etag.is_none());
+    assert!(s3::get_key(&pool, "c", KEY).await.unwrap().is_none());
+    assert!(
+        s3::get_key(&pool, "c", "dir/other.bin")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        s3::discard_unstarted_upload(&pool, created.file_id)
+            .await
+            .unwrap()
+    );
 }
 
 // ── reconciler 회수 재료 ───────────────────────────────────
@@ -249,19 +748,21 @@ async fn expired_multipart_is_protected_and_reclaimable(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let candidates = files::expired_pending(&pool, 10).await.unwrap();
-    assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].file_id, created.file_id);
-    assert_eq!(candidates[0].write_lease_id, Some(created.lease_id));
+    assert!(files::expired_pending(&pool, 10).await.unwrap().is_empty());
+    assert_eq!(
+        s3::expired_open_uploads(&pool, 10).await.unwrap(),
+        vec![created.file_id]
+    );
     // 만료 시각이 지나도 lease가 아직 issued면 보호는 유지된다 — 회수(전이)가
     // 조립 파일 sweep보다 먼저다 (그래야 재개 경합에서 손상본이 안 커밋된다).
     assert_eq!(
         files::active_multipart_lease_ids(&pool).await.unwrap(),
         vec![created.lease_id]
     );
-    // 회수가 lease를 expired로 닫은 뒤에야 보호 목록에서 빠진다.
+    // aborting 선점이 lease를 닫고, 물리 정리 전에도 임시는 보호 대상에서
+    // 빠진다. session/location은 cleanup 후보로 계속 남는다.
     assert!(
-        files::finalize_reclaim(&pool, &candidates[0])
+        s3::claim_expired_abort(&pool, created.file_id)
             .await
             .unwrap()
     );
@@ -271,4 +772,29 @@ async fn expired_multipart_is_protected_and_reclaimable(pool: PgPool) {
             .unwrap()
             .is_empty()
     );
+    let cleanup = s3::cleanup_candidates(&pool, 10).await.unwrap();
+    assert_eq!(cleanup.len(), 1);
+    assert_eq!(cleanup[0].file_id, created.file_id);
+    assert!(cleanup[0].multipart);
+    assert!(cleanup[0].upload_id.is_none());
+    // aborting의 expired lease는 보존 기간이 지나도 session이 소유한 복구
+    // 핸들이므로 GC되지 않는다.
+    sqlx::query("UPDATE leases SET created_at = now() - interval '2 days' WHERE id = $1")
+        .bind(created.lease_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        files::prune_terminal_leases(&pool, 24 * 3600, 10)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        files::write_lease(&pool, created.file_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(s3::finalize_abort(&pool, created.file_id).await.unwrap());
 }

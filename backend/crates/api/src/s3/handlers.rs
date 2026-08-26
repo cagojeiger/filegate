@@ -14,7 +14,7 @@ use uuid::Uuid;
 use super::S3Result;
 use super::header_str;
 use super::xml::{no_such_key, xml_error, xml_internal, xml_storage_error};
-use crate::lease::WRITE_LEASE_TTL;
+use crate::lease::{WRITE_LEASE_TTL, run_with_completion_heartbeat};
 use crate::routes::AppState;
 use crate::spool::{self, STREAM_BUF_SIZE, spool_root};
 use crate::storage_access::{CommitErr, StorageBackend, backend_from_row, commit_temp_to_backend};
@@ -43,7 +43,7 @@ pub(super) async fn put_object(
             )
         })?;
     // 크기 상한은 네이티브 create와 같은 정책이다 (5GiB, 공유 validation).
-    // multipart가 없는 지금은 이 상한을 넘는 업로드가 없어야 한다.
+    // 이 상한을 넘는 객체는 multipart 경로를 써야 한다.
     if !(0..=MAX_SINGLE_PUT_BYTES).contains(&content_length) {
         return Err(xml_error(
             StatusCode::BAD_REQUEST,
@@ -76,7 +76,7 @@ pub(super) async fn put_object(
         lease_ttl_secs: WRITE_LEASE_TTL.as_secs() as i64,
         part_size: None,
     };
-    let created = match files::create(&state.pool, spec)
+    let created = match s3reg::create_upload(&state.pool, spec, key)
         .await
         .map_err(|e| xml_internal("create", e))?
     {
@@ -137,44 +137,90 @@ pub(super) async fn put_object(
     }
     let file = writer.into_inner();
 
+    // 외부 저장소 쓰기 전에 completing을 선점하고 관찰값을 내구화한다.
+    // 만료 회수와 경합에서 지면 물리를 만들지 않아 고아 객체가 생기지 않는다.
+    let claim = s3reg::claim_completion(
+        &state.pool,
+        s3reg::CompletionSpec {
+            client_id,
+            key,
+            file_id: created.file_id,
+            multipart: false,
+            expected_size: written,
+            expected_etag: &md5_hex,
+            lease_ttl_secs: WRITE_LEASE_TTL.as_secs() as i64,
+        },
+    )
+    .await;
+    match claim {
+        Ok(s3reg::CompletionClaim::Claimed) => {}
+        Ok(
+            s3reg::CompletionClaim::Resuming
+            | s3reg::CompletionClaim::Busy
+            | s3reg::CompletionClaim::Unavailable,
+        ) => {
+            drop(file);
+            fs_backend::abort_write(&temp_path).await;
+            return Err(xml_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ServiceUnavailable",
+                "the upload expired before storage commit; retry",
+            ));
+        }
+        Err(error) => {
+            drop(file);
+            fs_backend::abort_write(&temp_path).await;
+            return Err(xml_internal("claim completion", error));
+        }
+    }
+
     // fs는 로컬/마운트 IO → internal(500), 원격 게이트웨이(s3)만 503 —
     // blobs·spool과 같은 백엔드별 구분. abort 순서는 헬퍼가 쥔다.
-    if let Err(error) = commit_temp_to_backend(
-        &state.s3_clients,
-        &backend,
-        &created.storage.id,
-        file,
-        &temp_path,
-        &created.object_key,
-        content_type,
+    let committed = run_with_completion_heartbeat(
+        &state.pool,
+        created.file_id,
+        commit_temp_to_backend(
+            &state.s3_clients,
+            &backend,
+            &created.storage.id,
+            file,
+            &temp_path,
+            &created.object_key,
+            content_type,
+        ),
     )
-    .await
-    {
+    .await;
+    let Some(committed) = committed else {
+        return Err(xml_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ServiceUnavailable",
+            "the upload lost completion ownership; retry",
+        ));
+    };
+    if let Err(error) = committed {
         return Err(match error {
             CommitErr::Fs(error) => xml_internal("fs commit", error),
             CommitErr::Storage(error) => xml_storage_error("s3 upload", error),
         });
     }
 
-    // 확정 — 스트림 실측이 곧 관찰이다. 전이가 지면(false) pending이 그 사이
-    // 만료 회수됐다는 뜻이다 (좁은 경합). 성공을 보고하고 매핑을 걸면 도달
-    // 불가 객체가 되므로, 재시도 신호(503)로 돌려준다.
-    if !files::finalize_commit(&state.pool, created.file_id, &md5_hex)
-        .await
-        .map_err(|e| xml_internal("finalize", e))?
-    {
-        return Err(xml_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "ServiceUnavailable",
-            "the upload expired before it committed; retry",
-        ));
-    }
-
-    // overwrite — 매핑 교체와 밀려난 옛 file의 detach는 upsert_key가 한
-    // 트랜잭션에서 한다 (도달 불가 고아 방지). 반환값은 로깅용이다.
-    let displaced = s3reg::upsert_key(&state.pool, client_id, key, created.file_id)
-        .await
-        .map_err(|e| xml_internal("key mapping", e))?;
+    // 확정 — pending→active, lease 정산, key 매핑, overwrite detach가 한
+    // 트랜잭션이다. DB 실패면 completing session/location이 남아 reconciler가
+    // 방금 만들어진 실물을 관찰한 뒤 같은 확정을 재시도한다.
+    let displaced =
+        match s3reg::finalize_single_upload(&state.pool, client_id, key, created.file_id)
+            .await
+            .map_err(|e| xml_internal("finalize", e))?
+        {
+            s3reg::FinalizeOutcome::Finalized { displaced } => displaced,
+            s3reg::FinalizeOutcome::NotPending => {
+                return Err(xml_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "ServiceUnavailable",
+                    "the upload expired before it committed; retry",
+                ));
+            }
+        };
     if let Some(old) = displaced {
         tracing::info!(event = "s3.overwrite", client = %client_id, bucket, key, displaced = %old);
     }

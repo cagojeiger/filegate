@@ -10,7 +10,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use filegate_core::multipart::part_count;
-use filegate_db::files::{self, CreateOutcome, CreateSpec, DeleteOutcome};
+use filegate_db::files::{self, CreateOutcome, CreateSpec, CreatedFile, DeleteOutcome};
 use filegate_infra::{Address, s3_head_object, s3_presign_get, s3_presign_put};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -106,40 +106,65 @@ pub(super) async fn create(
         // (spec 02). s3 계열은 지금 벤더 세션을 열어 핸들을 lease에 기록하고,
         // 중계(fs 또는 force_relay)는 lease id에서 파생한 secret의 해시를
         // 남긴다 — 이후 parts() 발급이 매번 같은 secret을 재파생해 회전이 없다.
+        let mut vendor_upload_id = None;
         if let StorageBackend::S3 { spec, .. } = &backend {
             let storage = state
                 .s3_clients
                 .get(&created.storage.id, spec, Address::Internal);
-            let upload_id = filegate_infra::s3_create_multipart(
+            let upload_id = match filegate_infra::s3_create_multipart(
                 &storage,
                 &created.object_key,
                 body.content_type.as_deref(),
             )
             .await
-            .map_err(ApiError::Storage)?;
+            {
+                Ok(upload_id) => upload_id,
+                Err(error) => {
+                    cleanup_failed_multipart_create(&state, &created, &backend, None).await;
+                    return Err(ApiError::Storage(error));
+                }
+            };
             // 벤더 세션을 열었으니 upload_id를 반드시 DB에 남겨야 한다 —
             // 기록 전에 실패하면 회수가 핸들을 몰라 세션이 영구 과금 고아가
             // 된다. 기록 실패 시 방금 연 세션을 즉시 best-effort로 중단한다.
             if let Err(error) =
                 files::attach_upload_id(&state.pool, created.lease_id, &upload_id).await
             {
-                let _ =
-                    filegate_infra::s3_abort_multipart(&storage, &created.object_key, &upload_id)
-                        .await;
+                cleanup_failed_multipart_create(&state, &created, &backend, Some(&upload_id)).await;
                 return Err(error.into());
             }
+            vendor_upload_id = Some(upload_id);
         }
         if backend.is_relay() {
-            let secret = state
-                .crypto
-                .relay_secret(&created.lease_id.to_string())
-                .map_err(internal)?;
-            files::attach_write_secret(
+            let secret = match state.crypto.relay_secret(&created.lease_id.to_string()) {
+                Ok(secret) => secret,
+                Err(error) => {
+                    cleanup_failed_multipart_create(
+                        &state,
+                        &created,
+                        &backend,
+                        vendor_upload_id.as_deref(),
+                    )
+                    .await;
+                    return Err(internal(error));
+                }
+            };
+            if let Err(error) = files::attach_write_secret(
                 &state.pool,
                 created.lease_id,
                 &filegate_core::client_key_hash(&secret),
             )
-            .await?;
+            .await
+            {
+                cleanup_failed_multipart_create(
+                    &state,
+                    &created,
+                    &backend,
+                    vendor_upload_id.as_deref(),
+                )
+                .await;
+                return Err(error.into());
+            }
         }
         tracing::info!(
             event = "file.created",
@@ -202,6 +227,45 @@ pub(super) async fn create(
         }),
     )
         .into_response())
+}
+
+/// create 응답 전에 실패한 multipart 예약은 클라이언트가 재개할 수 없다.
+/// 외부 세션 정리가 확인된 뒤에만 DB pending을 닫는다. 벤더 Abort가 실패하면
+/// location/lease를 남겨 만료 회수가 저장된 upload_id로 재시도할 수 있게 한다.
+async fn cleanup_failed_multipart_create(
+    state: &AppState,
+    created: &CreatedFile,
+    backend: &StorageBackend,
+    vendor_upload_id: Option<&str>,
+) {
+    if let StorageBackend::S3 { spec, .. } = backend {
+        let storage = state
+            .s3_clients
+            .get(&created.storage.id, spec, Address::Internal);
+        let cleaned = match vendor_upload_id {
+            Some(upload_id) => {
+                filegate_infra::s3_abort_multipart(&storage, &created.object_key, upload_id).await
+            }
+            None => filegate_infra::s3_abort_multipart_by_key(&storage, &created.object_key).await,
+        };
+        if let Err(error) = cleaned {
+            tracing::warn!(
+                event = "file.multipart_create_cleanup_failed",
+                file = %created.file_id,
+                step = "abort_vendor",
+                error = %error,
+            );
+            return;
+        }
+    }
+    if let Err(error) = files::reclaim_pending(&state.pool, created.file_id).await {
+        tracing::warn!(
+            event = "file.multipart_create_cleanup_failed",
+            file = %created.file_id,
+            step = "reclaim_pending",
+            error = %error,
+        );
+    }
 }
 
 pub(super) async fn commit(

@@ -5,7 +5,7 @@
 
 use filegate_core::multipart::MAX_PARTS;
 
-/// v0 단일 PUT 상한 (spec 00: 5GiB 초과는 multipart와 함께 다음 범위).
+/// v0 단일 PUT 상한 (spec 00: 5GiB 초과는 multipart 경로를 사용).
 /// 회계 합산의 overflow 방어이기도 하다.
 pub const MAX_SINGLE_PUT_BYTES: i64 = 5 * 1024 * 1024 * 1024;
 

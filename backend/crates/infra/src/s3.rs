@@ -126,8 +126,9 @@ fn client(spec: &S3StorageSpec, address: Address) -> S3Storage {
 ///
 /// filegate는 자기 버킷만 다룬다 — 버킷 프로비저닝은 운영자 몫이다. 버킷이
 /// 없거나 접근 권한이 없으면 실패한다 (등록 거부 또는 부팅 중단, ADR 001).
-/// head_bucket이 존재와 기본 접근을 함께 확인한다. (fs adapter는 경로 존재·
-/// 쓰기 가능으로 같은 검증을 한다 — storage 모델마다 방식이 다르다.)
+/// head_bucket이 존재와 기본 접근을, list_multipart_uploads가 응답 유실 복구에
+/// 필요한 조회 권한을 확인한다. (fs adapter는 경로 존재·쓰기 가능으로 같은
+/// 검증을 한다 — storage 모델마다 방식이 다르다.)
 pub async fn connect(spec: &S3StorageSpec) -> anyhow::Result<S3Storage> {
     let storage = client(spec, Address::Internal);
     storage
@@ -139,6 +140,20 @@ pub async fn connect(spec: &S3StorageSpec) -> anyhow::Result<S3Storage> {
         .map_err(|err| {
             anyhow::anyhow!(
                 "bucket '{}' not accessible at {} — provision it and grant access: {err}",
+                spec.bucket,
+                spec.endpoint
+            )
+        })?;
+    storage
+        .client
+        .list_multipart_uploads()
+        .bucket(&storage.bucket)
+        .max_uploads(1)
+        .send()
+        .await
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "bucket '{}' cannot list multipart uploads at {} — grant recovery access: {err}",
                 spec.bucket,
                 spec.endpoint
             )
@@ -548,6 +563,43 @@ pub async fn abort_multipart(
                 .map(|response| response.status().as_u16() == 404)
                 .unwrap_or(false);
             if gone { Ok(()) } else { Err(error.into()) }
+        }
+    }
+}
+
+/// DB에 vendor upload_id를 붙이기 전에 실패한 create의 복구 경로. filegate의
+/// 물리 object_key는 파일별로 유일하므로, 그 정확한 key에 열린 multipart를
+/// 모두 찾아 중단한다. Create 응답 유실로 같은 key에 세션이 둘 생겨도 전부
+/// 정리한다. 이미 없으면 성공이다.
+pub async fn abort_multipart_by_key(storage: &S3Storage, object_key: &str) -> anyhow::Result<()> {
+    let mut key_marker = None;
+    let mut upload_id_marker = None;
+    loop {
+        let output = storage
+            .client
+            .list_multipart_uploads()
+            .bucket(&storage.bucket)
+            .prefix(object_key)
+            .set_key_marker(key_marker)
+            .set_upload_id_marker(upload_id_marker)
+            .send()
+            .await?;
+        let upload_ids: Vec<String> = output
+            .uploads()
+            .iter()
+            .filter(|upload| upload.key() == Some(object_key))
+            .filter_map(|upload| upload.upload_id().map(str::to_owned))
+            .collect();
+        for upload_id in upload_ids {
+            abort_multipart(storage, object_key, &upload_id).await?;
+        }
+        if !output.is_truncated().unwrap_or(false) {
+            return Ok(());
+        }
+        key_marker = output.next_key_marker().map(str::to_owned);
+        upload_id_marker = output.next_upload_id_marker().map(str::to_owned);
+        if key_marker.is_none() {
+            anyhow::bail!("list_multipart_uploads truncated without a next key marker");
         }
     }
 }

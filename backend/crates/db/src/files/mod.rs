@@ -27,6 +27,7 @@ pub use access::{
 pub use commit::{
     ObservedCommitCandidate, finalize_commit, finalize_multipart_commit, observed_commit_candidates,
 };
+pub(crate) use create::create_in_tx;
 pub use create::{CreateOutcome, CreateSpec, CreatedFile, create};
 pub use multipart::{
     PartClaim, WriteLease, attach_upload_id, claim_part, done_parts, extend_write_lease,
