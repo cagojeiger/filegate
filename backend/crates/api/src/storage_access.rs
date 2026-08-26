@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 
 use filegate_core::{Crypto, EncryptedSecret};
 use filegate_db::registry::StorageRow;
-use filegate_infra::{Address, S3ClientCache, S3StorageSpec};
+use filegate_infra::{
+    Address, S3ClientCache, S3StorageSpec, s3_abort_multipart, s3_abort_multipart_by_key,
+    s3_delete_object, s3_head_object,
+};
 
 pub enum StorageBackend {
     S3 {
@@ -36,6 +39,74 @@ impl StorageBackend {
 pub enum CommitErr {
     Fs(anyhow::Error),
     Storage(anyhow::Error),
+}
+
+pub struct ObjectObservation {
+    pub size: i64,
+    /// fs는 ETag 메타데이터가 없어 None. S3는 벤더 ETag를 반환한다.
+    pub etag: Option<String>,
+}
+
+/// completing 세션의 외부 작업 결과를 관찰한다. object_key는 파일별로
+/// 유일하므로 fs는 크기, S3는 크기+ETag를 완료 예상값과 대조할 수 있다.
+pub async fn observe_backend_object(
+    s3_clients: &S3ClientCache,
+    backend: &StorageBackend,
+    storage_id: &str,
+    object_key: &str,
+) -> anyhow::Result<Option<ObjectObservation>> {
+    match backend {
+        StorageBackend::S3 { spec, .. } => {
+            let storage = s3_clients.get(storage_id, spec, Address::Internal);
+            Ok(s3_head_object(&storage, object_key)
+                .await?
+                .map(|(size, etag)| ObjectObservation {
+                    size,
+                    etag: Some(etag),
+                }))
+        }
+        StorageBackend::Fs { root } => Ok(filegate_infra::fs::head_object(root, object_key)
+            .await?
+            .map(|size| ObjectObservation { size, etag: None })),
+    }
+}
+
+/// Abort/회수의 물리 보상. multipart 임시/벤더 세션과 혹시 이미 만들어진
+/// 최종 객체를 모두 멱등 삭제한다. 두 삭제는 하나가 실패해도 다른 하나를
+/// 시도하고, DB session/location은 호출자가 둘 다 성공한 뒤에만 지운다.
+pub async fn cleanup_backend_upload(
+    s3_clients: &S3ClientCache,
+    backend: &StorageBackend,
+    storage_id: &str,
+    object_key: &str,
+    upload_id: Option<&str>,
+    write_lease_id: Option<uuid::Uuid>,
+    multipart: bool,
+) -> anyhow::Result<()> {
+    match backend {
+        StorageBackend::S3 { spec, .. } => {
+            let storage = s3_clients.get(storage_id, spec, Address::Internal);
+            let aborted = match (upload_id, multipart) {
+                (Some(upload_id), _) => s3_abort_multipart(&storage, object_key, upload_id).await,
+                (None, true) => s3_abort_multipart_by_key(&storage, object_key).await,
+                (None, false) => Ok(()),
+            };
+            let deleted = s3_delete_object(&storage, object_key).await;
+            aborted?;
+            deleted
+        }
+        StorageBackend::Fs { root } => {
+            let temps = match (write_lease_id, multipart) {
+                (Some(lease_id), true) => {
+                    filegate_infra::fs::delete_multipart_temps(root, &lease_id.to_string()).await
+                }
+                _ => Ok(()),
+            };
+            let deleted = filegate_infra::fs::delete(root, object_key).await;
+            temps?;
+            deleted
+        }
+    }
 }
 
 /// 스풀 임시 파일을 뒷단에 확정한다 — fs는 rename, s3는 스풀에서 업로드.

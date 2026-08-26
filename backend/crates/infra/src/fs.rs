@@ -91,6 +91,16 @@ pub async fn open_read(root: &Path, object_key: &str) -> anyhow::Result<Option<(
     }
 }
 
+/// reconciler의 완료 복구가 쓰는 실물 관찰. fs에는 ETag 메타데이터가 없으므로
+/// 크기만 반환하고, 완료 ETag는 DB에 내구화한 part 원장을 따른다.
+pub async fn head_object(root: &Path, object_key: &str) -> anyhow::Result<Option<i64>> {
+    match fs::metadata(object_path(root, object_key)?).await {
+        Ok(meta) => Ok(Some(meta.len() as i64)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// 부분 읽기 스트림 (spec 03 Range) — seek 후 길이 제한. 구간은 호출자가
 /// 파일 크기로 검증한 폐구간 [start, end]다. 없으면 None.
 pub async fn open_read_range(
@@ -184,6 +194,26 @@ pub fn multipart_temp(root: &Path, lease_id: &str) -> PathBuf {
 /// (sweep_stale_temps)가 조립 중 part를 지키게 한다.
 pub fn multipart_part_temp(root: &Path, lease_id: &str, part_no: i32) -> PathBuf {
     root.join(format!(".fg-tmp-mp-{lease_id}-p{part_no}"))
+}
+
+/// 한 S3 multipart lease의 조립 파일과 모든 part 임시를 멱등 삭제한다.
+/// 원장에 기록되기 전 승격된 part까지 이름 접두사로 찾아 Abort 정리가 덮는다.
+pub async fn delete_multipart_temps(root: &Path, lease_id: &str) -> anyhow::Result<()> {
+    let assembly = format!(".fg-tmp-mp-{lease_id}");
+    let part_prefix = format!("{assembly}-p");
+    let mut entries = fs::read_dir(root).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name == assembly || name.starts_with(&part_prefix) {
+            match fs::remove_file(entry.path()).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 스풀 임시를 최종 part 임시로 원자 교체한다 (S3 multipart part 승격).
@@ -292,6 +322,33 @@ mod tests {
         write_part_at(&assembly, 0, &p1).await.unwrap(); // 앞 3바이트만 갱신
         truncate_to(&assembly, 3).await.unwrap();
         assert_eq!(fs::read(&assembly).await.unwrap(), b"NEW");
+        fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn abort_cleanup_removes_assembly_and_all_parts_idempotently() {
+        let dir = scratch("abort-multipart").await;
+        let lease = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        fs::write(multipart_temp(&dir, lease), b"assembly")
+            .await
+            .unwrap();
+        fs::write(multipart_part_temp(&dir, lease, 1), b"part-1")
+            .await
+            .unwrap();
+        fs::write(multipart_part_temp(&dir, lease, 9), b"part-9")
+            .await
+            .unwrap();
+        fs::write(dir.join("unrelated"), b"keep").await.unwrap();
+
+        delete_multipart_temps(&dir, lease).await.unwrap();
+        delete_multipart_temps(&dir, lease).await.unwrap();
+        assert!(!fs::try_exists(multipart_temp(&dir, lease)).await.unwrap());
+        assert!(
+            !fs::try_exists(multipart_part_temp(&dir, lease, 1))
+                .await
+                .unwrap()
+        );
+        assert!(fs::try_exists(dir.join("unrelated")).await.unwrap());
         fs::remove_dir_all(&dir).await.ok();
     }
 

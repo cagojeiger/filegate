@@ -4,7 +4,7 @@
 //! 탄력적이고 fs는 디스크가 스스로 실패를 내므로, 용량으로 발급을 거부하지
 //! 않는다. 사용량은 조회 시점에 집계된다. 저장소 네트워크 호출은 여기 없다.
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::registry::{STORAGE_COLUMNS, StorageRow};
@@ -40,7 +40,19 @@ pub enum CreateOutcome {
 /// 공유 락 지점이 없고, 동시 create는 서로를 기다리지 않는다.
 pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
+    let outcome = create_in_tx(&mut tx, spec).await?;
+    if matches!(&outcome, CreateOutcome::Created(_)) {
+        tx.commit().await?;
+    }
+    Ok(outcome)
+}
 
+/// pending 파일·location·write lease·이력을 호출자 트랜잭션에 기록한다.
+/// S3 표면은 이 헬퍼 뒤에 논리키 세션을 붙여 create 전체를 원자화한다.
+pub(crate) async fn create_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    spec: CreateSpec<'_>,
+) -> Result<CreateOutcome, sqlx::Error> {
     // storages와 clients가 id 컬럼을 겹치므로 storage 컬럼은 s. 접두로 뽑는다.
     let storage_cols = STORAGE_COLUMNS
         .split(", ")
@@ -53,7 +65,7 @@ pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome
          WHERE c.id = $1"
     ))
     .bind(spec.client_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
     let Some(storage) = storage else {
         return Ok(CreateOutcome::NoClient);
@@ -68,7 +80,7 @@ pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome
     .bind(spec.content_type)
     .bind(spec.declared_md5)
     .bind(spec.part_size)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
 
     // 키는 규칙으로 조합해 저장한다 (spec 00 물리 배치). 읽기·삭제는 저장된
@@ -78,7 +90,7 @@ pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome
         .bind(file_id)
         .bind(&storage.id)
         .bind(&object_key)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     let lease_id: Uuid = sqlx::query_scalar(
@@ -87,7 +99,7 @@ pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome
     )
     .bind(file_id)
     .bind(spec.lease_ttl_secs)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
 
     // 대여 이력 — 발급과 같은 트랜잭션이라 lease와 항상 짝이다 (관찰용,
@@ -100,10 +112,9 @@ pub async fn create(pool: &PgPool, spec: CreateSpec<'_>) -> Result<CreateOutcome
     .bind(&storage.id)
     .bind(spec.client_id)
     .bind(spec.declared_size)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
-    tx.commit().await?;
     Ok(CreateOutcome::Created(Box::new(CreatedFile {
         file_id,
         lease_id,

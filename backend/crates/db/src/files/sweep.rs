@@ -63,6 +63,9 @@ pub struct SweepCandidate {
     pub upload_id: Option<String>,
     /// multipart fs 회수 재료 — 대상 임시 파일(.fg-tmp-mp-{lease}) 식별.
     pub write_lease_id: Option<Uuid>,
+    /// vendor upload_id를 DB에 붙이기 전에 실패했을 때 object_key로 세션을
+    /// 재발견해야 하는가. purge·단일 PUT은 false.
+    pub multipart: bool,
 }
 
 /// 쓰기 lease가 만료된 pending 파일들 (spec 00: 만료 회수 대상).
@@ -70,12 +73,14 @@ pub async fn expired_pending(
     pool: &PgPool,
     limit: i64,
 ) -> Result<Vec<SweepCandidate>, sqlx::Error> {
-    let rows: Vec<(Uuid, String, String, Option<String>, Uuid)> = sqlx::query_as(
-        "SELECT f.id, l.storage_id, l.object_key, le.upload_id, le.id \
+    let rows: Vec<(Uuid, String, String, Option<String>, Uuid, bool)> = sqlx::query_as(
+        "SELECT f.id, l.storage_id, l.object_key, le.upload_id, le.id, \
+         f.part_size IS NOT NULL \
          FROM files f \
          JOIN leases le ON le.file_id = f.id AND le.kind = 'write' \
          JOIN locations l ON l.file_id = f.id \
          WHERE f.state = 'pending' AND le.state = 'issued' AND le.expires_at < now() \
+         AND NOT EXISTS (SELECT 1 FROM s3_uploads u WHERE u.file_id = f.id) \
          LIMIT $1",
     )
     .bind(limit)
@@ -89,6 +94,7 @@ pub async fn expired_pending(
             object_key: row.2,
             upload_id: row.3,
             write_lease_id: Some(row.4),
+            multipart: row.5,
         })
         .collect())
 }
@@ -102,11 +108,13 @@ pub async fn finalize_reclaim(
     let mut tx = pool.begin().await?;
     // files 행을 먼저 잠근다 — finalize_commit과 같은 잠금 순서(files→leases)라
     // 교착이 없다. 늦은 commit이 이겼다면 여기서 0행이다.
-    let transitioned =
-        sqlx::query("UPDATE files SET state = 'reclaimed' WHERE id = $1 AND state = 'pending'")
-            .bind(candidate.file_id)
-            .execute(&mut *tx)
-            .await?;
+    let transitioned = sqlx::query(
+        "UPDATE files SET state = 'reclaimed' WHERE id = $1 AND state = 'pending' \
+             AND NOT EXISTS (SELECT 1 FROM s3_uploads u WHERE u.file_id = files.id)",
+    )
+    .bind(candidate.file_id)
+    .execute(&mut *tx)
+    .await?;
     if transitioned.rows_affected() == 0 {
         return Ok(false);
     }
@@ -135,19 +143,17 @@ pub async fn finalize_reclaim(
     Ok(true)
 }
 
-/// 명시적 Abort의 회수 (spec 03) — 만료를 기다리지 않고 pending multipart를
-/// 되돈다. finalize_reclaim과 같은 전이(pending→reclaimed + lease 만료 +
-/// location 제거)지만, 사용자가 세션을 명시적으로 버렸으므로 lease 만료
-/// 재확인이 없다. 조건부 pending→reclaimed라 reconciler의 만료 회수와
-/// 경합해도 하나만 이긴다 — 진 쪽은 false(멱등). lease_parts는 lease가 남는
-/// 동안 유지되다 GC(CASCADE)로 사라진다 — Abort의 물리 정리는 호출자 몫이다.
+/// 일반/native pending의 명시적 회수. S3 호환 세션은 외부 정리가 실패해도
+/// 핸들을 보존해야 하므로 이 경로에서 제외하고 s3_registry 상태 머신을 쓴다.
 pub async fn reclaim_pending(pool: &PgPool, file_id: Uuid) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let transitioned =
-        sqlx::query("UPDATE files SET state = 'reclaimed' WHERE id = $1 AND state = 'pending'")
-            .bind(file_id)
-            .execute(&mut *tx)
-            .await?;
+    let transitioned = sqlx::query(
+        "UPDATE files SET state = 'reclaimed' WHERE id = $1 AND state = 'pending' \
+         AND NOT EXISTS (SELECT 1 FROM s3_uploads u WHERE u.file_id = files.id)",
+    )
+    .bind(file_id)
+    .execute(&mut *tx)
+    .await?;
     if transitioned.rows_affected() == 0 {
         return Ok(false);
     }
@@ -201,6 +207,7 @@ fn candidate_from(row: (Uuid, String, String)) -> SweepCandidate {
         object_key: row.2,
         upload_id: None,
         write_lease_id: None,
+        multipart: false,
     }
 }
 
@@ -213,7 +220,9 @@ pub async fn active_multipart_lease_ids(pool: &PgPool) -> Result<Vec<Uuid>, sqlx
     sqlx::query_scalar(
         "SELECT le.id FROM leases le JOIN files f ON f.id = le.file_id \
          WHERE le.kind = 'write' AND le.state = 'issued' \
-         AND f.state = 'pending' AND f.part_size IS NOT NULL",
+         AND f.state = 'pending' AND f.part_size IS NOT NULL \
+         AND NOT EXISTS (SELECT 1 FROM s3_uploads u \
+                         WHERE u.file_id = f.id AND u.state = 'aborting')",
     )
     .fetch_all(pool)
     .await
@@ -244,8 +253,10 @@ pub async fn prune_terminal_leases(
 ) -> Result<u64, sqlx::Error> {
     let deleted = sqlx::query(
         "DELETE FROM leases WHERE id IN ( \
-         SELECT id FROM leases \
-         WHERE state <> 'issued' AND created_at < now() - $1 * interval '1 second' \
+         SELECT le.id FROM leases le \
+         WHERE le.state <> 'issued' \
+         AND le.created_at < now() - $1 * interval '1 second' \
+         AND NOT EXISTS (SELECT 1 FROM s3_uploads u WHERE u.file_id = le.file_id) \
          LIMIT $2)",
     )
     .bind(retention_secs)

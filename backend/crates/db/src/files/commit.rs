@@ -17,7 +17,8 @@ pub async fn finalize_commit(
 
     let transitioned = sqlx::query(
         "UPDATE files SET state = 'active', etag = $2, committed_at = now() \
-         WHERE id = $1 AND state = 'pending'",
+         WHERE id = $1 AND state = 'pending' \
+         AND NOT EXISTS (SELECT 1 FROM s3_uploads WHERE file_id = $1)",
     )
     .bind(file_id)
     .bind(etag)
@@ -53,7 +54,8 @@ pub async fn finalize_multipart_commit(
 
     let transitioned = sqlx::query(
         "UPDATE files SET state = 'active', declared_size = $2, etag = $3, committed_at = now() \
-         WHERE id = $1 AND state = 'pending'",
+         WHERE id = $1 AND state = 'pending' \
+         AND NOT EXISTS (SELECT 1 FROM s3_uploads WHERE file_id = $1)",
     )
     .bind(file_id)
     .bind(declared_size)
@@ -86,8 +88,8 @@ pub struct ObservedCommitCandidate {
     pub storage: StorageRow,
 }
 
-/// multipart는 후보가 아니다 — 완료는 벤더도 선언(Complete)이다 (spec 02).
-/// 만료된 lease도 제외한다 — 그 파일은 회수의 몫이다.
+/// multipart와 S3 요청 경로는 후보가 아니다 — 둘 다 요청 경로가 확정점을
+/// 소유한다. 만료된 lease도 제외한다 — 그 파일은 회수의 몫이다.
 pub async fn observed_commit_candidates(
     pool: &PgPool,
     limit: i64,
@@ -98,6 +100,7 @@ pub async fn observed_commit_candidates(
          JOIN locations l ON l.file_id = f.id \
          JOIN leases le ON le.file_id = f.id AND le.kind = 'write' \
          WHERE f.state = 'pending' AND f.part_size IS NULL \
+         AND NOT EXISTS (SELECT 1 FROM s3_uploads su WHERE su.file_id = f.id) \
          AND le.state = 'issued' AND le.expires_at > now() \
          LIMIT $1",
     )
