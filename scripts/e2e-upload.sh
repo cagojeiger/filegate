@@ -3,7 +3,7 @@
 #
 # 전제: docker compose up (PG+MinIO), 서버 실행 중, terraform 그래프 적용
 #       (deploy/local — storage minio-local, client notegate,
-#        키 해시, binding attachment). 로컬 개발 DB 전용.
+#        client-owned storage와 키 해시). 로컬 개발 DB 전용.
 # 사용: sh scripts/e2e-upload.sh   (종료 코드 = FAIL 수)
 BASE=http://127.0.0.1:8080
 RAW_KEY="fg_local-dev-notegate-key-0123456789abcdef"   # deploy/local/main.tf의 로컬 키
@@ -35,16 +35,15 @@ expect "인증 없음 401" 401 "$(curl -s -o /dev/null -w '%{http_code}' -X POST
 expect "틀린 키 401"   401 "$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/api/v1/files -H 'Authorization: Bearer fg_wrong' -H "$JSON" -d '{}')"
 
 echo "=== create ==="
-expect "없는 intent 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d '{"intent":"ghost","declared_size":1}')"
-expect "음수 크기 400"   400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d '{"intent":"attachment","declared_size":-1}')"
-expect "NUL(\\u0000) intent 404(500 아님)" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d '{"intent":"att\u0000ack","declared_size":1}')"
-expect "제어문자 content_type 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d '{"intent":"attachment","declared_size":1,"content_type":"a\u0000b"}')"
+expect "declared_size 누락 422" 422 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d '{}')"
+expect "음수 크기 400"   400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d '{"declared_size":-1}')"
+expect "제어문자 content_type 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d '{"declared_size":1,"content_type":"a\u0000b"}')"
 # 임계값 초과 선언은 multipart로 간다 (spec 02) — 크기 상한은 part×10,000.
 # 1PB는 어떤 합리적 part 설정에서도 상한 밖이라 400.
-expect "multipart 한계 초과 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d '{"intent":"attachment","declared_size":1000000000000000}')"
+expect "multipart 한계 초과 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d '{"declared_size":1000000000000000}')"
 
 CREATE=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files \
-  -d "{\"intent\":\"attachment\",\"declared_size\":$SIZE,\"content_type\":\"text/plain\",\"declared_md5\":\"$MD5\"}")
+  -d "{\"declared_size\":$SIZE,\"content_type\":\"text/plain\",\"declared_md5\":\"$MD5\"}")
 FILE_ID=$(printf '%s' "$CREATE" | sed -n 's/.*"file_id":"\([^"]*\)".*/\1/p')
 PUT_URL=$(printf '%s' "$CREATE" | sed -n 's/.*"put_url":"\([^"]*\)".*/\1/p')
 if [ -n "$FILE_ID" ] && [ -n "$PUT_URL" ]; then ok; else bad "create 응답에 file_id/put_url 없음: $CREATE"; fi
@@ -69,7 +68,7 @@ expect "commit 멱등 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AU
 expect "남의/없는 file commit 404" 404 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/api/v1/files/00000000-0000-0000-0000-000000000000/commit)"
 
 echo "=== 크기 불일치: pending에 남는다 ==="
-C2=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d '{"intent":"attachment","declared_size":999}')
+C2=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d '{"declared_size":999}')
 F2=$(printf '%s' "$C2" | sed -n 's/.*"file_id":"\([^"]*\)".*/\1/p')
 U2=$(printf '%s' "$C2" | sed -n 's/.*"put_url":"\([^"]*\)".*/\1/p')
 printf '%s' "$PAYLOAD" | curl -s -o /dev/null -X PUT --data-binary @- "$U2"
@@ -91,7 +90,7 @@ echo "=== stat ==="
 STAT=$(curl -s -H "$AUTH" $BASE/api/v1/files/$FILE_ID)
 case "$STAT" in *'"state":"active"'*) ok;; *) bad "stat active 아님: $STAT";; esac
 case "$STAT" in *"\"declared_size\":$SIZE"*) ok;; *) bad "stat 크기 불일치: $STAT";; esac
-case "$STAT" in *'"intent":"attachment"'*) ok;; *) bad "stat intent 불일치: $STAT";; esac
+case "$STAT" in *"\"file_id\":\"$FILE_ID\""*) ok;; *) bad "stat file_id 불일치: $STAT";; esac
 expect "read lease 원장 기록" "1" "$($PSQL "SELECT count(*) FROM leases WHERE file_id='$FILE_ID' AND kind='read';" | tr -d ' ')"
 
 echo "=== 회계 검증 ==="

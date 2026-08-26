@@ -1,13 +1,21 @@
 # 로컬 등록 그래프 — published 프로바이더(cagojeiger/filegate)로 등록부 전체를
 # 한 번의 apply로 세운다. e2e 스크립트(scripts/e2e-*.sh)의 전제 상태다.
 #
-#   storage(minio) ◀── binding(attachment) ── client(notegate) ── client_key
+#   storage ◀── client ── client_key
 #
 # 실행:
 #   docker compose up -d && cargo run --bin filegate   # 서버 기동
+#   mkdir -p /tmp/filegate-fs-demo
 #   export FILEGATE_OPERATOR_TOKEN=fgop_local-dev
-#   terraform -chdir=deploy/local init
+#   terraform -chdir=deploy/local init -upgrade
 #   terraform -chdir=deploy/local apply
+#
+# v0.1.0 로컬 state에서 올릴 때는 제거된 binding 주소를 state에서 한 번만 뺀다.
+# 이 명령은 DB 리소스를 삭제하지 않는다.
+#   terraform -chdir=deploy/local state rm \
+#     filegate_binding.notegate_attachment \
+#     filegate_binding.notegate_relay_att \
+#     filegate_binding.notegate_fs_att
 #
 # docker-compose.yml의 MinIO 자격증명과 동일한 로컬 개발 값이다. 실전은 TF 변수·시크릿.
 
@@ -15,7 +23,7 @@ terraform {
   required_providers {
     filegate = {
       source  = "cagojeiger/filegate"
-      version = "0.1.0"
+      version = "0.3.0"
     }
   }
 }
@@ -62,15 +70,28 @@ resource "filegate_storage_fs" "local_fs" {
   capacity_bytes = 1073741824
 }
 
-# ── client: 서비스 신원 (독립 노드) ──────────────────────────────
+# ── client: 서비스 신원 + 단일 기반 storage ─────────────────────
 
 resource "filegate_client" "notegate" {
-  id = "notegate"
+  id         = "notegate"
+  storage_id = filegate_storage_s3.minio_local.id
+}
+
+resource "filegate_client" "notegate_relay" {
+  id         = "notegate-relay"
+  storage_id = filegate_storage_s3.minio_relay.id
+}
+
+resource "filegate_client" "notegate_fs" {
+  id         = "notegate-fs"
+  storage_id = filegate_storage_fs.local_fs.id
 }
 
 # raw 키는 여기(TF state)에만 존재한다 — filegate에는 해시만 등록된다.
 locals {
-  notegate_raw_key = "fg_local-dev-notegate-key-0123456789abcdef"
+  notegate_raw_key       = "fg_local-dev-notegate-key-0123456789abcdef"
+  notegate_relay_raw_key = "fg_local-dev-notegate-relay-key-0123456789abcdef"
+  notegate_fs_raw_key    = "fg_local-dev-notegate-fs-key-0123456789abcdef"
 }
 
 resource "filegate_client_key" "notegate" {
@@ -78,22 +99,12 @@ resource "filegate_client_key" "notegate" {
   key_hash  = "sha256:${sha256(local.notegate_raw_key)}"
 }
 
-# ── binding: 두 노드를 잇는 엣지 ─────────────────────────────────
-
-resource "filegate_binding" "notegate_attachment" {
-  client_id  = filegate_client.notegate.id
-  intent     = "attachment"
-  storage_id = filegate_storage_s3.minio_local.id
+resource "filegate_client_key" "notegate_relay" {
+  client_id = filegate_client.notegate_relay.id
+  key_hash  = "sha256:${sha256(local.notegate_relay_raw_key)}"
 }
 
-resource "filegate_binding" "notegate_relay_att" {
-  client_id  = filegate_client.notegate.id
-  intent     = "relay-att"
-  storage_id = filegate_storage_s3.minio_relay.id
-}
-
-resource "filegate_binding" "notegate_fs_att" {
-  client_id  = filegate_client.notegate.id
-  intent     = "fs-att"
-  storage_id = filegate_storage_fs.local_fs.id
+resource "filegate_client_key" "notegate_fs" {
+  client_id = filegate_client.notegate_fs.id
+  key_hash  = "sha256:${sha256(local.notegate_fs_raw_key)}"
 }
