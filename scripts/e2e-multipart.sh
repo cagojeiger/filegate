@@ -8,10 +8,12 @@
 #   FILEGATE_MULTIPART_THRESHOLD_BYTES=6291456 (6MiB)
 #   FILEGATE_PART_SIZE_BYTES=5242880 (5MiB)
 #   (+ FILEGATE_PUBLIC_URL, 짧은 reconciler tick)
+#   deploy/local 적용(3 storage + storage별 client/key)
 # 12MiB 파일 → part 3개 (5MiB, 5MiB, 2MiB). 사용: sh scripts/e2e-multipart.sh
 BASE=http://127.0.0.1:8080
-RAW_KEY="fg_local-dev-notegate-key-0123456789abcdef"
-AUTH="Authorization: Bearer $RAW_KEY"
+AUTH_DIRECT="Authorization: Bearer fg_local-dev-notegate-key-0123456789abcdef"
+AUTH_RELAY="Authorization: Bearer fg_local-dev-notegate-relay-key-0123456789abcdef"
+AUTH_FS="Authorization: Bearer fg_local-dev-notegate-fs-key-0123456789abcdef"
 JSON="Content-Type: application/json"
 PG_CONTAINER="${FILEGATE_PG_CONTAINER:-filegate-postgres-1}"
 PSQL="docker exec $PG_CONTAINER psql -U filegate -d filegate -qtc"
@@ -44,71 +46,75 @@ SIZE=12582912
 # 발급된 parts 응답에서 n번 part의 URL을 뽑는다.
 part_url() { printf '%s' "$1" | python3 -c "import sys,json; parts=json.load(sys.stdin)['parts']; print(next(p['url'] for p in parts if p['part']==$2))" 2>/dev/null; }
 
-# ── 공통 시나리오 ── $1 intent, $2 storage_id, $3 direct|relay
+# ── 공통 시나리오 ── $1 label, $2 storage_id, $3 인증 헤더, $4 direct|relay
 run_mode() {
-  INTENT=$1; SID=$2; URLKIND=$3
-  echo "--- [multipart $INTENT → $SID / $URLKIND]"
-  C=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files \
-    -d "{\"intent\":\"$INTENT\",\"declared_size\":$SIZE,\"content_type\":\"application/zip\"}")
+  LABEL=$1; SID=$2; MODE_AUTH=$3; URLKIND=$4
+  echo "--- [multipart $LABEL → $SID / $URLKIND]"
+  C=$(curl -s -H "$MODE_AUTH" -H "$JSON" -X POST $BASE/api/v1/files \
+    -d "{\"declared_size\":$SIZE,\"content_type\":\"application/zip\"}")
   FID=$(printf '%s' "$C" | sed -n 's/.*"file_id":"\([^"]*\)".*/\1/p')
-  if [ -n "$FID" ]; then ok; else bad "[$INTENT] create 실패: $C"; return; fi
-  case "$C" in *'"put_url"'*) bad "[$INTENT] multipart인데 put_url이 있음: $C";; *) ok;; esac
-  case "$C" in *'"part_size":5242880'*'"part_count":3'*) ok;; *) bad "[$INTENT] 서술자 불일치: $C";; esac
+  if [ -n "$FID" ]; then ok; else bad "[$LABEL] create 실패: $C"; return; fi
+  case "$C" in *'"put_url"'*) bad "[$LABEL] multipart인데 put_url이 있음: $C";; *) ok;; esac
+  case "$C" in *'"part_size":5242880'*'"part_count":3'*) ok;; *) bad "[$LABEL] 서술자 불일치: $C";; esac
 
-  P=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files/$FID/parts -d '{"parts":[1,2,3]}')
+  P=$(curl -s -H "$MODE_AUTH" -H "$JSON" -X POST $BASE/api/v1/files/$FID/parts -d '{"parts":[1,2,3]}')
   U1=$(part_url "$P" 1); U2=$(part_url "$P" 2); U3=$(part_url "$P" 3)
-  if [ -n "$U1" ] && [ -n "$U2" ] && [ -n "$U3" ]; then ok; else bad "[$INTENT] parts 발급 실패: $P"; return; fi
+  if [ -n "$U1" ] && [ -n "$U2" ] && [ -n "$U3" ]; then ok; else bad "[$LABEL] parts 발급 실패: $P"; return; fi
   case "$URLKIND" in
-    direct) case "$U1" in http://127.0.0.1:9000/*) ok;; *) bad "[$INTENT] 직결 part URL 아님: $U1";; esac;;
-    relay)  case "$U1" in $BASE/blobs/*part=1*|$BASE/blobs/*\?s=*) ok;; *) bad "[$INTENT] 중계 part URL 아님: $U1";; esac;;
+    direct) case "$U1" in http://127.0.0.1:9000/*) ok;; *) bad "[$LABEL] 직결 part URL 아님: $U1";; esac;;
+    relay)  case "$U1" in $BASE/blobs/*part=1*|$BASE/blobs/*\?s=*) ok;; *) bad "[$LABEL] 중계 part URL 아님: $U1";; esac;;
   esac
 
-  expect "[$INTENT] part1 PUT 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$WORK/p1" "$U1")"
-  expect "[$INTENT] part3 PUT 200 (순서 무관)" 200 "$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$WORK/p3" "$U3")"
+  expect "[$LABEL] part1 PUT 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$WORK/p1" "$U1")"
+  expect "[$LABEL] part3 PUT 200 (순서 무관)" 200 "$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$WORK/p3" "$U3")"
   # 미완성 commit → 400, pending 유지 (part 2 없음)
-  expect "[$INTENT] 미완성 commit 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X POST $BASE/api/v1/files/$FID/commit)"
+  expect "[$LABEL] 미완성 commit 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$MODE_AUTH" -X POST $BASE/api/v1/files/$FID/commit)"
   # 크기 불일치 part의 즉시 차단은 중계만 가능 — 직결은 벤더가 크기를 안
   # 막고 commit이 사후 게이트다 (단일 PUT과 같은 경계, spec 00).
   if [ "$URLKIND" = "relay" ]; then
-    expect "[$INTENT] part 크기 불일치 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$WORK/p3" "$U2")"
+    expect "[$LABEL] part 크기 불일치 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$WORK/p3" "$U2")"
   fi
   # 재발급 = 재개 (spec 02): part2를 다시 요청해 올린다. 중계는 시크릿이
   # 회전하지 않아야 하므로, 재발급 뒤에도 앞서 받은 part1 URL(U1)이 살아
   # 있어야 한다 — 재개가 진행 중 다른 part를 죽이지 않는다는 계약.
-  P2=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files/$FID/parts -d '{"parts":[2]}')
+  P2=$(curl -s -H "$MODE_AUTH" -H "$JSON" -X POST $BASE/api/v1/files/$FID/parts -d '{"parts":[2]}')
   U2B=$(part_url "$P2" 2)
-  expect "[$INTENT] 재발급 part2 PUT 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$WORK/p2" "$U2B")"
+  expect "[$LABEL] 재발급 part2 PUT 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$WORK/p2" "$U2B")"
   if [ "$URLKIND" = "relay" ]; then
     # 앞 배치의 part1 URL을 재사용해 다시 PUT — 시크릿 비회전이면 200.
-    expect "[$INTENT] 재발급 후 앞 배치 URL 생존(비회전)" 200 "$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$WORK/p1" "$U1")"
+    expect "[$LABEL] 재발급 후 앞 배치 URL 생존(비회전)" 200 "$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$WORK/p1" "$U1")"
   fi
 
-  CM=$(curl -s -w '\n%{http_code}' -H "$AUTH" -X POST $BASE/api/v1/files/$FID/commit)
-  expect "[$INTENT] commit 200" 200 "$(printf '%s' "$CM" | tail -1)"
-  case "$CM" in *'-3'*) ok;; *) bad "[$INTENT] multipart ETag(-3) 아님: $CM";; esac
-  expect "[$INTENT] 회계 active 12MiB" "$SIZE" "$($PSQL "SELECT coalesce(sum(f.declared_size),0) FROM files f JOIN locations l ON l.file_id=f.id WHERE l.storage_id='$SID' AND f.state='active';" | tr -d ' ')"
+  CM=$(curl -s -w '\n%{http_code}' -H "$MODE_AUTH" -X POST $BASE/api/v1/files/$FID/commit)
+  expect "[$LABEL] commit 200" 200 "$(printf '%s' "$CM" | tail -1)"
+  case "$CM" in *'-3'*) ok;; *) bad "[$LABEL] multipart ETag(-3) 아님: $CM";; esac
+  expect "[$LABEL] 회계 active 12MiB" "$SIZE" "$($PSQL "SELECT coalesce(sum(f.declared_size),0) FROM files f JOIN locations l ON l.file_id=f.id WHERE l.storage_id='$SID' AND f.state='active';" | tr -d ' ')"
 
-  R=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files/$FID/read -d '{}')
+  R=$(curl -s -H "$MODE_AUTH" -H "$JSON" -X POST $BASE/api/v1/files/$FID/read -d '{}')
   GURL=$(printf '%s' "$R" | sed -n 's/.*"get_url":"\([^"]*\)".*/\1/p')
   curl -s -o "$WORK/down.bin" "$GURL"
-  expect "[$INTENT] 다운로드 md5 일치" "$WHOLE_MD5" "$(md5file "$WORK/down.bin")"
-  eval "FID_$(printf '%s' "$INTENT" | tr - _)=$FID"
+  expect "[$LABEL] 다운로드 md5 일치" "$WHOLE_MD5" "$(md5file "$WORK/down.bin")"
+  case "$LABEL" in
+    direct) FID_DIRECT=$FID;;
+    relay_s3) FID_RELAY_S3=$FID;;
+    relay_fs) FID_RELAY_FS=$FID;;
+  esac
 }
 
 echo "=== 3-모드 동등성 (multipart) ==="
-run_mode attachment minio-local  direct
-run_mode relay-att  minio-relay  relay
-run_mode fs-att     fs-local     relay
+run_mode direct   minio-local "$AUTH_DIRECT" direct
+run_mode relay_s3 minio-relay "$AUTH_RELAY"  relay
+run_mode relay_fs fs-local     "$AUTH_FS"     relay
 
 echo "=== part 검증 강화 ==="
-C=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files -d "{\"intent\":\"relay-att\",\"declared_size\":$SIZE}")
+C=$(curl -s -H "$AUTH_RELAY" -H "$JSON" -X POST $BASE/api/v1/files -d "{\"declared_size\":$SIZE}")
 FIDX=$(printf '%s' "$C" | sed -n 's/.*"file_id":"\([^"]*\)".*/\1/p')
 # (curl을 expect 인자 안에 중첩하면 macOS bash 3.2의 인용 버그로 JSON이 깨진다)
-MD5_REJECT=$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files \
-  -d "{\"intent\":\"relay-att\",\"declared_size\":$SIZE,\"declared_md5\":\"$WHOLE_MD5\"}")
+MD5_REJECT=$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH_RELAY" -H "$JSON" -X POST $BASE/api/v1/files \
+  -d "{\"declared_size\":$SIZE,\"declared_md5\":\"$WHOLE_MD5\"}")
 expect "multipart create에 declared_md5 400" 400 "$MD5_REJECT"
-expect "part 범위 초과 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files/$FIDX/parts -d '{"parts":[4]}')"
-P=$(curl -s -H "$AUTH" -H "$JSON" -X POST $BASE/api/v1/files/$FIDX/parts -d '{"parts":[1]}')
+expect "part 범위 초과 400" 400 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH_RELAY" -H "$JSON" -X POST $BASE/api/v1/files/$FIDX/parts -d '{"parts":[4]}')"
+P=$(curl -s -H "$AUTH_RELAY" -H "$JSON" -X POST $BASE/api/v1/files/$FIDX/parts -d '{"parts":[1]}')
 UX=$(part_url "$P" 1)
 # part 파라미터 없이 multipart lease에 PUT → 400
 UX_NOPART=$(printf '%s' "$UX" | sed 's/&part=1//')
@@ -124,10 +130,9 @@ INCOMPLETE=$(docker run --rm --network host --entrypoint sh minio/mc:RELEASE.202
 expect "벤더 미완성 세션 0 (Abort 확인)" 0 "$INCOMPLETE"
 
 echo "=== 세 모드 delete → purge → 회계 0 + fs 소멸 ==="
-for I in attachment relay_att fs_att; do
-  FID=$(eval echo "\$FID_$I")
-  expect "[$I] delete 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE $BASE/api/v1/files/$FID)"
-done
+expect "[direct] delete 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH_DIRECT" -X DELETE $BASE/api/v1/files/$FID_DIRECT)"
+expect "[relay_s3] delete 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH_RELAY" -X DELETE $BASE/api/v1/files/$FID_RELAY_S3)"
+expect "[relay_fs] delete 200" 200 "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH_FS" -X DELETE $BASE/api/v1/files/$FID_RELAY_FS)"
 sleep 8
 expect "회계 전부 0" "0" "$($PSQL "SELECT coalesce(sum(f.declared_size),0) FROM files f JOIN locations l ON l.file_id=f.id;" | tr -d ' ')"
 expect "fs 실물 전부 소멸" 0 "$(fs_count)"
