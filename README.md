@@ -1,6 +1,6 @@
 # filegate
 
-정책 기반 파일 게이트웨이. 서비스는 intent와 file_id만 알고, 물리(벤더·버킷·수명)는 filegate가 소유한다.
+정책 기반 파일 게이트웨이. 네이티브 표면은 `file_id`, S3 호환 표면은 서비스가 정한 논리키로 파일을 참조하고, 물리(벤더·버킷·수명)는 filegate가 소유한다.
 
 - 방향·원칙: [docs/adr/](docs/adr/README.md)
 - 오퍼레이션 계약: [docs/spec/](docs/spec/00-operations.md)
@@ -9,7 +9,7 @@
 
 ## 개발 환경
 
-설정은 전부 **환경 변수**다 (로컬 `.env`, 배포는 Terraform이 만든 k8s Secret): 서버 설정 + 마스터 키 + 운영자 토큰. 등록부(storages·clients·bindings)는 DB에 살고 운영자 API로 관리하며, storage 시크릿은 암호화되어 등록부에 보관된다 ([spec 01](docs/spec/01-registry.md)).
+설정은 전부 **환경 변수**다 (로컬 `.env`, 배포는 Terraform이 만든 k8s Secret): 서버 설정 + 마스터 키 + 운영자 토큰. 등록부(storages·clients·credentials)는 DB에 살고 운영자 API로 관리하며, storage와 S3 자격증명 시크릿은 암호화되어 등록부에 보관된다 ([spec 01](docs/spec/01-registry.md)).
 
 ```sh
 docker compose up -d          # MinIO(9000/9001) + PostgreSQL(55432) + 버킷 프로비저닝

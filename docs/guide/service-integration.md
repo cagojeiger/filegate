@@ -1,6 +1,6 @@
 # 서비스 연동 가이드
 
-- Date: 2026-07-13
+- Date: 2026-07-13 (개정 2026-08-26: 관찰 확정 반영)
 - 근거: [spec 00](../spec/00-operations.md) (오퍼레이션 계약), ADR [003](../adr/003-url-ownership.md)·[005](../adr/005-presigned-byte-plane.md)
 
 서비스가 filegate를 파일 저장 계층으로 붙이는 방법을 정한다. 서비스는
@@ -41,8 +41,10 @@ storage(벤더 자격증명)와 client(서비스 신원 + 키)를 등록한다 �
 ④ state == "active"면 file_id를 서비스 DB에 저장    · 이것이 업로드 완료의 정의
 ```
 
-완료의 판정자는 commit이다. 전송 주체의 PUT 성공(200)은 commit을 부르는
-신호로만 쓴다 — filegate는 저장소 실물을 직접 확인하고 승격한다.
+서비스가 즉시 완료를 확인하는 판정자는 commit이다. 전송 주체의 PUT 성공(200)을
+신호로 commit을 호출하면 filegate가 저장소 실물을 직접 확인하고 승격한다.
+단일 PUT은 commit을 생략해도 reconciler가 실물을 관찰해 확정할 수 있지만,
+서비스 연동의 기본 성공 경로는 명시적 commit 후 `active` 확인이다.
 
 대용량(임계값 초과)이면 ①의 응답이 put_url 대신 `{part_size, part_count}`
 서술자를 준다. 전송 주체는 `POST /api/v1/files/{id}/parts {parts:[...]}`로
@@ -51,7 +53,7 @@ commit은 동일하다.
 
 ## 업로드 실패
 
-commit되지 않은 파일은 lease 만료(15분) 후 filegate가 저장소 실물까지
+active로 확정되지 않은 파일은 lease 만료(15분) 후 filegate가 저장소 실물까지
 자동 회수한다. 서비스의 실패 처리 = 성공 경로만 처리하는 것이다.
 재시도는 15분 내 같은 URL로 다시 PUT하고 commit한다.
 

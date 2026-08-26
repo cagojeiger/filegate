@@ -1,7 +1,7 @@
 # spec 00: 단일 파일 오퍼레이션
 
 - Status: Accepted
-- Date: 2026-07-07 (개정 2026-07-13: 인터페이스 계약 명시 — ADR 005)
+- Date: 2026-07-07 (개정 2026-07-13: 인터페이스 계약 명시 — ADR 005. 2026-08-26: 등록부 정본·복구 계약 정합화)
 - 근거: ADR [000](../adr/000-identity.md), [001](../adr/001-multi-storage.md), [002](../adr/002-lease-model.md), [003](../adr/003-url-ownership.md), [004](../adr/004-config-layers.md), [005](../adr/005-presigned-byte-plane.md)
 - 실측: 2026-07-08, MinIO 싱글노드. "(실측)"은 이 확인에서 나온 사실이다.
 
@@ -74,7 +74,7 @@
 
 ### usage — 운영자 용량 조회
 
-- 운영자 표면이다. 클라이언트 자격증명으로는 호출할 수 없다. 읽기 전용 — 쓰기 표면은 Terraform 단독이다.
+- 운영자 표면이다. 클라이언트 자격증명으로는 호출할 수 없다. usage 자체는 읽기 전용이고, 등록 변경은 운영자 API를 통해서만 한다. Terraform provider는 그 API의 선언형 클라이언트다.
 - storage별: capacity 한도, 예약량(pending 합), 확정량(active 합), purge 대기 점유(deleted·미purge), 남은 여유(= 한도 − 앞의 셋), 그리고 각 버킷과 짝을 이루는 파일 수(pending·active·purge 대기).
 - (client × storage)별: 활성 점유(파일 수·바이트) — 여러 client가 한 storage를 공유할 때 각자의 몫을 가른다.
 - 전부 조회 시점 집계다 (저장 카운터 없음). 이 관찰이 배치·tiering 판단의 입력이다.
@@ -176,23 +176,24 @@ fs:       fg/{client}/{yyyy}/{mm}/{zz}/{file_id}[.ext]
   location 행이 없는 것을 지운다 (다음 범위의 감사 잡). 벤더 LastModified가
   보조 판정.
 
-**DB가 전소됐을 때 복구 가능한 것 (물리 + Terraform + 서비스 장부):**
+**DB 유실 시 복구 가능성 (물리 + DB 백업·운영자 선언 + 서비스 장부):**
 
 | 정보 | 복구 | 출처 |
 |---|---|---|
-| 등록부 전체 | 완전 | Terraform apply (정본은 TF다 — ADR 004) |
+| 등록부 전체 | 백업 의존 | PostgreSQL 백업 + 마스터 키. Terraform은 선언 관리한 일부만 재적용할 수 있으며 정본은 DB다 |
 | file_id·소유 client·시기 | 완전 | 경로와 이름 |
 | 실제 크기·체크섬 | 완전 | 실물 stat/HEAD/재해싱 (선언값보다 우월한 실측) |
 | 사용량 관찰 | 완전 | 항상 조회 시점 파생 — 저장 카운터가 없어 재구축할 것도 없다 |
-| 점유 시계열(usage_snapshot)·대여 이력(lease_history) | 소실 | 박제·기록된 관찰은 재계산 불가 — pg_dump가 유일한 보호 |
-| 파일의 의미(어느 노트의 첨부인지) | 완전 | 서비스 DB의 file_id (ADR 003 — 서비스가 두 번째 장부) |
-| 배치(client.storage_id) | 소실 | 객체 키엔 client_id만 있다 — 어느 storage였는지는 Terraform 재적용으로 복원 |
-| deleted(미purge) 결정 | 소실 | detach는 DB에만 있는 결정 — 전부 active로 과잉 복구되고, 서비스가 재삭제하면 끝 |
+| 점유 시계열(usage_snapshot)·대여 이력(lease_history) | 백업 의존 | 박제·기록된 관찰은 재계산 불가 |
+| 네이티브 파일의 의미(어느 노트의 첨부인지) | 완전 | 서비스 DB의 file_id (ADR 003 — 서비스가 두 번째 장부) |
+| S3 논리키 매핑((client, key) → file) | 백업 의존 | 물리 object key는 불투명 file_id라 논리키를 역산할 수 없다 |
+| 배치(client.storage_id) | 백업·선언 의존 | 객체 키엔 client_id만 있다. DB 백업 또는 운영자 선언으로 복원한다 |
+| S3 자격증명 | 백업·외부 상태 의존 | 암호문은 DB에, 발급 시 raw는 한 번만 반환된다 |
+| deleted(미purge) 결정 | 백업 의존 | detach는 DB에만 있는 결정 — 백업 없이는 active로 과잉 복구되고, 서비스가 재삭제해야 한다 |
 
-복구의 오류 방향은 항상 **과잉 복구**다(직결의 미커밋 객체·삭제 결정이
-active로 살아남) — 데이터를 잃는 방향의 오류는 구조적으로 없다.
-pg_dump 백업은 여전히 권장하지만, 잃는 것이 "전부"가 아니라
-"배치와 삭제 결정"으로 줄었다.
+DB 백업 없이 물리 객체를 훑으면 바이트는 과잉 복구할 수 있지만, S3 논리키
+매핑·자격증명·배치·삭제 결정 같은 DB 전용 상태는 보장할 수 없다. 따라서
+PostgreSQL 백업과 마스터 키 보존이 복구 계약의 필수 조건이다.
 
 **기각 기록** (같은 고민의 반복 방지): UUIDv7 등 시간 내장 ID — 경로 날짜와
 벤더 mtime이 같은 정보를 이미 가지므로 철회. object_key를 저장하지 않고
@@ -205,7 +206,7 @@ lease의 서명 토큰화 — 폐기·관측 상실로 기각. 내용 주소화 
 
 ## 경계선
 
-- 업로드 한 번은 create·commit 두 호출이다.
+- 즉시 확정 경로는 create·commit 두 호출이다. 단일 PUT은 reconciler의 관찰 확정으로 명시적 commit을 생략할 수도 있다. multipart는 명시적 완료가 필요하다.
 - 직결 PUT은 크기를 앞단에서 막지 못한다 (실측). commit이 사후 검증 게이트다. 상한을 넘는 실물은 파일이 되지 못하고 reconciler가 회수하며, 회수 전까지 초과 바이트가 잠시 존재한다. 중계 모드는 선언 크기에서 스트림을 끊는다.
 - 전송 주체는 Content-Length를 보낸다. 길이 미상(chunked) 전송은 저장소가 거부한다 (실측).
 - 중계 바이트 엔드포인트(`/blobs/{lease}`)의 확정 사항: 인증은 lease별 secret(URL에만, 서버는 해시), Content-Length 필수(411)·선언 크기와 일치(400)·초과 시 스트림 차단(413), CORS 응대, fs는 임시 경로 + rename 원자성. 중계 쓰기는 스트림 중 크기·MD5를 직접 계산해 기록하고 commit이 그것을 대조한다.

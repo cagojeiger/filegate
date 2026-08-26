@@ -1,7 +1,7 @@
 # spec 03: S3 호환 표면 오퍼레이션
 
 - Status: Accepted
-- Date: 2026-07-14
+- Date: 2026-07-14 (개정 2026-08-26: 구현된 multipart 라우팅·fs 조립 시점 반영)
 - 근거: ADR [006](../adr/006-s3-compat-surface.md) (중계를 수용한 온보딩 계층), [002](../adr/002-lease-model.md) (모든 접근은 lease), [003](../adr/003-url-ownership.md) (논리키 = 서비스 소유 이름)
 - 실측: boto3/botocore (2026-07-14, [scripts/s3-capture.py](../../scripts/s3-capture.py)) — 아래 요청 모양은 관측값이다
 
@@ -100,8 +100,9 @@ create가 `declared_size`를 받아 part 기하(개수·명목 크기·offset)�
   lease를 만들고 `UploadId`를 돌려준다. `UploadId`는 filegate 핸들(예: file_id
   기반)이고 벤더 upload_id는 lease에 내부 저장한다 — client는 벤더 id를 보지
   않는다(filegate 자격으로만 인증). s3 백엔드는 벤더 multipart 세션을 열고,
-  fs 백엔드는 조립 임시를 연다. **part 크기·개수는 클라이언트가 정한다** —
-  filegate는 강제하지 않는다.
+  fs 백엔드는 이 시점에 파일을 열지 않는다 — part별 임시 저장과 Complete의
+  조립으로 미룬다. **part 크기·개수는 클라이언트가 정한다** — filegate는
+  강제하지 않는다.
 - **UploadPart** `?partNumber=N&uploadId=U`: part 바이트를 스풀로 받아 백엔드로
   중계하고 **실측 크기·MD5를 part 원장에 기록**한다. s3는 벤더 UploadPart로
   그대로 넘긴다(클라이언트 part = 벤더 part; boto3 기본 chunk가 S3의 part
@@ -130,9 +131,9 @@ create가 `declared_size`를 받아 part 기하(개수·명목 크기·offset)�
 storage가 결정하며 s3·fs 같은 어댑터를 탄다(NAS 포함). 세션이 lease TTL보다
 오래 걸리면 part 접근은 재발급으로 살아있고, 미완 세션은 reconciler가 회수한다.
 
-라우팅상 POST와 `?uploads`·`?uploadId`·`?partNumber` 쿼리 분기는 현재 dispatch
-(PUT/GET/HEAD/DELETE만, POST는 405)에 없는 **새 표면**이다 — 어댑터는 단순
-배선이 아니라 이 라우팅과 위 크기-비선언 경로를 새로 짓는다.
+현재 dispatch는 인증과 `bucket == client_id` 검사를 공통으로 거친 뒤 POST와
+`?uploads`·`?uploadId`·`?partNumber` 조합으로 multipart 4종을, 나머지 메서드로
+단일 객체 4종을 분기한다. 지원하지 않는 조합은 405 `MethodNotAllowed`다.
 
 ### 에러 모양
 
