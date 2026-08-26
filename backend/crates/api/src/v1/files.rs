@@ -9,6 +9,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
+use filegate_core::multipart::part_count;
 use filegate_db::files::{self, CreateOutcome, CreateSpec, DeleteOutcome};
 use filegate_infra::{Address, s3_head_object, s3_presign_get, s3_presign_put};
 use serde::{Deserialize, Serialize};
@@ -154,7 +155,7 @@ pub(super) async fn create(
                 put_url: None,
                 multipart: Some(MultipartOut {
                     part_size: state.part_size,
-                    part_count: files::part_count(body.declared_size, state.part_size),
+                    part_count: part_count(body.declared_size, state.part_size),
                 }),
             }),
         )

@@ -7,6 +7,7 @@
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
+use filegate_core::multipart::{composite_etag, part_count, part_expected_size, part_number_ok};
 use filegate_db::files;
 use filegate_infra::Address;
 use serde::{Deserialize, Serialize};
@@ -19,7 +20,6 @@ use crate::error::{ApiError, bad_request, conflict, internal, not_found};
 use crate::lease::WRITE_LEASE_TTL;
 use crate::routes::AppState;
 use crate::storage_access::{StorageBackend, backend_from_row};
-use crate::validation::part_number_ok;
 
 /// multipart 확정 (spec 02): 중계는 원장(part 실측), 직결은 벤더 ListParts를
 /// 대조해 완성한다. 미완성이면 400과 함께 pending에 남는다.
@@ -31,7 +31,7 @@ pub(super) async fn commit(
     part_size: i64,
     backend: &StorageBackend,
 ) -> Result<Response, ApiError> {
-    let count = files::part_count(file.declared_size, part_size);
+    let count = part_count(file.declared_size, part_size);
     let Some(files::WriteLease {
         lease_id,
         upload_id,
@@ -92,7 +92,7 @@ pub(super) async fn commit(
                         .await
                         .map_err(internal)?;
                     // ETag는 S3 multipart와 같은 합성 규칙: md5(part md5들) + "-N".
-                    composite_etag(&parts)
+                    composite_etag(parts.iter().map(|(_, _, md5)| md5.as_str()))
                 }
             }
         }
@@ -118,23 +118,11 @@ fn verify_part_sizes(
         return Err(bad_request("upload is incomplete (missing parts)"));
     }
     for (n, size, _) in measured {
-        if *size != files::part_expected_size(declared_size, part_size, *n) {
+        if *size != part_expected_size(declared_size, part_size, *n) {
             return Err(bad_request("part size does not match declaration"));
         }
     }
     Ok(())
-}
-
-/// S3 multipart ETag와 같은 합성 규칙: 각 part MD5의 raw 바이트를 이어
-/// md5한 값 + "-{part 수}". fs 중계의 기록용 — 전체 MD5가 아님이 표식된다.
-/// part md5는 원장이 낳은 신뢰 입력이라(32 hex) 파싱 실패는 없다.
-fn composite_etag(parts: &[(i32, i64, String)]) -> String {
-    use md5::Digest as _;
-    let mut hasher = md5::Md5::new();
-    for (_, _, part_md5) in parts {
-        hasher.update(hex::decode(part_md5).unwrap_or_default());
-    }
-    format!("{:x}-{}", hasher.finalize(), parts.len())
 }
 
 #[derive(Deserialize)]
@@ -167,7 +155,7 @@ pub(super) async fn parts(
     let Some(part_size) = file.part_size else {
         return Err(bad_request("file is not a multipart upload"));
     };
-    let count = files::part_count(file.declared_size, part_size);
+    let count = part_count(file.declared_size, part_size);
     if body.parts.is_empty() || body.parts.len() > 1000 {
         return Err(bad_request("request 1 to 1000 parts at a time"));
     }
@@ -253,27 +241,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn composite_etag_hashes_part_md5s_and_suffixes_count() {
-        let zero = "00000000000000000000000000000000".to_owned();
-        let etag = composite_etag(&[(1, 5, zero.clone()), (2, 3, zero.clone())]);
-        // 형태: <32 hex>-<part 수>. part별 hex를 raw로 디코딩해 md5한 값이다.
-        let (digest, count) = etag.rsplit_once('-').unwrap();
-        assert_eq!(count, "2");
-        assert_eq!(digest.len(), 32);
-        assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()));
-        // part 수가 달라지면 접미와 다이제스트가 함께 바뀐다 (결정적).
-        let one = composite_etag(&[(1, 5, zero)]);
-        assert!(one.ends_with("-1"));
-        assert_ne!(one, etag);
-    }
-
-    #[test]
     fn verify_part_sizes_checks_count_and_each_part_size() {
         // 원장·벤더가 낸 part 목록의 개수·크기가 선언과 맞아야 통과한다.
         let (declared, ps) = (150_i64, 100_i64);
-        let count = files::part_count(declared, ps);
+        let count = part_count(declared, ps);
         let good: Vec<(i32, i64, String)> = (1..=count)
-            .map(|n| (n, files::part_expected_size(declared, ps, n), String::new()))
+            .map(|n| (n, part_expected_size(declared, ps, n), String::new()))
             .collect();
         assert!(verify_part_sizes(&good, declared, ps, count).is_ok());
         // 개수 미달 — 마지막 part가 빠지면 거부.

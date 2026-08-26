@@ -923,6 +923,7 @@ dependencies = [
  "dotenvy",
  "hex",
  "hkdf",
+ "md-5 0.10.6",
  "secrecy",
  "sha2 0.10.9",
  "subtle",

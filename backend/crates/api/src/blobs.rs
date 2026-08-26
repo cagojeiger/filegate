@@ -19,6 +19,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::put;
+use filegate_core::multipart::{part_count, part_expected_size, part_number_ok, part_offset};
 use filegate_db::files::{self, ByteLease};
 use filegate_infra::{Address, fs as fs_backend, rfc5987_encode, s3_open_read};
 use serde::Deserialize;
@@ -30,7 +31,6 @@ use crate::error::{ApiError, internal, not_found, status};
 use crate::routes::AppState;
 use crate::spool::{self, STREAM_BUF_SIZE, spool_root};
 use crate::storage_access::{CommitErr, StorageBackend, backend_from_row, commit_temp_to_backend};
-use crate::validation::part_number_ok;
 
 /// 파드당 동시 fs part 승격 상한. 승격은 claim(DB 행 락 + 풀 커넥션)을 쥔 채
 /// 디스크 복사를 하므로, 상한 없이 몰리면 커넥션 풀이 승격에 잠식돼 요청
@@ -190,11 +190,11 @@ async fn upload_part(
             "part number required for multipart uploads",
         ));
     };
-    let count = files::part_count(lease.declared_size, part_size);
+    let count = part_count(lease.declared_size, part_size);
     if !part_number_ok(part_no, count) {
         return Err(status(StatusCode::BAD_REQUEST, "part number out of range"));
     }
-    let expected = files::part_expected_size(lease.declared_size, part_size, part_no);
+    let expected = part_expected_size(lease.declared_size, part_size, part_no);
     if content_length != expected {
         return Err(status(
             StatusCode::BAD_REQUEST,
@@ -259,12 +259,9 @@ async fn upload_part(
                     }
                 }
             }
-            let promoted = fs_backend::write_part_at(
-                &target,
-                files::part_offset(part_size, part_no),
-                &temp_path,
-            )
-            .await;
+            let promoted =
+                fs_backend::write_part_at(&target, part_offset(part_size, part_no), &temp_path)
+                    .await;
             fs_backend::abort_write(&temp_path).await;
             if let Err(error) = promoted {
                 return Err(internal(error));
