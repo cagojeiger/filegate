@@ -1,7 +1,7 @@
 # ADR 006: S3 호환 표면은 중계를 수용한 온보딩 계층이다
 
 - Status: Accepted
-- Date: 2026-07-14
+- Date: 2026-07-14 (개정 2026-08-26: client 버킷 모델과 multipart 구현 반영)
 - 부모: [005](005-presigned-byte-plane.md) (네이티브 바이트 평면), [002](002-lease-model.md), [003](003-url-ownership.md)
 
 ## 문제
@@ -27,25 +27,24 @@ filegate를 또 하나의 S3로 등록한다"는 온보딩 — 무수정 AWS SDK
   네이티브 계층이 답이다 — 같은 장부 위에서 서비스 단위로 갈아탄다.
 - **인증은 S3의 모양 그대로다.** access key id + secret key 쌍, 요청은
   SigV4로 검증한다. bearer 클라이언트 키와 별개 발급물이다. 검증 코드는
-  스파이크(`spike/s3-gateway`)를 승격한다.
-- **bucket = intent, object key = 서비스의 논리키.** 서비스가 정하는
-  이름(논리키)은 서비스 소유다 (ADR 003) — 등록부가 (client, intent,
-  논리키) → file 매핑을 보관한다. 기본 버킷은 운영자가 지정한 binding
-  하나이며, 서비스는 그 이름만 통보받는다.
-- **확정은 관찰이다.** 중계 업로드는 스트림 실측이 곧 검증 재료고,
-  관찰 확정(spec 00)이 확정을 담당한다 — S3에 commit이 없으므로 이
-  표면에도 없다. 계약 충돌이 아니라 대칭이다.
-- **배치는 단일 매핑이다.** 업로드는 기본 버킷(binding이 가리키는
-  storage)으로 간다. 용량·비용 관리는 create 시점 선택이 아니라 **사후
+  스파이크(`spike/s3-gateway`)에서 승격했다.
+- **bucket = client_id, object key = 서비스의 논리키.** 인증된 client는
+  자기 id와 같은 버킷 하나만 쓴다. 서비스가 정한 논리키는 서비스 소유고
+  등록부가 (client, 논리키) → file 매핑을 보관한다 (ADR 003).
+- **단일 PUT은 관찰 확정, multipart는 Complete가 확정점이다.** 단일 PUT은
+  중계 스트림 실측으로 즉시 확정한다. multipart는 S3 프로토콜 자체의
+  CompleteMultipartUpload에서 part 원장을 검증하고 확정한다.
+- **배치는 client의 단일 storage다.** 업로드는 client의 `storage_id`가
+  가리키는 storage로 간다. 용량·비용 관리는 create 시점 선택이 아니라 **사후
   재배치(tiering, 다음 범위)**의 몫이다 — file/location 분리(ADR 001)가
   그 이동을 예비하고, 위치가 바뀌어도 논리키·file_id는 흔들리지 않는다.
 
 ## 범위
 
-이번 범위: PutObject·GetObject·HeadObject·DeleteObject, SigV4 인증,
-논리키 매핑. multipart 4종(Create/UploadPart/Complete/Abort)은 다음
-단계다 — 네이티브 multipart(spec 02)의 중계 경로가 물리를 이미 갖고
-있다. ListObjectsV2는 보류한다 — 목록의 진실 원천은 서비스 DB다.
+지원 범위: PutObject·GetObject·HeadObject·DeleteObject와 multipart 4종
+(CreateMultipartUpload·UploadPart·CompleteMultipartUpload·AbortMultipartUpload),
+SigV4 인증, 논리키 매핑. ListObjectsV2는 보류한다 — 목록의 진실 원천은
+서비스 DB다.
 
 ## 경계선
 
@@ -60,5 +59,5 @@ filegate를 또 하나의 S3로 등록한다"는 온보딩 — 무수정 AWS SDK
 
 - 서비스 온보딩 = "S3 계정 하나 더": endpoint + key 쌍 + 버킷 이름.
 - 트래픽 비용의 선택권이 서비스 단위로 생긴다: 편의(호환) ↔ 직결(네이티브).
-- 스파이크를 승격해 SigV4 검증(header·query-signed), 논리키 매핑,
-  Put/Get/Head/Delete 네 오퍼레이션을 구현했다 (spec 03, api/src/s3).
+- SigV4 검증(header·query-signed), 논리키 매핑, 단일 객체 4종과 multipart
+  4종을 구현했다 (spec 03, api/src/s3).

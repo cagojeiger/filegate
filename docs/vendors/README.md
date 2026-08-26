@@ -30,6 +30,6 @@ ADR(`docs/adr/`)과의 역할 구분: ADR은 잘 변하지 않는 우리의 결�
 ## 배치 정책에 주는 함의
 
 - **무료 구간 = storage capacity 설정값.** 합계 ~50GB + 홈서버가 월 $0.
-- **기본 배치**: v0는 MinIO 단독(직결). fs(NFS)·OCI는 다음 범위 (결정의 정본: [spec 00](../spec/00-operations.md)). 이후 — 자주 읽힘(hot/공개) → R2, 일반 보관 → OCI Standard, 장기 보관 → OCI Archive, 임시/개발 → MinIO. S3는 기본 배치에서 제외.
+- **기본 배치**: v0 기본은 MinIO(직결)이고 fs/NFS adapter(항상 중계)도 구현되어 있다 ([spec 00](../spec/00-operations.md)). OCI·R2의 실제 배포와 검증은 이후 범위다. 이후 — 자주 읽힘(hot/공개) → R2, 일반 보관 → OCI Standard, 장기 보관 → OCI Archive, 임시/개발 → MinIO. AWS S3는 기본 배치에서 제외.
 - **우리 규모에서 이동 로직의 동인은 egress가 아니라 무료 구간 압박이다.** R2·OCI 모두 전송이 사실상 공짜라, 실제 최적화는 용량이 차오를 때 안 읽히는 파일을 밀어내는 tiering(capacity-pressure eviction). 판단 근거인 파일별 읽기 빈도는 read lease 발급 기록에서 나온다(직결 모드는 실사용을 관측하지 못한다 — ADR 002).
 - **같은 벤더의 다른 계정 = 다른 storage.** storage는 브랜드가 아니라 접근 계약(계정+endpoint+공간)이다(ADR 001). 단, 무료 구간의 계정 스택은 벤더 ToS 확인 후에.

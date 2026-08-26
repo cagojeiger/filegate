@@ -1,7 +1,7 @@
 # ADR 001: storage는 코드가 아니라 데이터다
 
 - Status: Accepted
-- Date: 2026-07-03 (개정 2026-07-10: 용어 provider→storage, profile 제거)
+- Date: 2026-07-03 (개정 2026-07-10: 용어 provider→storage, profile 제거. 2026-08-26: client 소유 storage 모델 반영)
 - 부모: [000](000-identity.md) 공리 1 (물리는 filegate가 소유한다)
 
 ## 문제
@@ -16,7 +16,7 @@
 - **내부 주소와 공개 주소를 구분한다.** 서명 URL은 주소에 묶인다. filegate가 쓰는 주소와 전송 주체가 쓰는 주소는 다를 수 있다.
 - **capability는 선언식이다.** 런타임 탐지 대신 운영자가 선언하고, 틀리면 해당 storage 사용 시 실패한다. 선언 단위는 storage다(v0) — s3의 force_relay 하나가 읽기·쓰기 모두의 직결/중계를 가른다. 오퍼레이션별 분화는 필요가 실증되면 확장한다.
 - **file과 location을 분리한다.** file은 정체성이고, location은 바뀔 수 있는 위치다.
-- **배치는 등록이 정한다.** v0는 binding이 가리키는 storage 하나에 저장한다 — 명시 선언만 ([spec 01](../spec/01-registry.md)). 후보 풀과 선택 전략은 자동 배치가 올 때 확장한다.
+- **배치는 등록이 정한다.** v0는 client가 `storage_id`로 참조하는 storage 하나에 저장한다 — 명시 선언만 ([spec 01](../spec/01-registry.md)). 후보 풀과 선택 전략은 자동 배치가 올 때 확장한다.
 
 ## 경계선
 
