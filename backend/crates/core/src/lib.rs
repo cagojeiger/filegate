@@ -1,9 +1,10 @@
-//! 도메인 독립 기반: 에러 타입, env 설정, storage 시크릿 암호화.
+//! 공유 기반: 에러, env 설정, 시크릿 암호화, 순수 multipart 계약.
 
 mod config;
 mod crypto;
 mod error;
 mod hash;
+pub mod multipart;
 
 pub use config::{Config, DatabaseConfig, LogFormat, SecurityConfig, ServerConfig};
 pub use crypto::{Crypto, EncryptedSecret};

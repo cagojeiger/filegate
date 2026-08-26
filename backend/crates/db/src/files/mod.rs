@@ -13,12 +13,10 @@
 //!   commit     pending→active 확정 정산
 //!   sweep      detach·만료 회수·purge·lease GC (reconciler 스캔)
 //!   multipart  part 원장 (벤더 핸들·중계 secret·승격 직렬화)
-//!   geometry   part 기하 파생 (순수 함수)
 
 mod access;
 mod commit;
 mod create;
-mod geometry;
 mod multipart;
 mod sweep;
 
@@ -30,7 +28,6 @@ pub use commit::{
     ObservedCommitCandidate, finalize_commit, finalize_multipart_commit, observed_commit_candidates,
 };
 pub use create::{CreateOutcome, CreateSpec, CreatedFile, create};
-pub use geometry::{part_count, part_expected_size, part_offset};
 pub use multipart::{
     PartClaim, WriteLease, attach_upload_id, claim_part, done_parts, extend_write_lease,
     has_done_parts, record_part_done, write_lease,

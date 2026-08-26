@@ -1,6 +1,7 @@
 //! multipart part 원장 (spec 02) — 벤더 세션 핸들·part 실측·승격 직렬화.
 //!
-//! 기하(개수·offset·part별 크기)는 저장하지 않는다 — geometry가 파생한다.
+//! 기하(개수·offset·part별 크기)는 저장하지 않는다 — `filegate_core::multipart`가
+//! 순수 계약으로 파생한다.
 //! 여기 남는 것은 파생 불가능한 외부 값(upload_id)과 실측, 그리고 승격
 //! 직렬화 상태(claimed/done)뿐이다. 중계 secret은 lease id에서 파생하므로
 //! 원문을 저장하지 않는다 — 인증용 해시만 남는다 (spec 02).

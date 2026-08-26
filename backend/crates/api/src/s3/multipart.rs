@@ -15,6 +15,7 @@
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use filegate_core::multipart::{MAX_PARTS, composite_etag, part_number_ok};
 use filegate_db::files::{self, CreateOutcome, CreateSpec};
 use filegate_db::s3_registry as s3reg;
 use filegate_infra::{Address, fs as fs_backend};
@@ -32,9 +33,6 @@ use crate::routes::AppState;
 use crate::spool::{self, STREAM_BUF_SIZE, spool_root};
 use crate::storage_access::{StorageBackend, backend_from_row};
 use crate::validation::content_type_ok;
-
-/// S3 part 번호 상한 (벤더 규칙) — [1, 10000].
-const MAX_PART_NUMBER: i32 = 10_000;
 
 /// Complete 요청 XML 본문 상한 — part 목록만 담긴다 (10,000개 × ~120B ≈ 1.2MB).
 /// 바이트는 이 표면을 지나지 않으므로 넉넉히 4MiB로 둔다.
@@ -130,7 +128,7 @@ pub(super) async fn upload_part(
     headers: &HeaderMap,
     body: Body,
 ) -> S3Result {
-    if !(1..=MAX_PART_NUMBER).contains(&part_number) {
+    if !part_number_ok(part_number, MAX_PARTS) {
         return Err(xml_error(
             StatusCode::BAD_REQUEST,
             "InvalidArgument",
@@ -321,7 +319,7 @@ pub(super) async fn complete_multipart(
     let bound = file
         .part_size
         .unwrap_or(0)
-        .saturating_mul(i64::from(MAX_PART_NUMBER));
+        .saturating_mul(i64::from(MAX_PARTS));
     if total > bound {
         return Err(xml_error(
             StatusCode::BAD_REQUEST,
@@ -381,7 +379,7 @@ pub(super) async fn complete_multipart(
                 fs_backend::abort_write(&fs_backend::multipart_part_temp(root, &lease_str, *n))
                     .await;
             }
-            composite_etag(&completion)
+            composite_etag(completion.iter().map(|(_, _, md5)| md5.as_str()))
         }
     };
 
@@ -540,18 +538,6 @@ fn reconcile(
     Ok(completion)
 }
 
-/// S3 multipart ETag와 같은 합성 규칙: 각 part MD5의 raw 바이트를 이어 md5한
-/// 값 + "-{part 수}". fs 조립의 기록용 — 전체 MD5가 아님이 접미로 표식된다.
-/// part md5는 원장이 낳은 신뢰 입력(32 hex)이라 파싱 실패는 없다.
-fn composite_etag(parts: &[(i32, i64, String)]) -> String {
-    use md5::Digest as _;
-    let mut hasher = md5::Md5::new();
-    for (_, _, part_md5) in parts {
-        hasher.update(hex::decode(part_md5).unwrap_or_default());
-    }
-    format!("{:x}-{}", hasher.finalize(), parts.len())
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -596,19 +582,5 @@ mod tests {
         assert!(reconcile(&[(2, "bbbb".to_owned()), (1, "aaaa".to_owned())], &ledger).is_err());
         // 오름차순·유일은 통과.
         assert!(reconcile(&[(1, "aaaa".to_owned()), (2, "bbbb".to_owned())], &ledger).is_ok());
-    }
-
-    #[test]
-    fn composite_etag_hashes_part_md5s_and_suffixes_count() {
-        let zero = "00000000000000000000000000000000".to_owned();
-        let etag = composite_etag(&[(1, 5, zero.clone()), (2, 3, zero.clone())]);
-        let (digest, count) = etag.rsplit_once('-').unwrap();
-        assert_eq!(count, "2");
-        assert_eq!(digest.len(), 32);
-        assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()));
-        // part 수가 다르면 접미와 다이제스트가 함께 바뀐다.
-        let one = composite_etag(&[(1, 5, zero)]);
-        assert!(one.ends_with("-1"));
-        assert_ne!(one, etag);
     }
 }

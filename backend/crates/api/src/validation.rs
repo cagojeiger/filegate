@@ -3,6 +3,8 @@
 //! 표면마다 재구현하면 한쪽만 상한을 빠뜨리거나(5GiB 우회) 잘못된 메타를
 //! 조용히 흘린다.
 
+use filegate_core::multipart::MAX_PARTS;
+
 /// v0 단일 PUT 상한 (spec 00: 5GiB 초과는 multipart와 함께 다음 범위).
 /// 회계 합산의 overflow 방어이기도 하다.
 pub const MAX_SINGLE_PUT_BYTES: i64 = 5 * 1024 * 1024 * 1024;
@@ -28,7 +30,7 @@ pub fn classify_upload(
     let multipart = declared_size > multipart_threshold;
     if multipart {
         // 크기 상한은 part 수 한계(벤더 10,000)로 정해진다.
-        if declared_size > part_size.saturating_mul(10_000) {
+        if declared_size > part_size.saturating_mul(i64::from(MAX_PARTS)) {
             return Err("declared_size exceeds the multipart limit");
         }
         // 전체 md5는 multipart의 어떤 모드에서도 실측되지 않는다 (ADR 002) —
@@ -48,12 +50,6 @@ pub fn classify_upload(
 /// 대조하므로 대문자도 받는다). 값 일치가 아니라 형태만 본다.
 pub fn declared_md5_format_ok(md5: &str) -> bool {
     md5.len() == 32 && md5.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-/// part 번호가 [1, count] 안인가 — multipart 발급·중계 업로드가 공유하는
-/// 범위 계약 (spec 02).
-pub fn part_number_ok(n: i32, count: i32) -> bool {
-    n >= 1 && n <= count
 }
 
 #[cfg(test)]
@@ -98,9 +94,12 @@ mod tests {
         );
         // multipart 상한 = part_size × 10,000.
         let ps = 64;
-        assert_eq!(classify_upload(ps * 10_000, 64, ps, false), Ok(true));
         assert_eq!(
-            classify_upload(ps * 10_000 + 1, 64, ps, false),
+            classify_upload(ps * i64::from(MAX_PARTS), 64, ps, false),
+            Ok(true)
+        );
+        assert_eq!(
+            classify_upload(ps * i64::from(MAX_PARTS) + 1, 64, ps, false),
             Err("declared_size exceeds the multipart limit")
         );
     }
@@ -122,14 +121,5 @@ mod tests {
         assert!(!declared_md5_format_ok("0123456789abcdef0123456789abcde")); // 31자
         assert!(!declared_md5_format_ok("0123456789abcdef0123456789abcdef0")); // 33자
         assert!(!declared_md5_format_ok("0123456789abcdef0123456789abcdeg")); // 비 hex(g)
-    }
-
-    #[test]
-    fn part_number_is_in_the_inclusive_range() {
-        assert!(!part_number_ok(0, 3)); // 0은 범위 밖
-        assert!(part_number_ok(1, 3)); // 하한
-        assert!(part_number_ok(3, 3)); // 상한
-        assert!(!part_number_ok(4, 3)); // 상한 초과
-        assert!(part_number_ok(1, 1)); // part 하나짜리
     }
 }
