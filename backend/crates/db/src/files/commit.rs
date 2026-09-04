@@ -18,7 +18,8 @@ pub async fn finalize_commit(
     let transitioned = sqlx::query(
         "UPDATE files SET state = 'active', etag = $2, committed_at = now() \
          WHERE id = $1 AND state = 'pending' \
-         AND NOT EXISTS (SELECT 1 FROM s3_uploads WHERE file_id = $1)",
+         AND NOT EXISTS (SELECT 1 FROM s3_uploads WHERE file_id = $1) \
+         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions WHERE file_id = $1)",
     )
     .bind(file_id)
     .bind(etag)
@@ -55,7 +56,8 @@ pub async fn finalize_multipart_commit(
     let transitioned = sqlx::query(
         "UPDATE files SET state = 'active', declared_size = $2, etag = $3, committed_at = now() \
          WHERE id = $1 AND state = 'pending' \
-         AND NOT EXISTS (SELECT 1 FROM s3_uploads WHERE file_id = $1)",
+         AND NOT EXISTS (SELECT 1 FROM s3_uploads WHERE file_id = $1) \
+         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions WHERE file_id = $1)",
     )
     .bind(file_id)
     .bind(declared_size)

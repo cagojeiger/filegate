@@ -43,7 +43,7 @@
 - **배치는 유계**: CTE + `LIMIT`으로 한 run에 조금씩. run 결과는 tracing 구조화 로그로.
 - **부팅 배선** (notegate main.rs 순서): config 로드 → PG 연결·마이그레이션 → 상태 구성 → HTTP listen + worker spawn → `tokio::select`로 종료 신호 대기 → HTTP부터 순차 shutdown.
 
-filegate의 reconciler 잡(9종): 단일 PUT 관찰 확정, pending 만료 회수, deleted purge, read lease 만료 정리, 임시 파일 청소, 종료 lease GC, lease_history 보존 prune, usage_snapshot 일별 기록, 종착 file 행 정리. tiering은 이후 범위다. 주의: fs/NFS storage를 멀티 파드로 쓰려면 모든 파드가 같은 마운트를 공유해야 한다 — 중계 요청이 어느 파드로 와도 같은 파일에 닿아야 하고, 임시 경로 + rename 원자성은 같은 마운트 안에서만 성립한다.
+filegate의 reconciler 책임은 단일 PUT 관찰 확정, native/S3 완료 복구, S3 세션 만료·정리, generic pending 만료 회수, deleted purge, read lease 만료 정리, 임시 파일 청소, 종료 lease GC, lease_history 보존 prune, usage_snapshot 일별 기록, 종착 file 행 정리다. 각 작업은 유계 배치이고 완료 복구처럼 외부 상태를 관찰하는 책임은 별도 함수·모듈로 분리한다. tiering은 이후 범위다. 주의: fs/NFS storage를 멀티 파드로 쓰려면 모든 파드가 같은 마운트를 공유해야 한다 — 중계 요청이 어느 파드로 와도 같은 파일에 닿아야 하고, 임시 경로 + rename 원자성은 같은 마운트 안에서만 성립한다.
 
 ## 비밀과 설정
 

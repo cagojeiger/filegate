@@ -11,11 +11,13 @@
 //!   create     선언 해석 → pending 기록 + object_key 규칙 (capacity 검사 없음)
 //!   access     조회 전용 (commit 검증·read 해석·stat·byte lease·실측 기록)
 //!   commit     pending→active 확정 정산
+//!   completion native multipart 완료 소유권·복구
 //!   sweep      detach·만료 회수·purge·lease GC (reconciler 스캔)
 //!   multipart  part 원장 (벤더 핸들·중계 secret·승격 직렬화)
 
 mod access;
 mod commit;
+mod completion;
 mod create;
 mod multipart;
 mod sweep;
@@ -27,11 +29,18 @@ pub use access::{
 pub use commit::{
     ObservedCommitCandidate, finalize_commit, finalize_multipart_commit, observed_commit_candidates,
 };
+pub use completion::{
+    CompletionCandidate, CompletionStart, begin_completion, claim_cleanup,
+    cleanup_candidates as completion_cleanup_candidates, completion_candidates,
+    finalize_cleanup as finalize_completion_cleanup, finalize_completion, renew_completion_lease,
+    reopen_completion,
+};
 pub(crate) use create::create_in_tx;
 pub use create::{CreateOutcome, CreateSpec, CreatedFile, create};
 pub use multipart::{
-    PartClaim, WriteLease, attach_upload_id, claim_part, done_parts, extend_write_lease,
-    has_done_parts, record_part_done, write_lease,
+    PartClaim, RelayPartClaim, WriteLease, attach_upload_id, cancel_relay_part, claim_part,
+    claim_relay_part, done_parts, extend_write_lease, finish_relay_part, has_done_parts,
+    record_part_done, renew_relay_part_lease, write_lease,
 };
 pub use sweep::{
     DeleteOutcome, SweepCandidate, active_multipart_lease_ids, expire_read_leases, expired_pending,

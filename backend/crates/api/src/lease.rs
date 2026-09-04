@@ -17,14 +17,18 @@ pub const READ_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone, Copy)]
 enum WriteOwnership {
-    Completion,
+    NativeCompletion,
+    NativeUploadPart { lease_id: Uuid, part_no: i32 },
+    S3Completion,
     UploadPart { lease_id: Uuid, part_no: i32 },
 }
 
 impl WriteOwnership {
     fn operation(&self) -> &'static str {
         match self {
-            Self::Completion => "completion",
+            Self::NativeCompletion => "native_completion",
+            Self::NativeUploadPart { .. } => "native_upload_part",
+            Self::S3Completion => "s3_completion",
             Self::UploadPart { .. } => "upload_part",
         }
     }
@@ -52,7 +56,21 @@ async fn run_with_write_heartbeat<T>(
             result = &mut operation => return Some(result),
             _ = heartbeat.tick() => {
                 let renewed = match ownership {
-                    WriteOwnership::Completion => s3_registry::renew_completion_lease(
+                    WriteOwnership::NativeCompletion => files::renew_completion_lease(
+                        pool,
+                        file_id,
+                        WRITE_LEASE_TTL.as_secs() as i64,
+                    ).await,
+                    WriteOwnership::NativeUploadPart { lease_id, part_no } => {
+                        files::renew_relay_part_lease(
+                            pool,
+                            file_id,
+                            lease_id,
+                            part_no,
+                            WRITE_LEASE_TTL.as_secs() as i64,
+                        ).await
+                    }
+                    WriteOwnership::S3Completion => s3_registry::renew_completion_lease(
                         pool,
                         file_id,
                         WRITE_LEASE_TTL.as_secs() as i64,
@@ -94,7 +112,31 @@ pub async fn run_with_completion_heartbeat<T>(
     file_id: Uuid,
     operation: impl Future<Output = T>,
 ) -> Option<T> {
-    run_with_write_heartbeat(pool, file_id, WriteOwnership::Completion, operation).await
+    run_with_write_heartbeat(pool, file_id, WriteOwnership::S3Completion, operation).await
+}
+
+pub async fn run_with_native_completion_heartbeat<T>(
+    pool: &PgPool,
+    file_id: Uuid,
+    operation: impl Future<Output = T>,
+) -> Option<T> {
+    run_with_write_heartbeat(pool, file_id, WriteOwnership::NativeCompletion, operation).await
+}
+
+pub async fn run_with_native_upload_part_heartbeat<T>(
+    pool: &PgPool,
+    file_id: Uuid,
+    lease_id: Uuid,
+    part_no: i32,
+    operation: impl Future<Output = T>,
+) -> Option<T> {
+    run_with_write_heartbeat(
+        pool,
+        file_id,
+        WriteOwnership::NativeUploadPart { lease_id, part_no },
+        operation,
+    )
+    .await
 }
 
 pub async fn run_with_upload_part_heartbeat<T>(

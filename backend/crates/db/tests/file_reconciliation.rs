@@ -1,7 +1,4 @@
-//! 파일 라이프사이클 통합 테스트 — create의 기록, commit·delete의 상태
-//! 전이, reclaim·purge의 정리, 그리고 점유가 storage 삭제를 막는 이음새.
-//! 사용량은 저장된 카운터가 아니라 조회 시점 집계로 관찰한다 (spec 00 —
-//! capacity는 집행이 아니라 관찰). 테스트마다 격리 DB(`#[sqlx::test]`).
+//! File reconciliation and retention integration tests.
 
 #![allow(
     clippy::unwrap_used,
@@ -10,152 +7,13 @@
     clippy::indexing_slicing
 )]
 
-use filegate_db::files::{self, CreateOutcome, CreateSpec, CreatedFile, DeleteOutcome};
-use filegate_db::registry::{self, StorageRow, WriteOp, WriteViolation};
-use filegate_db::usage;
+#[path = "support/lifecycle.rs"]
+mod support;
+
+use filegate_db::files::{self, CreateSpec};
+use filegate_db::registry;
 use sqlx::PgPool;
-
-// ── 픽스처 ──────────────────────────────────────────────────
-
-fn s3_row(id: &str, capacity: i64) -> StorageRow {
-    StorageRow {
-        id: id.to_owned(),
-        kind: "s3".to_owned(),
-        force_relay: false,
-        root_path: None,
-        endpoint: Some("http://minio:9000".to_owned()),
-        public_endpoint: Some("http://minio:9000".to_owned()),
-        region: Some("us-east-1".to_owned()),
-        bucket: Some("b".to_owned()),
-        force_path_style: true,
-        access_key: Some("ak".to_owned()),
-        secret_key_ciphertext: Some(vec![1, 2, 3]),
-        secret_key_nonce: Some(vec![0_u8; 12]),
-        enc_key_id: Some("v1".to_owned()),
-        capacity_bytes: capacity,
-    }
-}
-
-/// storage "s"(capacity)를 소유하는 client "c".
-async fn wire(pool: &PgPool, capacity: i64) {
-    registry::insert_storage(pool, &s3_row("s", capacity))
-        .await
-        .unwrap();
-    registry::insert_client(pool, "c", "s").await.unwrap();
-}
-
-fn spec(declared_size: i64) -> CreateSpec<'static> {
-    CreateSpec {
-        client_id: "c",
-        declared_size,
-        content_type: None,
-        declared_md5: None,
-        lease_ttl_secs: 900,
-        part_size: None,
-    }
-}
-
-/// create가 Created를 냈다고 단정하고 내용을 꺼낸다.
-async fn create_ok(pool: &PgPool, declared_size: i64) -> CreatedFile {
-    match files::create(pool, spec(declared_size)).await.unwrap() {
-        CreateOutcome::Created(created) => *created,
-        CreateOutcome::NoClient => panic!("expected Created, got NoClient"),
-    }
-}
-
-/// storage "s"의 관찰량 — (reserved, active, purge_pending) 바이트.
-async fn observed(pool: &PgPool) -> (i64, i64, i64) {
-    let rows = usage::by_storage(pool).await.unwrap();
-    let s = rows.iter().find(|r| r.storage_id == "s").unwrap();
-    (s.reserved_bytes, s.active_bytes, s.purge_pending_bytes)
-}
-
-// ── create ───────────────────────────────────────────────────
-
-#[sqlx::test(migrations = "./migrations")]
-async fn create_for_unregistered_client_is_no_client(pool: PgPool) {
-    // 소유 storage가 있어도 client가 없으면 해석 불가.
-    registry::insert_storage(&pool, &s3_row("s", 1000))
-        .await
-        .unwrap();
-    assert!(matches!(
-        files::create(&pool, spec(100)).await.unwrap(),
-        CreateOutcome::NoClient
-    ));
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn create_is_observed_as_reserved(pool: PgPool) {
-    wire(&pool, 1000).await;
-    create_ok(&pool, 100).await;
-    assert_eq!(observed(&pool).await, (100, 0, 0));
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn create_beyond_capacity_is_not_rejected(pool: PgPool) {
-    // capacity는 관찰이지 집행이 아니다 (spec 00) — 상한을 넘는 선언도
-    // 발급된다. 배치 판단은 운영자의 몫이고, 물리 한계는 저장소가 낸다.
-    wire(&pool, 100).await;
-    create_ok(&pool, 200).await;
-    assert_eq!(observed(&pool).await, (200, 0, 0));
-}
-
-// ── 상태 전이 ────────────────────────────────────────────────
-
-#[sqlx::test(migrations = "./migrations")]
-async fn commit_moves_reserved_to_active(pool: PgPool) {
-    wire(&pool, 1000).await;
-    let file = create_ok(&pool, 100).await;
-    assert!(
-        files::finalize_commit(&pool, file.file_id, "etag")
-            .await
-            .unwrap()
-    );
-    assert_eq!(observed(&pool).await, (0, 100, 0));
-    // 이중 commit은 전이 경합의 패자 — false.
-    assert!(
-        !files::finalize_commit(&pool, file.file_id, "etag")
-            .await
-            .unwrap()
-    );
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn mark_deleted_moves_active_to_purge_pending(pool: PgPool) {
-    wire(&pool, 1000).await;
-    let file = create_ok(&pool, 100).await;
-    files::finalize_commit(&pool, file.file_id, "etag")
-        .await
-        .unwrap();
-    assert!(matches!(
-        files::mark_deleted(&pool, "c", file.file_id).await.unwrap(),
-        DeleteOutcome::Deleted
-    ));
-    assert_eq!(observed(&pool).await, (0, 0, 100));
-    // 멱등 — 두 번째 delete는 AlreadyDeleted.
-    assert!(matches!(
-        files::mark_deleted(&pool, "c", file.file_id).await.unwrap(),
-        DeleteOutcome::AlreadyDeleted
-    ));
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn mark_deleted_diagnoses_wrong_states(pool: PgPool) {
-    wire(&pool, 1000).await;
-    let pending = create_ok(&pool, 100).await;
-    assert!(matches!(
-        files::mark_deleted(&pool, "c", pending.file_id)
-            .await
-            .unwrap(),
-        DeleteOutcome::NotCommitted
-    ));
-    assert!(matches!(
-        files::mark_deleted(&pool, "c", uuid::Uuid::new_v4())
-            .await
-            .unwrap(),
-        DeleteOutcome::NotFound
-    ));
-}
+use support::{create_ok, observed, spec, wire};
 
 // ── reconciler 정리 ──────────────────────────────────────────
 
@@ -324,18 +182,4 @@ async fn prune_terminal_files_keeps_occupied_and_leased_rows(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(state, "deleted");
-}
-
-// ── 이음새: 점유가 storage 삭제를 막는다 ─────────────────────
-
-#[sqlx::test(migrations = "./migrations")]
-async fn occupied_storage_cannot_be_deleted(pool: PgPool) {
-    wire(&pool, 1000).await;
-    create_ok(&pool, 100).await;
-    // 클라이언트·실물(location)이 남아 있으면 FK가 storages 삭제를 거부한다.
-    let err = registry::delete_storage(&pool, "s").await.unwrap_err();
-    assert_eq!(
-        registry::write_violation(&err, WriteOp::Delete),
-        Some(WriteViolation::InUse)
-    );
 }

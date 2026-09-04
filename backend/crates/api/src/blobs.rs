@@ -28,6 +28,7 @@ use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::error::{ApiError, internal, not_found, status};
+use crate::lease::{WRITE_LEASE_TTL, run_with_native_upload_part_heartbeat};
 use crate::routes::AppState;
 use crate::spool::{self, STREAM_BUF_SIZE, spool_root};
 use crate::storage_access::{CommitErr, StorageBackend, backend_from_row, commit_temp_to_backend};
@@ -231,7 +232,14 @@ async fn upload_part(
                 .await
                 .map_err(|error| internal(format!("promotion semaphore closed: {error}")))?;
             let claim = match files::claim_part(&state.pool, lease_id, part_no).await {
-                Ok(claim) => claim,
+                Ok(Some(claim)) => claim,
+                Ok(None) => {
+                    fs_backend::abort_write(&temp_path).await;
+                    return Err(status(
+                        StatusCode::CONFLICT,
+                        "multipart upload is no longer accepting parts",
+                    ));
+                }
                 Err(error) => {
                     fs_backend::abort_write(&temp_path).await;
                     return Err(error.into());
@@ -273,24 +281,95 @@ async fn upload_part(
                 fs_backend::abort_write(&temp_path).await;
                 return Err(internal("multipart lease has no upload id"));
             };
-            // 네트워크(UploadPart)는 DB 트랜잭션 밖에서 한다 — 커넥션을 전송
-            // 내내 붙잡지 않는다 (files.rs 모듈 불변식). 벤더가 part 번호로
-            // last-write-wins 하므로 승격 직렬화 락도 불필요하고, 기록은
-            // 전송이 끝난 뒤 짧은 upsert 하나다.
+            match files::claim_relay_part(
+                &state.pool,
+                lease.file_id,
+                lease_id,
+                part_no,
+                WRITE_LEASE_TTL.as_secs() as i64,
+            )
+            .await?
+            {
+                files::RelayPartClaim::Claimed => {}
+                files::RelayPartClaim::Busy => {
+                    fs_backend::abort_write(&temp_path).await;
+                    return Err(status(
+                        StatusCode::CONFLICT,
+                        "another upload for this part is still in progress; retry",
+                    ));
+                }
+                files::RelayPartClaim::Unavailable => {
+                    fs_backend::abort_write(&temp_path).await;
+                    return Err(status(
+                        StatusCode::CONFLICT,
+                        "multipart upload is no longer accepting parts",
+                    ));
+                }
+            }
+
+            // claimed 원장이 완료를 막는 동안 외부 UploadPart를 수행한다.
+            // 트랜잭션은 네트워크를 기다리지 않고 heartbeat가 lease만 갱신한다.
             let storage = state.s3_clients.get(storage_id, spec, Address::Internal);
-            let uploaded = filegate_infra::s3_upload_part_from_path(
-                &storage, object_key, upload_id, part_no, &temp_path,
+            let physical_upload = async {
+                let vendor_etag = filegate_infra::s3_upload_part_from_path(
+                    &storage, object_key, upload_id, part_no, &temp_path,
+                )
+                .await
+                .map_err(ApiError::Storage)?;
+                if !vendor_etag.eq_ignore_ascii_case(&md5_hex) {
+                    return Err(ApiError::Storage(anyhow::anyhow!(
+                        "vendor part etag does not match measured md5"
+                    )));
+                }
+                Ok(vendor_etag)
+            };
+            let uploaded = run_with_native_upload_part_heartbeat(
+                &state.pool,
+                lease.file_id,
+                lease_id,
+                part_no,
+                physical_upload,
             )
             .await;
             fs_backend::abort_write(&temp_path).await;
-            let vendor_etag = uploaded.map_err(ApiError::Storage)?;
-            // 실측 md5와 벤더 part ETag 대조 — 전달 중 손상을 여기서 끊는다.
-            if !vendor_etag.eq_ignore_ascii_case(&md5_hex) {
-                return Err(ApiError::Storage(anyhow::anyhow!(
-                    "vendor part etag does not match measured md5"
-                )));
+            let Some(uploaded) = uploaded else {
+                return Err(status(
+                    StatusCode::CONFLICT,
+                    "part upload ownership was lost; retry the multipart upload",
+                ));
+            };
+            let vendor_etag = match uploaded {
+                Ok(etag) => etag,
+                Err(error) => {
+                    if let Err(cancel_error) =
+                        files::cancel_relay_part(&state.pool, lease.file_id, lease_id, part_no)
+                            .await
+                    {
+                        tracing::warn!(
+                            event = "file.upload_part_cancel_failed",
+                            file = %lease.file_id,
+                            part = part_no,
+                            error = %cancel_error,
+                        );
+                    }
+                    return Err(error);
+                }
+            };
+            if !files::finish_relay_part(
+                &state.pool,
+                lease.file_id,
+                lease_id,
+                part_no,
+                written,
+                &vendor_etag,
+            )
+            .await?
+            {
+                return Err(status(
+                    StatusCode::CONFLICT,
+                    "part upload ownership was lost; retry the multipart upload",
+                ));
             }
-            files::record_part_done(&state.pool, lease_id, part_no, written, &vendor_etag).await?;
         }
     }
 

@@ -23,17 +23,30 @@ pub async fn attach_upload_id(
         .map(|_| ())
 }
 
-/// 중계 s3의 부분 완료 기록 — 락 없이 짧은 upsert (spec 02). s3는 벤더가
-/// part 번호로 last-write-wins 하므로 승격 직렬화가 불필요하다. 네트워크
-/// 업로드가 끝난 뒤에만 부르므로 DB 트랜잭션이 전송을 기다리지 않는다.
+/// 이미 직렬화된 경로에서 part 완료를 원장에 즉시 기록한다. 외부 네트워크
+/// 업로드는 완료와 경합하므로 `claim_relay_part`/`finish_relay_part`를 사용한다.
 pub async fn record_part_done(
     pool: &PgPool,
     lease_id: Uuid,
     part_no: i32,
     size: i64,
     md5: &str,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
+) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        "SELECT f.id FROM files f JOIN leases le ON le.file_id = f.id \
+         WHERE le.id = $1 AND le.kind = 'write' AND le.state = 'issued' \
+         AND f.state = 'pending' \
+         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions c \
+                         WHERE c.file_id = f.id) FOR UPDATE OF f",
+    )
+    .bind(lease_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if locked.is_none() {
+        return Ok(false);
+    }
+    let recorded = sqlx::query(
         "INSERT INTO lease_parts (lease_id, part_no, state, uploaded_size, uploaded_md5) \
          VALUES ($1, $2, 'done', $3, $4) \
          ON CONFLICT (lease_id, part_no) \
@@ -43,9 +56,185 @@ pub async fn record_part_done(
     .bind(part_no)
     .bind(size)
     .bind(md5)
-    .execute(pool)
-    .await
-    .map(|_| ())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(recorded.rows_affected() == 1)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum RelayPartClaim {
+    Claimed,
+    Busy,
+    Unavailable,
+}
+
+/// 중계 s3가 외부 UploadPart를 시작하기 전에 part 원장을 선점한다. claimed
+/// 행은 완료 선점을 막고, 같은 part의 동시 업로드는 하나만 외부로 보낸다.
+pub async fn claim_relay_part(
+    pool: &PgPool,
+    file_id: Uuid,
+    lease_id: Uuid,
+    part_no: i32,
+    lease_ttl_secs: i64,
+) -> Result<RelayPartClaim, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM files WHERE id = $1 AND state = 'pending' \
+         AND part_size IS NOT NULL \
+         AND NOT EXISTS (SELECT 1 FROM s3_uploads WHERE file_id = $1) \
+         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions WHERE file_id = $1) \
+         FOR UPDATE",
+    )
+    .bind(file_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if locked.is_none() {
+        return Ok(RelayPartClaim::Unavailable);
+    }
+    let renewed = sqlx::query(
+        "UPDATE leases SET expires_at = GREATEST( \
+             expires_at, now() + $3 * interval '1 second') \
+         WHERE id = $1 AND file_id = $2 AND kind = 'write' \
+         AND state = 'issued' AND expires_at > now()",
+    )
+    .bind(lease_id)
+    .bind(file_id)
+    .bind(lease_ttl_secs)
+    .execute(&mut *tx)
+    .await?;
+    if renewed.rows_affected() == 0 {
+        return Ok(RelayPartClaim::Unavailable);
+    }
+    let claimed = sqlx::query(
+        "INSERT INTO lease_parts (lease_id, part_no, state) \
+         VALUES ($1, $2, 'claimed') \
+         ON CONFLICT (lease_id, part_no) DO UPDATE SET state = 'claimed' \
+         WHERE lease_parts.state = 'done'",
+    )
+    .bind(lease_id)
+    .bind(part_no)
+    .execute(&mut *tx)
+    .await?;
+    if claimed.rows_affected() == 0 {
+        return Ok(RelayPartClaim::Busy);
+    }
+    tx.commit().await?;
+    Ok(RelayPartClaim::Claimed)
+}
+
+pub async fn renew_relay_part_lease(
+    pool: &PgPool,
+    file_id: Uuid,
+    lease_id: Uuid,
+    part_no: i32,
+    lease_ttl_secs: i64,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM files WHERE id = $1 AND state = 'pending' \
+         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions WHERE file_id = $1) \
+         FOR UPDATE",
+    )
+    .bind(file_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if locked.is_none() {
+        return Ok(false);
+    }
+    let renewed = sqlx::query(
+        "UPDATE leases le SET expires_at = now() + $4 * interval '1 second' \
+         FROM lease_parts lp \
+         WHERE le.id = $2 AND le.file_id = $1 AND le.kind = 'write' \
+         AND le.state = 'issued' AND lp.lease_id = le.id \
+         AND lp.part_no = $3 AND lp.state = 'claimed'",
+    )
+    .bind(file_id)
+    .bind(lease_id)
+    .bind(part_no)
+    .bind(lease_ttl_secs)
+    .execute(&mut *tx)
+    .await?;
+    if renewed.rows_affected() == 0 {
+        return Ok(false);
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
+pub async fn finish_relay_part(
+    pool: &PgPool,
+    file_id: Uuid,
+    lease_id: Uuid,
+    part_no: i32,
+    size: i64,
+    md5: &str,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let locked: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM files WHERE id = $1 AND state = 'pending' FOR UPDATE")
+            .bind(file_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if locked.is_none() {
+        return Ok(false);
+    }
+    let finished = sqlx::query(
+        "UPDATE lease_parts lp SET state = 'done', uploaded_size = $4, uploaded_md5 = $5 \
+         FROM leases le WHERE lp.lease_id = $2 AND lp.part_no = $3 \
+         AND lp.state = 'claimed' AND le.id = lp.lease_id \
+         AND le.file_id = $1 AND le.kind = 'write'",
+    )
+    .bind(file_id)
+    .bind(lease_id)
+    .bind(part_no)
+    .bind(size)
+    .bind(md5)
+    .execute(&mut *tx)
+    .await?;
+    if finished.rows_affected() == 0 {
+        return Ok(false);
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// 실패한 외부 part 시도는 이전 done 측정값이 있으면 복원하고, 첫 시도면
+/// claimed 행을 지운다. 성공 여부가 불명확해도 다음 재업로드가 덮어쓴다.
+pub async fn cancel_relay_part(
+    pool: &PgPool,
+    file_id: Uuid,
+    lease_id: Uuid,
+    part_no: i32,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let _: Option<Uuid> = sqlx::query_scalar("SELECT id FROM files WHERE id = $1 FOR UPDATE")
+        .bind(file_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    sqlx::query(
+        "UPDATE lease_parts lp SET state = 'done' FROM leases le \
+         WHERE lp.lease_id = $2 AND lp.part_no = $3 AND lp.state = 'claimed' \
+         AND lp.uploaded_size IS NOT NULL AND lp.uploaded_md5 IS NOT NULL \
+         AND le.id = lp.lease_id AND le.file_id = $1 AND le.kind = 'write'",
+    )
+    .bind(file_id)
+    .bind(lease_id)
+    .bind(part_no)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM lease_parts lp USING leases le \
+         WHERE lp.lease_id = $2 AND lp.part_no = $3 AND lp.state = 'claimed' \
+         AND lp.uploaded_size IS NULL AND lp.uploaded_md5 IS NULL \
+         AND le.id = lp.lease_id AND le.file_id = $1 AND le.kind = 'write'",
+    )
+    .bind(file_id)
+    .bind(lease_id)
+    .bind(part_no)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await
 }
 
 /// 파일의 write lease (파일당 하나 — create가 유일한 발급 지점).
@@ -81,15 +270,32 @@ pub async fn extend_write_lease(
     lease_id: Uuid,
     ttl_secs: i64,
 ) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        "SELECT f.id FROM files f JOIN leases le ON le.file_id = f.id \
+         WHERE le.id = $1 AND f.state = 'pending' \
+         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions c \
+                         WHERE c.file_id = f.id) FOR UPDATE OF f",
+    )
+    .bind(lease_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if locked.is_none() {
+        return Ok(false);
+    }
     let updated = sqlx::query(
         "UPDATE leases SET expires_at = GREATEST(expires_at, now() + $2 * interval '1 second') \
          WHERE id = $1 AND state = 'issued' AND expires_at > now()",
     )
     .bind(lease_id)
     .bind(ttl_secs)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-    Ok(updated.rows_affected() == 1)
+    if updated.rows_affected() == 0 {
+        return Ok(false);
+    }
+    tx.commit().await?;
+    Ok(true)
 }
 
 /// part 승격 claim — 행을 잡아(INSERT‥ON CONFLICT UPDATE의 행 락) 같은
@@ -106,8 +312,21 @@ pub async fn claim_part(
     pool: &PgPool,
     lease_id: Uuid,
     part_no: i32,
-) -> Result<PartClaim, sqlx::Error> {
+) -> Result<Option<PartClaim>, sqlx::Error> {
     let mut tx = pool.begin().await?;
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        "SELECT f.id FROM files f JOIN leases le ON le.file_id = f.id \
+         WHERE le.id = $1 AND le.kind = 'write' AND le.state = 'issued' \
+         AND f.state = 'pending' \
+         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions c \
+                         WHERE c.file_id = f.id) FOR UPDATE OF f",
+    )
+    .bind(lease_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if locked.is_none() {
+        return Ok(None);
+    }
     sqlx::query(
         "INSERT INTO lease_parts (lease_id, part_no) VALUES ($1, $2) \
          ON CONFLICT (lease_id, part_no) \
@@ -117,11 +336,11 @@ pub async fn claim_part(
     .bind(part_no)
     .execute(&mut *tx)
     .await?;
-    Ok(PartClaim {
+    Ok(Some(PartClaim {
         tx,
         lease_id,
         part_no,
-    })
+    }))
 }
 
 impl PartClaim {

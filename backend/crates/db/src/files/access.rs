@@ -152,7 +152,9 @@ pub async fn byte_lease(
          LEFT JOIN locations l ON l.file_id = f.id \
          LEFT JOIN storages s ON s.id = l.storage_id \
          WHERE le.id = $1 AND le.secret_hash = $2 \
-         AND le.state = 'issued' AND le.expires_at > now()"
+         AND le.state = 'issued' AND le.expires_at > now() \
+         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions c \
+                         WHERE c.file_id = f.id)"
     ))
     .bind(lease_id)
     .bind(secret_hash)

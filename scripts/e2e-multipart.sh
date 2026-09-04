@@ -88,6 +88,11 @@ run_mode() {
   CM=$(curl -s -w '\n%{http_code}' -H "$MODE_AUTH" -X POST $BASE/api/v1/files/$FID/commit)
   expect "[$LABEL] commit 200" 200 "$(printf '%s' "$CM" | tail -1)"
   case "$CM" in *'-3'*) ok;; *) bad "[$LABEL] multipart ETag(-3) 아님: $CM";; esac
+  if [ "$URLKIND" = "direct" ]; then
+    # 직결의 최종 직렬화는 vendor Complete다. 이미 발급된 URL도 Complete 뒤에는
+    # 닫힌 upload_id를 가리키므로 늦은 UploadPart가 확정 객체를 바꾸지 못한다.
+    expect "[$LABEL] Complete 뒤 늦은 part PUT 거부" 404 "$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$WORK/p1" "$U1")"
+  fi
   expect "[$LABEL] 회계 active 12MiB" "$SIZE" "$($PSQL "SELECT coalesce(sum(f.declared_size),0) FROM files f JOIN locations l ON l.file_id=f.id WHERE l.storage_id='$SID' AND f.state='active';" | tr -d ' ')"
 
   R=$(curl -s -H "$MODE_AUTH" -H "$JSON" -X POST $BASE/api/v1/files/$FID/read -d '{}')
