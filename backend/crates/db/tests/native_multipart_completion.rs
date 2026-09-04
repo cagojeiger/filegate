@@ -126,6 +126,80 @@ async fn completion_claim_blocks_new_parts_and_duplicate_completion(pool: PgPool
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn claimed_relay_part_fences_completion_until_recorded(pool: PgPool) {
+    let file = create_multipart(&pool).await;
+
+    assert_eq!(
+        files::claim_relay_part(&pool, file.file_id, file.lease_id, 1, 900)
+            .await
+            .unwrap(),
+        files::RelayPartClaim::Claimed
+    );
+    assert_eq!(
+        files::claim_relay_part(&pool, file.file_id, file.lease_id, 1, 900)
+            .await
+            .unwrap(),
+        files::RelayPartClaim::Busy
+    );
+    assert!(matches!(
+        files::begin_completion(&pool, file.file_id).await.unwrap(),
+        CompletionStart::Busy
+    ));
+
+    files::cancel_relay_part(&pool, file.file_id, file.lease_id, 1)
+        .await
+        .unwrap();
+    let parts = files::done_parts(&pool, file.lease_id).await.unwrap();
+    assert_eq!(parts.first().expect("first part").2, "aaaaaaaa");
+
+    assert_eq!(
+        files::claim_relay_part(&pool, file.file_id, file.lease_id, 1, 900)
+            .await
+            .unwrap(),
+        files::RelayPartClaim::Claimed
+    );
+    assert!(
+        files::renew_relay_part_lease(&pool, file.file_id, file.lease_id, 1, 900)
+            .await
+            .unwrap()
+    );
+    assert!(
+        files::finish_relay_part(&pool, file.file_id, file.lease_id, 1, 50, "cccccccc")
+            .await
+            .unwrap()
+    );
+
+    let mut completion = match files::begin_completion(&pool, file.file_id).await.unwrap() {
+        CompletionStart::Ready(completion) => completion,
+        _ => panic!("finished relay part must leave completion ready"),
+    };
+    let parts = completion.done_parts().await.unwrap();
+    assert_eq!(parts.first().expect("first part").2, "cccccccc");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn relay_part_and_completion_claims_have_exactly_one_winner(pool: PgPool) {
+    let file = create_multipart(&pool).await;
+
+    let (part, completion) = tokio::join!(
+        files::claim_relay_part(&pool, file.file_id, file.lease_id, 1, 900),
+        async {
+            match files::begin_completion(&pool, file.file_id).await.unwrap() {
+                CompletionStart::Ready(completion) => {
+                    completion.claim("expected-2", 900).await.unwrap()
+                }
+                CompletionStart::Busy
+                | CompletionStart::Resuming
+                | CompletionStart::Unavailable => false,
+            }
+        }
+    );
+
+    let part_won = part.unwrap() == files::RelayPartClaim::Claimed;
+    assert_ne!(part_won, completion);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn heartbeat_and_expired_recovery_have_exactly_one_winner(pool: PgPool) {
     let file = create_multipart(&pool).await;
     claim_completion(&pool, &file).await;

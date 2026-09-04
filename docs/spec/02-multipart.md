@@ -124,10 +124,11 @@ pending을 reclaimed로 닫는다. 정리 실패 시 location과 vendor upload_i
 
 ```text
 part: (미기록) ──중계 PUT 완료 / 직결은 commit의 ListParts──▶ 실측 기록
-lease: 발급 ──parts 재발급(만료 연장)*──▶ completing(heartbeat) ──▶ commit
-                                                │
-                                                └─ 요청 중단 → 관찰 복구/재개/정리
+lease: 발급 ──parts 재발급·part/complete heartbeat──▶ commit
        발급 ── 만료 ──▶ 회수(+Abort)
+completion: 없음 ── 완료 선점 ──▶ completing ──▶ commit
+                                      │
+                                      └─ 요청 중단 → 관찰 복구/재개/정리
 ```
 
 ## 경계선
@@ -145,5 +146,6 @@ lease: 발급 ──parts 재발급(만료 연장)*──▶ completing(heartbea
 - 완료 조건: 같은 대용량 시나리오(경계 크기 포함)가 직결과 중계에서 같은
   상태 전이·회계·응답을 내는 동등성 E2E.
 - 자동 검증 범위: DB 완료 선점과 만료 회수의 경쟁, 완료 중 새 part 차단,
-  요청 중단 뒤 재개·정리 상태 전이는 PostgreSQL 통합 테스트가 CI에서 검증한다.
+  중계 S3 part 업로드와 완료의 직렬화, 요청 중단 뒤 재개·정리 상태 전이는
+  PostgreSQL 통합 테스트가 CI에서 검증한다.
   실제 S3/fs 바이트 경로의 동등성은 `scripts/e2e-multipart.sh` 수동 검증 범위다.

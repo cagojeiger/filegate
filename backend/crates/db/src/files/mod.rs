@@ -38,8 +38,9 @@ pub use completion::{
 pub(crate) use create::create_in_tx;
 pub use create::{CreateOutcome, CreateSpec, CreatedFile, create};
 pub use multipart::{
-    PartClaim, WriteLease, attach_upload_id, claim_part, done_parts, extend_write_lease,
-    has_done_parts, record_part_done, write_lease,
+    PartClaim, RelayPartClaim, WriteLease, attach_upload_id, cancel_relay_part, claim_part,
+    claim_relay_part, done_parts, extend_write_lease, finish_relay_part, has_done_parts,
+    record_part_done, renew_relay_part_lease, write_lease,
 };
 pub use sweep::{
     DeleteOutcome, SweepCandidate, active_multipart_lease_ids, expire_read_leases, expired_pending,
