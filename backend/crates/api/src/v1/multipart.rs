@@ -17,7 +17,7 @@ use super::ClientId;
 use super::files::{committed_or_conflict, committed_response};
 use super::relay::relay_base;
 use crate::error::{ApiError, bad_request, conflict, internal, not_found};
-use crate::lease::WRITE_LEASE_TTL;
+use crate::lease::{WRITE_LEASE_TTL, run_with_native_completion_heartbeat};
 use crate::routes::AppState;
 use crate::storage_access::{StorageBackend, backend_from_row};
 
@@ -31,7 +31,6 @@ pub(super) async fn commit(
     part_size: i64,
     backend: &StorageBackend,
 ) -> Result<Response, ApiError> {
-    let count = part_count(file.declared_size, part_size);
     let Some(files::WriteLease {
         lease_id,
         upload_id,
@@ -41,69 +40,174 @@ pub(super) async fn commit(
         return Err(internal("multipart file has no write lease"));
     };
 
-    let etag = match backend {
+    let Some(prepared) = prepare_completion(
+        state,
+        file_id,
+        file,
+        part_size,
+        backend,
+        upload_id.as_deref(),
+    )
+    .await?
+    else {
+        return committed_or_conflict(state, client, file_id).await;
+    };
+    let physical_complete = complete_backend(
+        state,
+        file,
+        lease_id,
+        upload_id.as_deref(),
+        backend,
+        &prepared,
+    );
+    let Some(etag) =
+        run_with_native_completion_heartbeat(&state.pool, file_id, physical_complete).await
+    else {
+        return Err(conflict(
+            "multipart completion ownership was lost; retry commit",
+        ));
+    };
+    let etag = etag?;
+
+    if files::finalize_completion(&state.pool, file_id, &etag).await? {
+        tracing::info!(event = "file.committed", file = %file_id, client = %client.0, multipart = true);
+        return Ok(committed_response(file_id, etag));
+    }
+    committed_or_conflict(state, client, file_id).await
+}
+
+struct PreparedCompletion {
+    expected_etag: String,
+    parts: Vec<(i32, String)>,
+}
+
+/// Validates one stable part snapshot and durably claims completion before any
+/// physical commit. `None` means another state transition won the file.
+async fn prepare_completion(
+    state: &AppState,
+    file_id: Uuid,
+    file: &files::FileAccess,
+    part_size: i64,
+    backend: &StorageBackend,
+    upload_id: Option<&str>,
+) -> Result<Option<PreparedCompletion>, ApiError> {
+    let count = part_count(file.declared_size, part_size);
+    let ledger = match backend {
         StorageBackend::S3 {
             spec,
             force_relay: false,
         } => {
-            // 직결: 실물은 벤더에 있다 — ListParts가 대조 재료다.
+            // 이미 발급된 presigned UploadPart는 DB가 막을 수 없다. 직결의
+            // 직렬화 지점은 아래 스냅샷의 정확한 (part, ETag) 목록을 받는 vendor
+            // Complete다. 중간에 part가 바뀌면 Complete가 그 ETag를 거부하고,
+            // Complete가 먼저 이기면 vendor 세션이 닫혀 늦은 UploadPart가 실패한다.
             let upload_id =
                 upload_id.ok_or_else(|| internal("direct multipart lease has no upload id"))?;
             let storage = state
                 .s3_clients
                 .get(&file.storage.id, spec, Address::Internal);
-            let vendor = filegate_infra::s3_list_parts(&storage, &file.object_key, &upload_id)
+            let vendor = filegate_infra::s3_list_parts(&storage, &file.object_key, upload_id)
                 .await
                 .map_err(ApiError::Storage)?;
             verify_part_sizes(&vendor, file.declared_size, part_size, count)?;
-            let listed: Vec<(i32, String)> =
-                vendor.into_iter().map(|(n, _, etag)| (n, etag)).collect();
-            filegate_infra::s3_complete_multipart(&storage, &file.object_key, &upload_id, &listed)
-                .await
-                .map_err(ApiError::Storage)?
+            vendor
         }
         _ => {
-            // 중계: 원장(part 실측)이 대조 재료다.
-            let parts = files::done_parts(&state.pool, lease_id).await?;
+            let mut completion = match files::begin_completion(&state.pool, file_id).await? {
+                files::CompletionStart::Ready(completion) => completion,
+                files::CompletionStart::Busy => {
+                    return Err(conflict("a part upload is still in progress; retry commit"));
+                }
+                files::CompletionStart::Resuming => {
+                    return Err(conflict("multipart completion is already in progress"));
+                }
+                files::CompletionStart::Unavailable => return Ok(None),
+            };
+            let parts = completion.done_parts().await?;
             verify_part_sizes(&parts, file.declared_size, part_size, count)?;
-            match backend {
-                StorageBackend::S3 { spec, .. } => {
-                    // 중계 s3: part는 도착 즉시 벤더에 올라가 있다 — 완성 선언만.
-                    let upload_id = upload_id
-                        .ok_or_else(|| internal("relay multipart lease has no upload id"))?;
-                    let storage = state
-                        .s3_clients
-                        .get(&file.storage.id, spec, Address::Internal);
-                    let ledger: Vec<(i32, String)> =
-                        parts.into_iter().map(|(n, _, md5)| (n, md5)).collect();
-                    filegate_infra::s3_complete_multipart(
-                        &storage,
-                        &file.object_key,
-                        &upload_id,
-                        &ledger,
-                    )
-                    .await
-                    .map_err(ApiError::Storage)?
-                }
-                StorageBackend::Fs { root } => {
-                    // 중계 fs: offset 기록이 이미 조립이다 — rename 한 번 (spec 02).
-                    let temp = filegate_infra::fs::multipart_temp(root, &lease_id.to_string());
-                    filegate_infra::fs::commit_path(root, &temp, &file.object_key)
-                        .await
-                        .map_err(internal)?;
-                    // ETag는 S3 multipart와 같은 합성 규칙: md5(part md5들) + "-N".
-                    composite_etag(parts.iter().map(|(_, _, md5)| md5.as_str()))
-                }
+            let expected_etag = composite_etag(parts.iter().map(|(_, _, md5)| md5.as_str()));
+            if !completion
+                .claim(&expected_etag, WRITE_LEASE_TTL.as_secs() as i64)
+                .await?
+            {
+                return Ok(None);
             }
+            parts
         }
     };
+    let expected_etag = composite_etag(ledger.iter().map(|(_, _, etag)| etag.as_str()));
 
-    if files::finalize_commit(&state.pool, file_id, &etag).await? {
-        tracing::info!(event = "file.committed", file = %file_id, client = %client.0, multipart = true);
-        return Ok(committed_response(file_id, etag));
+    if matches!(
+        backend,
+        StorageBackend::S3 {
+            force_relay: false,
+            ..
+        }
+    ) {
+        let completion = match files::begin_completion(&state.pool, file_id).await? {
+            files::CompletionStart::Ready(completion) => completion,
+            files::CompletionStart::Busy => {
+                return Err(conflict("a part upload is still in progress; retry commit"));
+            }
+            files::CompletionStart::Resuming => {
+                return Err(conflict("multipart completion is already in progress"));
+            }
+            files::CompletionStart::Unavailable => return Ok(None),
+        };
+        if !completion
+            .claim(&expected_etag, WRITE_LEASE_TTL.as_secs() as i64)
+            .await?
+        {
+            return Ok(None);
+        }
     }
-    // 전이 경합의 패자 — 현재 상태로 멱등 응답 (단일 PUT commit과 동일).
-    committed_or_conflict(state, client, file_id).await
+
+    Ok(Some(PreparedCompletion {
+        expected_etag,
+        parts: ledger
+            .into_iter()
+            .map(|(number, _, etag)| (number, etag))
+            .collect(),
+    }))
+}
+
+async fn complete_backend(
+    state: &AppState,
+    file: &files::FileAccess,
+    lease_id: Uuid,
+    upload_id: Option<&str>,
+    backend: &StorageBackend,
+    prepared: &PreparedCompletion,
+) -> Result<String, ApiError> {
+    match backend {
+        StorageBackend::S3 { spec, .. } => {
+            let upload_id =
+                upload_id.ok_or_else(|| internal("multipart lease has no upload id"))?;
+            let storage = state
+                .s3_clients
+                .get(&file.storage.id, spec, Address::Internal);
+            let vendor_etag = filegate_infra::s3_complete_multipart(
+                &storage,
+                &file.object_key,
+                upload_id,
+                &prepared.parts,
+            )
+            .await
+            .map_err(ApiError::Storage)?;
+            if !vendor_etag.eq_ignore_ascii_case(&prepared.expected_etag) {
+                return Err(ApiError::Storage(anyhow::anyhow!(
+                    "vendor multipart etag does not match the part ledger"
+                )));
+            }
+        }
+        StorageBackend::Fs { root } => {
+            let temp = filegate_infra::fs::multipart_temp(root, &lease_id.to_string());
+            filegate_infra::fs::commit_path(root, &temp, &file.object_key)
+                .await
+                .map_err(internal)?;
+        }
+    }
+    Ok(prepared.expected_etag.clone())
 }
 
 /// 측정된 part 목록의 개수·크기가 선언과 맞는지 검증한다 — 직결(벤더

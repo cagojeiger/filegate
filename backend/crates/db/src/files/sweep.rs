@@ -81,6 +81,7 @@ pub async fn expired_pending(
          JOIN locations l ON l.file_id = f.id \
          WHERE f.state = 'pending' AND le.state = 'issued' AND le.expires_at < now() \
          AND NOT EXISTS (SELECT 1 FROM s3_uploads u WHERE u.file_id = f.id) \
+         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions c WHERE c.file_id = f.id) \
          LIMIT $1",
     )
     .bind(limit)
@@ -110,7 +111,9 @@ pub async fn finalize_reclaim(
     // 교착이 없다. 늦은 commit이 이겼다면 여기서 0행이다.
     let transitioned = sqlx::query(
         "UPDATE files SET state = 'reclaimed' WHERE id = $1 AND state = 'pending' \
-             AND NOT EXISTS (SELECT 1 FROM s3_uploads u WHERE u.file_id = files.id)",
+             AND NOT EXISTS (SELECT 1 FROM s3_uploads u WHERE u.file_id = files.id) \
+             AND NOT EXISTS (SELECT 1 FROM native_multipart_completions c \
+                             WHERE c.file_id = files.id)",
     )
     .bind(candidate.file_id)
     .execute(&mut *tx)
@@ -149,7 +152,9 @@ pub async fn reclaim_pending(pool: &PgPool, file_id: Uuid) -> Result<bool, sqlx:
     let mut tx = pool.begin().await?;
     let transitioned = sqlx::query(
         "UPDATE files SET state = 'reclaimed' WHERE id = $1 AND state = 'pending' \
-         AND NOT EXISTS (SELECT 1 FROM s3_uploads u WHERE u.file_id = files.id)",
+         AND NOT EXISTS (SELECT 1 FROM s3_uploads u WHERE u.file_id = files.id) \
+         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions c \
+                         WHERE c.file_id = files.id)",
     )
     .bind(file_id)
     .execute(&mut *tx)

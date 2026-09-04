@@ -231,7 +231,14 @@ async fn upload_part(
                 .await
                 .map_err(|error| internal(format!("promotion semaphore closed: {error}")))?;
             let claim = match files::claim_part(&state.pool, lease_id, part_no).await {
-                Ok(claim) => claim,
+                Ok(Some(claim)) => claim,
+                Ok(None) => {
+                    fs_backend::abort_write(&temp_path).await;
+                    return Err(status(
+                        StatusCode::CONFLICT,
+                        "multipart upload is no longer accepting parts",
+                    ));
+                }
                 Err(error) => {
                     fs_backend::abort_write(&temp_path).await;
                     return Err(error.into());
@@ -290,7 +297,14 @@ async fn upload_part(
                     "vendor part etag does not match measured md5"
                 )));
             }
-            files::record_part_done(&state.pool, lease_id, part_no, written, &vendor_etag).await?;
+            if !files::record_part_done(&state.pool, lease_id, part_no, written, &vendor_etag)
+                .await?
+            {
+                return Err(status(
+                    StatusCode::CONFLICT,
+                    "multipart upload is no longer accepting parts",
+                ));
+            }
         }
     }
 

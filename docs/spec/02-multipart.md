@@ -85,10 +85,30 @@ full-object CRC 합성 검증(part CRC의 수학적 합성 — 선택 보강), �
   실측(중계) 또는 벤더 ETag(직결)가 기록과 일치.
 - 확정: 직결·중계 s3는 벤더 complete, 중계 fs는 rename 한 번 (조립 없음 —
   offset 기록이 이미 조립이다).
+- 외부 complete/rename 전에 `native_multipart_completions`에 완료 소유권과 예상
+  ETag를 기록하고 write lease를 연장한다. 이 행이 있는 동안 새 part 발급·기록과
+  generic 만료 회수는 닫힌다. 물리 작업 중에는 heartbeat로 lease를 연장하므로
+  완료 요청과 회수가 동시에 성공할 수 없다.
+- 직결 s3에서 이미 발급된 presigned UploadPart는 DB 행으로 취소할 수 없다.
+  이 모드의 직렬화 지점은 검증된 `(part 번호, ETag)` 목록을 받는 벤더 Complete다.
+  중간에 part가 바뀌면 Complete가 거부되고, Complete가 먼저 이기면 세션이 닫혀
+  늦은 UploadPart가 확정 객체를 바꿀 수 없다. DB 완료 행은 이 벤더 직렬화를
+  대신하는 락이 아니라 회수 배제·heartbeat·복구 소유권이다.
 - 기록되는 ETag는 벤더 multipart ETag(digest-of-digests, `-N` 접미) 또는
   중계 fs의 part 체크섬 합성값이다. 단일 PUT처럼 전체 MD5가 아니다.
 - 미완성(빠진 part, 크기 불일치)이면 400과 함께 pending에 남는다 —
   spec 00의 재시도 계약 그대로.
+
+### 외부 저장소-DB 복구 경계
+
+외부 complete/rename과 PostgreSQL 확정은 한 트랜잭션으로 묶을 수 없다.
+`native_multipart_completions`가 그 사이의 durable 복구 재료다. 완료 요청이
+중단되어 heartbeat가 끝나면 reconciler가 lease 만료 뒤 파일별 고유 object_key를
+관찰한다. 크기와 ETag가 예상값과 맞으면 DB 확정을 마치고, 실물이 없으면 완료
+소유권을 지운 뒤 lease를 갱신해 같은 업로드의 commit 재시도를 허용한다. 예상과
+다른 실물이 있으면 `cleaning`으로 선점해 물리 세션·객체를 멱등 정리한 뒤에만
+pending을 reclaimed로 닫는다. 정리 실패 시 location과 vendor upload_id를 남겨
+다음 tick에서 재시도한다.
 
 ### 회수 — reconciler 확장
 
@@ -104,7 +124,10 @@ full-object CRC 합성 검증(part CRC의 수학적 합성 — 선택 보강), �
 
 ```text
 part: (미기록) ──중계 PUT 완료 / 직결은 commit의 ListParts──▶ 실측 기록
-lease: 발급 ──parts 재발급(만료 연장)*──▶ commit으로 확정 | 만료 회수(+Abort)
+lease: 발급 ──parts 재발급(만료 연장)*──▶ completing(heartbeat) ──▶ commit
+                                                │
+                                                └─ 요청 중단 → 관찰 복구/재개/정리
+       발급 ── 만료 ──▶ 회수(+Abort)
 ```
 
 ## 경계선
@@ -121,3 +144,6 @@ lease: 발급 ──parts 재발급(만료 연장)*──▶ commit으로 확정
   적용된다 (ADR 002).
 - 완료 조건: 같은 대용량 시나리오(경계 크기 포함)가 직결과 중계에서 같은
   상태 전이·회계·응답을 내는 동등성 E2E.
+- 자동 검증 범위: DB 완료 선점과 만료 회수의 경쟁, 완료 중 새 part 차단,
+  요청 중단 뒤 재개·정리 상태 전이는 PostgreSQL 통합 테스트가 CI에서 검증한다.
+  실제 S3/fs 바이트 경로의 동등성은 `scripts/e2e-multipart.sh` 수동 검증 범위다.

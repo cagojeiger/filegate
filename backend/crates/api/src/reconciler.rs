@@ -13,6 +13,8 @@
 //! 지워 실패를 재시도한다. purge도 물리 삭제 뒤 점유를 해제한다. 재시도 가능한
 //! 경로의 물리 작업은 멱등이다.
 
+mod native_completion;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -118,6 +120,8 @@ async fn run_jobs(pool: &PgPool, crypto: &Crypto, s3_clients: &S3ClientCache) {
             tracing::error!(event = "reconciler.scan_failed", job = "observe_commit", %error)
         }
     }
+
+    native_completion::recover(pool, crypto, s3_clients).await;
 
     // S3 Complete는 외부 저장소와 DB 사이를 completing 행으로 잇는다. 요청
     // 소유자의 갱신 lease가 지난 뒤 실물을 관찰해 성공은 finalize하고,
