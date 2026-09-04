@@ -262,6 +262,8 @@ pub async fn prune_terminal_leases(
          WHERE le.state <> 'issued' \
          AND le.created_at < now() - $1 * interval '1 second' \
          AND NOT EXISTS (SELECT 1 FROM s3_uploads u WHERE u.file_id = le.file_id) \
+         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions c \
+                         WHERE c.file_id = le.file_id) \
          LIMIT $2)",
     )
     .bind(retention_secs)

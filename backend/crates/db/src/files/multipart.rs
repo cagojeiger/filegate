@@ -23,9 +23,9 @@ pub async fn attach_upload_id(
         .map(|_| ())
 }
 
-/// 중계 s3의 부분 완료 기록 — 락 없이 짧은 upsert (spec 02). s3는 벤더가
-/// part 번호로 last-write-wins 하므로 승격 직렬화가 불필요하다. 네트워크
-/// 업로드가 끝난 뒤에만 부르므로 DB 트랜잭션이 전송을 기다리지 않는다.
+/// 중계 s3의 부분 완료 기록 (spec 02). 완료 소유권과의 직렬화를 위해
+/// 파일 행을 잠그고, 소유권이 없을 때만 part를 upsert한다. 네트워크 업로드가
+/// 끝난 뒤에만 부르므로 DB 트랜잭션이 전송을 기다리지 않는다.
 pub async fn record_part_done(
     pool: &PgPool,
     lease_id: Uuid,

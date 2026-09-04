@@ -188,3 +188,32 @@ async fn invalid_physical_result_is_cleaned_before_reclaim(pool: PgPool) {
         .unwrap();
     assert_eq!(locations, 0);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn terminal_lease_gc_preserves_cleanup_recovery_material(pool: PgPool) {
+    let file = create_multipart(&pool).await;
+    claim_completion(&pool, &file).await;
+    expire(&pool, file.file_id).await;
+    assert!(files::claim_cleanup(&pool, file.file_id).await.unwrap());
+
+    sqlx::query("UPDATE leases SET created_at = now() - interval '2 days' WHERE file_id = $1")
+        .bind(file.file_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        files::prune_terminal_leases(&pool, 24 * 3600, 10)
+            .await
+            .unwrap(),
+        0
+    );
+    let candidates = files::completion_cleanup_candidates(&pool, 10)
+        .await
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates.first().expect("cleanup candidate").file_id,
+        file.file_id
+    );
+}
