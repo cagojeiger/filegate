@@ -199,46 +199,4 @@ fn log_request_end(response: &axum::response::Response, latency: Duration, span:
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::http::{HeaderMap, HeaderValue, header};
-
-    #[test]
-    fn bearer_token_extracts_only_a_well_formed_bearer_header() {
-        let mut headers = HeaderMap::new();
-        assert_eq!(bearer_token(&headers), None); // 헤더 부재
-        headers.insert(
-            header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer abc123"),
-        );
-        assert_eq!(bearer_token(&headers), Some("abc123"));
-        // scheme은 대소문자 무시 (eq_ignore_ascii_case).
-        headers.insert(
-            header::AUTHORIZATION,
-            HeaderValue::from_static("bearer xyz"),
-        );
-        assert_eq!(bearer_token(&headers), Some("xyz"));
-        // 다른 scheme·공백 없는 값은 None.
-        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Basic abc"));
-        assert_eq!(bearer_token(&headers), None);
-        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearerabc"));
-        assert_eq!(bearer_token(&headers), None);
-    }
-
-    #[test]
-    fn is_system_path_matches_only_the_probes() {
-        assert!(is_system_path("/healthz"));
-        assert!(is_system_path("/readyz"));
-        assert!(!is_system_path("/api/v1/files"));
-        assert!(!is_system_path("/"));
-    }
-
-    #[test]
-    fn reserved_top_level_covers_every_control_segment() {
-        // 라우팅 충돌 예약 — 이 목록이 최상위 제어 경로와 어긋나면 client id가
-        // 제어 라우트를 가릴 수 있다 (admin::clients가 이 상수로 거부한다).
-        for segment in ["api", "blobs", "healthz", "readyz"] {
-            assert!(RESERVED_TOP_LEVEL.contains(&segment));
-        }
-    }
-}
+mod tests;
