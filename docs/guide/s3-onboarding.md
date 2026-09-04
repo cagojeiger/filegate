@@ -25,7 +25,7 @@ s3 = boto3.client(
     endpoint_url=FILEGATE_S3_ENDPOINT,
     aws_access_key_id=ACCESS_KEY,
     aws_secret_access_key=SECRET_KEY,
-    region_name="us-east-1",          # 서명 재료일 뿐 — 이 값으로 고정
+    region_name="us-east-1",          # SigV4 scope 값 — 일관되게 보내면 다른 값도 허용
     config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
 )
 

@@ -180,10 +180,14 @@ S3 표준 XML 최소형으로 답한다 — SDK가 이걸 파싱한다:
 <Error><Code>NoSuchKey</Code><Message>…</Message></Error>
 ```
 
-Code 어휘는 S3 표준을 따른다: `NoSuchBucket`, `NoSuchKey`,
-`SignatureDoesNotMatch`, `AccessDenied`, `InvalidRange`, `NoSuchUpload`
-(없거나 key·모드가 다른 uploadId), `InvalidPart`(Complete의 part 목록 불일치),
-`ServiceUnavailable`(같은 Complete의 결과 복구 또는 part/Abort 경합 중).
+현재 구현의 Code 어휘는 S3 표준을 따른다: `NoSuchBucket`, `NoSuchKey`,
+`AccessDenied`, `InvalidAccessKeyId`, `SignatureDoesNotMatch`,
+`RequestTimeTooSkewed`, `NotImplemented`, `InvalidArgument`,
+`MissingContentLength`, `EntityTooLarge`, `IncompleteBody`, `RequestTimeout`,
+`XAmzContentSHA256Mismatch`, `InvalidRange`, `MalformedXML`,
+`MethodNotAllowed`, `InternalError`, `NoSuchUpload`(없거나 key·모드가 다른
+uploadId), `InvalidPart`(Complete의 part 목록 불일치), `ServiceUnavailable`
+(저장소 실패, 같은 Complete의 결과 복구 또는 part/Abort 경합 중).
 
 ### `0005` 전환 조건
 

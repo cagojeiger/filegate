@@ -6,7 +6,7 @@
 
 ## 결정
 
-- **언어: Rust.** 컨트롤 플레인(발급·확정·회계)과 중계 데이터 플레인(바이트 스트리밍 패스스루)을 한 프로세스에 담는다. 정적 링크 단일 바이너리가 배포 산출물이다 — 런타임·인터프리터 의존 0 (공리 3).
+- **언어: Rust.** 컨트롤 플레인(발급·확정·회계)과 중계 데이터 플레인(바이트 스트리밍 패스스루)을 한 프로세스에 담는다. 배포 이미지는 release 단일 바이너리를 `debian:bookworm-slim` 런타임에 담는다. 별도 언어 인터프리터는 필요 없지만 시스템 런타임과 CA 인증서는 이미지가 제공한다 (공리 3).
 - **메타데이터 저장소: PostgreSQL (sqlx).** 파일·위치·lease·대여 이력의 기록을 단일 트랜잭션으로 원자화한다(ADR 004). lease 원장이 접근 기록이고(ADR 002) durable 이력은 lease_history가 담당하며, reconciler도 같은 DB를 본다 — 별도 큐 없음. 바이트는 DB에 넣지 않는다.
 - **저장소 접근: aws-sdk-s3.** storage adapter(ADR 001)의 1차 계약이 S3 호환이고, presigned URL 발급이 직결 모드의 핵심 요구다. 같은 SDK로 MinIO·R2·OCI를 endpoint 교체만으로 다룬다. `object_store`(fs+s3 단일 trait)는 fs adapter와의 통합 관점에서 검토 후보.
 - **fs adapter·중계 스트리밍: tokio::fs + axum body.** presigned 개념이 없는 로컬/NFS는 항상 중계이며, 선언 크기에서 스트림을 끊는 요구(ADR 002)를 상수 메모리로 처리한다.
@@ -50,7 +50,7 @@ filegate의 reconciler 책임은 단일 PUT 관찰 확정, native/S3 완료 복�
 **비밀의 저장 방식은 성격이 정한다** (ADR 004, spec 01 "키와 비밀").
 
 - 서버(프로세스) 설정은 전부 env다: bind, 로그 포맷, DB URL, 커넥션 수. YAML 설정 파일은 두지 않는다.
-- env의 비밀은 셋뿐이다: 마스터 키(`FILEGATE_ENC_ROOT_SECRET`), 운영자 토큰(`FILEGATE_OPERATOR_TOKENS`, 쉼표 목록 — 메인/서브 로테이션), DB URL. Terraform이 k8s Secret으로 공급한다.
+- env의 비밀 종류는 셋이다: 마스터 키(`FILEGATE_ENC_ROOT_SECRET`), 운영자 토큰(`FILEGATE_OPERATOR_TOKENS`, 쉼표 목록 — 메인/서브 로테이션), DB URL. 마스터 키 회전 중에는 이전 키(`FILEGATE_ENC_ROOT_SECRET_PREV`)와 그 key id를 임시로 함께 둔다. Terraform이 k8s Secret으로 공급한다.
 - 클라이언트 키(검증 전용)는 sha256 해시로만 DB에 저장한다. 인증 = 제시된 키를 해시해 조회. 회전 = 해시 행 추가·삭제.
 - storage 시크릿(런타임 사용)은 AES-256-GCM으로 암호화해 DB에 저장한다 — AAD에 storage id 바인딩, 마스터 키는 env. opsgate의 credential 보관 방식을 참조한다.
 - S3 자격증명 secret(SigV4 재계산용)도 AES-256-GCM으로 암호화한다 — AAD는 access key id이고, raw는 발급 응답에서 한 번만 반환한다.
