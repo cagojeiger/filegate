@@ -35,6 +35,8 @@ percent-encoding = { workspace = true }
 # CORS preflight 라우터 테스트용 oneshot (ServiceExt). tower는 axum 경유로
 # 이미 잠겨 있고, util feature만 테스트에서 켠다.
 tower = { version = "0.5", features = ["util"] }
+# 조합 라우터 테스트가 네트워크 연결 없이 AppState용 lazy 풀을 만든다.
+sqlx = { workspace = true }
 
 [lints]
 workspace = true

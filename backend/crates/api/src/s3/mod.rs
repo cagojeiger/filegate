@@ -17,20 +17,42 @@ mod handlers;
 mod multipart;
 mod xml;
 
-use axum::Router;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode};
-use axum::response::Response;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::any;
+use axum::{Router, middleware};
 
 use crate::routes::AppState;
 
 pub fn routes(cors_allowed_origins: &[String]) -> Router<AppState> {
     let router = Router::new().route("/{bucket}/{*key}", any(dispatch));
-    match crate::cors::layer(cors_allowed_origins) {
+    let router = match crate::cors::layer(cors_allowed_origins) {
         Some(cors) => router.layer(cors),
         None => router,
+    };
+    // 나중에 추가한 레이어가 바깥이다. 예약 경로를 CORS보다 먼저 거부해야
+    // preflight가 dispatch 전에 2xx로 단락하지 않는다.
+    router.layer(middleware::from_fn(reject_reserved_bucket))
+}
+
+async fn reject_reserved_bucket(req: Request, next: Next) -> Response {
+    let bucket = req
+        .uri()
+        .path()
+        .trim_start_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    let bucket = percent_encoding::percent_decode_str(bucket).decode_utf8_lossy();
+    if crate::routes::RESERVED_TOP_LEVEL
+        .iter()
+        .any(|reserved| *reserved == bucket)
+    {
+        return StatusCode::NOT_FOUND.into_response();
     }
+    next.run(req).await
 }
 
 /// 핸들러 에러는 이미 완성된 S3 XML 응답이다 — `?`로 즉시 반환된다.
