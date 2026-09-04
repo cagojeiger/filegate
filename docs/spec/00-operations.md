@@ -160,7 +160,9 @@ fs:       fg/{client}/{yyyy}/{mm}/{zz}/{file_id}[.ext]
   문자열을 자르지 않는다(경로 오염 차단). 모르는 타입은 확장자 없음.
   확장자는 선언의 반영일 뿐 검증된 사실이 아니다.
 - 파일명(원본)은 키에 넣지 않는다 — 파일명은 서비스 소유다 (책임 구분).
-- 임시 이름의 lease_id는 디버깅용이고, 청소 판정은 mtime이다 (아래).
+- 임시 이름의 lease_id는 디버깅과 진행 중 multipart 보호에 쓴다. 기본 청소
+  판정은 mtime이고, 공유 fs의 multipart 조립 파일은 활성 write lease 목록으로
+  추가 보호한다 (아래).
 
 각 세그먼트가 갖는 뜻: `fg/`가 "filegate 소유"(공유 버킷 안전),
 `{client}`가 소유자(client 단위 감사·통삭제·lifecycle 규칙),
@@ -168,10 +170,12 @@ fs:       fg/{client}/{yyyy}/{mm}/{zz}/{file_id}[.ext]
 
 ### 디버깅과 복구 — 이 규약이 사주는 것
 
-**장부 밖 정리 (DB를 안 보는 두 가지):**
+**장부 밖 물리 파일·객체 정리:**
 
 - 임시 파일: `.fg-tmp-*` 중 mtime이 48시간 넘은 것은 삭제한다 (reconciler).
-  진행 중 업로드는 어리므로 안 걸린다 — 멀티 pod 안전.
+  pod 로컬 스풀은 mtime만 본다. 공유 fs root의 multipart 조립 파일은 DB의 활성
+  write lease 목록으로 제외하며, 이 목록을 읽지 못하면 해당 sweep을 건너뛴다.
+  공유 마운트는 advisory lock을 얻은 한 파드만 훑는다.
 - 고아 객체 감사: `fg/` 접두사를 나열해 경로의 월이 충분히 지난 객체 중
   location 행이 없는 것을 지운다 (다음 범위의 감사 잡). 벤더 LastModified가
   보조 판정.

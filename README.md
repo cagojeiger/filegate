@@ -17,11 +17,27 @@ cp .env.example .env          # 로컬 자격증명
 cargo run --bin filegate      # http://127.0.0.1:8080
 ```
 
-컨테이너로 띄울 때는 env만 준다:
+컨테이너도 설정 파일 없이 env로 설정한다. Docker Desktop에서는
+`.env.example`의 호스트용 DB 주소를 `host.docker.internal`로 덮어쓴다:
 
 ```sh
-docker run --env-file .env filegate:dev
+docker run --rm -p 8080:8080 --env-file .env \
+  -e FILEGATE_BIND=0.0.0.0:8080 \
+  -e FILEGATE_DATABASE_URL=postgres://filegate:filegate@host.docker.internal:55432/filegate \
+  filegate:dev
 ```
+
+이 구성에서 storage를 등록할 때의 내부 endpoint도 컨테이너에서 도달 가능한
+주소여야 한다. `deploy/local/main.tf`의 `127.0.0.1` endpoint는 filegate를
+호스트에서 실행하는 위 개발 절차를 기준으로 한다. Linux Docker Engine에서 현재
+Compose의 loopback 공개 주소를 그대로 쓰려면 host network로 실행한다:
+
+```sh
+docker run --rm --network host --env-file .env filegate:dev
+```
+
+같은 Compose 네트워크에서 실행한다면 DB와 storage의 내부 endpoint에는 각각
+`postgres:5432`, `minio:9000`처럼 서비스 이름과 컨테이너 포트를 사용한다.
 
 확인:
 
