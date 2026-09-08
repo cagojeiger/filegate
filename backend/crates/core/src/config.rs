@@ -1,5 +1,5 @@
 //! 설정은 env로만 온다 (ADR 004): 서버(프로세스) 설정과 비밀.
-//! 로컬은 `.env`(dotenvy), 배포는 Terraform이 만든 k8s Secret이 공급한다.
+//! 로컬은 `.env`(dotenvy), 배포 환경은 프로세스 환경 변수로 공급한다.
 //!
 //! 등록부(storages·clients)는 여기 없다 — 정본은 DB다 (spec 01).
 //! storage 시크릿도 env가 아니라 DB의 암호문 컬럼에 산다 (core::crypto).
@@ -18,7 +18,7 @@ pub struct Config {
 }
 
 /// 비밀 env 셋 (spec 01 "키와 비밀"). 마스터 키·운영자 토큰은 필수다 —
-/// 없으면 부팅 실패. 배포에서는 Terraform이 만든 k8s Secret이 공급한다.
+/// 부팅 필수 설정이며 배포 환경에서 공급한다.
 #[derive(Debug, Clone)]
 pub struct SecurityConfig {
     /// storage 시크릿 암호화의 마스터 키 (최소 32바이트 검증은 Crypto::new가).

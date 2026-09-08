@@ -1,9 +1,5 @@
-//! S3 표면의 SigV4 인증 (spec 03) — header-signed와 query-signed(presigned)
-//! 서명을 검증해 client_id를 낸다. 두 경로는 "서명을 어디서 읽나"(헤더 vs
-//! 쿼리)와 payload·만료 검사만 다르고, canonical request 조립·서명 재계산은
-//! 완전히 공통이다. secret은 암호화 저장돼 있어(storage 벤더 시크릿과 같은
-//! 기계) access_key_id를 AAD로 복호해 HMAC을 다시 계산한다 — 회전은
-//! enc_key_id 라벨 dispatch가 커버한다. 실패는 완성된 XML이다.
+//! SigV4 header·query 서명을 검증해 client_id를 반환한다.
+//! 원본 인코딩으로 canonical request를 구성하고 암호화된 secret으로 서명을 대조한다.
 
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
@@ -13,8 +9,8 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq as _;
 
-use super::header_str;
 use super::xml::{access_denied, xml_error, xml_internal};
+use super::{header_str, query_value};
 use crate::routes::AppState;
 
 /// SigV4 요청 시각의 허용 스큐 (AWS 관례 ±15분). presigned는 여기에 더해
@@ -109,16 +105,6 @@ fn parse_auth(auth: &str) -> Option<ParsedAuth> {
     })
 }
 
-/// 쿼리 파라미터의 raw(인코딩된) 값. canonical query는 받은 인코딩 그대로
-/// 써야 서명이 성립하므로 디코딩하지 않는다.
-fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
-    query
-        .split('&')
-        .filter_map(|p| p.split_once('='))
-        .find(|(k, _)| *k == key)
-        .map(|(_, v)| v)
-}
-
 /// canonical query — 키 정렬. X-Amz-Signature는 제외한다: 어느 서명 모드든
 /// 서명 자신은 canonical에 들어가지 않는다(presigned의 핵심 규칙). 받은
 /// percent-encoding을 그대로 보존한다 — 서명한 바이트와 같아야 하므로.
@@ -195,14 +181,14 @@ fn from_header(uri: &Uri, headers: &HeaderMap) -> Result<SigV4, Response> {
 #[allow(clippy::result_large_err)]
 fn from_query(uri: &Uri) -> Result<SigV4, Response> {
     let query = uri.query().unwrap_or_default();
-    let algorithm = query_param(query, "X-Amz-Algorithm")
+    let algorithm = query_value(query, "X-Amz-Algorithm")
         .ok_or_else(|| access_denied("missing X-Amz-Algorithm"))?;
     if algorithm != "AWS4-HMAC-SHA256" {
         return Err(access_denied("unsupported signing algorithm"));
     }
 
     // X-Amz-Credential은 `/`가 %2F로 인코딩돼 온다 — scope 파싱용으로만 디코딩.
-    let credential = query_param(query, "X-Amz-Credential")
+    let credential = query_value(query, "X-Amz-Credential")
         .ok_or_else(|| access_denied("missing X-Amz-Credential"))?
         .replace("%2F", "/")
         .replace("%2f", "/");
@@ -214,7 +200,7 @@ fn from_query(uri: &Uri) -> Result<SigV4, Response> {
     let terminator = scope.next().unwrap_or_default().to_owned();
 
     let amz_date =
-        query_param(query, "X-Amz-Date").ok_or_else(|| access_denied("missing X-Amz-Date"))?;
+        query_value(query, "X-Amz-Date").ok_or_else(|| access_denied("missing X-Amz-Date"))?;
     if !amz_date.starts_with(scope_date.as_str()) {
         return Err(access_denied(
             "X-Amz-Date does not match the credential scope",
@@ -223,7 +209,7 @@ fn from_query(uri: &Uri) -> Result<SigV4, Response> {
     let request_time = chrono::NaiveDateTime::parse_from_str(amz_date, "%Y%m%dT%H%M%SZ")
         .map_err(|_| access_denied("malformed X-Amz-Date"))?
         .and_utc();
-    let expires: i64 = query_param(query, "X-Amz-Expires")
+    let expires: i64 = query_value(query, "X-Amz-Expires")
         .and_then(|v| v.parse().ok())
         .ok_or_else(|| access_denied("missing or invalid X-Amz-Expires"))?;
     let elapsed = (chrono::Utc::now() - request_time).num_seconds();
@@ -238,14 +224,14 @@ fn from_query(uri: &Uri) -> Result<SigV4, Response> {
         ));
     }
 
-    let signed_headers = query_param(query, "X-Amz-SignedHeaders")
+    let signed_headers = query_value(query, "X-Amz-SignedHeaders")
         .ok_or_else(|| access_denied("missing X-Amz-SignedHeaders"))?
         .replace("%3B", ";")
         .replace("%3b", ";")
         .split(';')
         .map(str::to_owned)
         .collect();
-    let signature = query_param(query, "X-Amz-Signature")
+    let signature = query_value(query, "X-Amz-Signature")
         .ok_or_else(|| access_denied("missing X-Amz-Signature"))?
         .to_owned();
 
@@ -367,9 +353,9 @@ mod tests {
     #[test]
     fn query_param_reads_the_value_or_none() {
         let q = "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=abc&X-Amz-Expires=900";
-        assert_eq!(query_param(q, "X-Amz-Signature"), Some("abc"));
-        assert_eq!(query_param(q, "X-Amz-Expires"), Some("900"));
-        assert_eq!(query_param(q, "X-Amz-Missing"), None);
+        assert_eq!(query_value(q, "X-Amz-Signature"), Some("abc"));
+        assert_eq!(query_value(q, "X-Amz-Expires"), Some("900"));
+        assert_eq!(query_value(q, "X-Amz-Missing"), None);
     }
 
     #[test]

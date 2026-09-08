@@ -1,20 +1,10 @@
-//! S3 호환 표면 (spec 03, ADR 006) — 무수정 S3 SDK를 받는 온보딩 계층.
-//!
-//! path-style `/{bucket}/{key}`. bucket = client_id(자기 버킷), key = 서비스
-//! 소유 논리키(s3_keys). 바이트는 업로드·다운로드 모두 filegate를 지난다 —
-//! ADR 006이 수용한 비용이다. 파일·lease·회계는 네이티브 표면과 한 장부다.
-//!
-//! 인증은 SigV4다 (auth) — header-signed와 query-signed(presigned)를 모두
-//! 검증한다. 단일 PUT은 스트림 실측 뒤, multipart는 Complete에서 확정하며
-//! 논리키 교체까지 한 DB 트랜잭션이다. 에러는 S3 XML 최소형 — SDK가 파싱하는
-//! 모양이다 (HEAD의 본문은 hyper가 떨군다).
-//!
-//! 모듈 구성: 라우팅·디스패치(여기) · SigV4 인증(auth) · 오퍼레이션
-//! 핸들러(handlers) · XML 에러 빌더(xml).
+//! S3 path-style 라우팅과 공통 요청 처리.
+//! bucket은 client_id이며, 인증·예약 경로 검사를 거쳐 객체·multipart 핸들러로 보낸다.
 
 mod auth;
 mod handlers;
 mod multipart;
+mod object_response;
 mod xml;
 
 use axum::extract::{Path, Request, State};
@@ -146,8 +136,7 @@ fn query_flag(query: &str, key: &str) -> bool {
         .any(|pair| pair == key || pair.split_once('=').is_some_and(|(k, _)| k == key))
 }
 
-/// 쿼리 파라미터의 값 — 없으면 None. uploadId(UUID)·partNumber(정수)는
-/// 퍼센트 인코딩이 없으므로 raw를 그대로 쓴다.
+/// 첫 번째 정확히 일치하는 키의 raw 값. 서명 검증까지 원본 인코딩을 유지한다.
 fn query_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
     query
         .split('&')
@@ -188,5 +177,14 @@ mod tests {
         assert_eq!(query_value(q, "missing"), None);
         // 값 없는 uploads는 value로는 None이다 (flag로만 잡힌다).
         assert_eq!(query_value("uploads", "uploads"), None);
+    }
+
+    #[test]
+    fn query_values_preserve_encoding_and_first_exact_match() {
+        let query = "Key=wrong&key&key=a%2Fb+c&key=second&empty=";
+        assert_eq!(query_value(query, "key"), Some("a%2Fb+c"));
+        assert_eq!(query_value(query, "Key"), Some("wrong"));
+        assert_eq!(query_value(query, "empty"), Some(""));
+        assert_eq!(query_value(query, "missing"), None);
     }
 }

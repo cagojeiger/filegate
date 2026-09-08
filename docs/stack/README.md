@@ -1,79 +1,116 @@
-# 기술 스택
+# 기술·운영
 
-현재 구현된 스택을 서술한다 — 아래 표가 실제 워크스페이스 Cargo.toml의 요약이다. ADR과의 역할 구분: ADR은 잘 변하지 않는 방향·구조·원칙을, 이 디렉토리는 **생태계와 함께 바뀌는 구현 선택**(언어, 프레임워크, 크레이트 버전)을 담는다. 크레이트 버전은 형제 프로젝트(`~/project/*gate`)와 맞춰 두고, 갱신 시 함께 올린다.
+## 실행 구조
 
-최초 조사 2026-07-08 (형제 notegate·opsgate 기준), 2026-08-26 구현 정합 갱신.
+| 역할 | 구현 |
+|---|---|
+| 프로세스 | Rust 단일 바이너리, axum, tokio |
+| 메타데이터 | PostgreSQL + sqlx, 부팅 시 마이그레이션 |
+| 바이트 | tokio filesystem I/O, aws-sdk-s3 |
+| 스트림 | axum body, 임시 스풀, 크기·MD5·SHA256 계측 |
+| 비밀 | AES-256-GCM, HKDF, secrecy, 상수시간 비교 |
+| 관측 | tracing 구조화 로그 |
+| 이미지 | `debian:bookworm-slim`, release 바이너리·CA 인증서, 비root 사용자 |
 
-## 결정
+의존성 버전은 [Cargo.toml](../../Cargo.toml), 소스 책임은
+[소스 구조](../development/source-layout.md), 키 계약은 [등록부](../spec/01-registry.md)가 정본이다.
 
-- **언어: Rust.** 컨트롤 플레인(발급·확정·회계)과 중계 데이터 플레인(바이트 스트리밍 패스스루)을 한 프로세스에 담는다. 배포 이미지는 release 단일 바이너리를 `debian:bookworm-slim` 런타임에 담는다. 별도 언어 인터프리터는 필요 없지만 시스템 런타임과 CA 인증서는 이미지가 제공한다 (공리 3).
-- **메타데이터 저장소: PostgreSQL (sqlx).** 파일·위치·lease·대여 이력의 기록을 단일 트랜잭션으로 원자화한다(ADR 004). lease 원장이 접근 기록이고(ADR 002) durable 이력은 lease_history가 담당하며, reconciler도 같은 DB를 본다 — 별도 큐 없음. 바이트는 DB에 넣지 않는다.
-- **저장소 접근: aws-sdk-s3.** storage adapter(ADR 001)의 1차 계약이 S3 호환이고, presigned URL 발급이 직결 모드의 핵심 요구다. 같은 SDK로 MinIO·R2·OCI를 endpoint 교체만으로 다룬다. `object_store`(fs+s3 단일 trait)는 fs adapter와의 통합 관점에서 검토 후보.
-- **fs adapter·중계 스트리밍: tokio::fs + axum body.** presigned 개념이 없는 로컬/NFS는 항상 중계이며, 선언 크기에서 스트림을 끊는 요구(ADR 002)를 상수 메모리로 처리한다.
+## 설정
 
-## 크레이트 (형제 프로젝트 기준)
+| 설정 | 공급·관리 |
+|---|---|
+| bind·로그·DB URL·pool 크기·multipart·CORS | env, 로컬 예시는 [.env.example](../../.env.example) |
+| 마스터 키·key id·이전 키 쌍 | env, [키 회전](../spec/01-registry.md#키와-비밀) |
+| 운영자 토큰 | env의 쉼표 목록 |
+| storage·client·키·S3 자격증명 | PostgreSQL, 운영자 API |
 
-| 역할 | 크레이트 | 비고 |
+프로세스는 환경 변수를 읽는다. 배포 도구가 env 또는 Secret을 공급한다.
+`deploy/local/main.tf`와 E2E의 Terraform 등록 절차는 현재 유지한다.
+Terraform 제거와 대체 등록 절차는 후속 변경에서 함께 적용한다.
+
+## 현재 CLI
+
+| 명령 | 현재 동작 |
+|---|---|
+| `filegate`, `filegate serve` | 서버 기동·migration·등록 저장소 검증 |
+| `filegate status` | 로컬 설정으로 DB·저장소 접근 검사, usage·client 수 출력 |
+| `filegate --help` | 명령 도움말 |
+
+현재 status는 HTTP 서버 없이 동작하고 DB URL·마스터 키를 포함한 서버 설정을 읽는다.
+DB migration은 수행하지 않으며, fs 접근 검사는 probe 파일 쓰기·삭제를 포함한다.
+검사 성공은 exit 0, storage 실패는 exit 1이다. 테스트는 바이트·용량 표현 2개다.
+원격 status·로컬 doctor·관리 명령은 [CLI 스펙 초안](../spec/04-cli.md)의 후속 구현이다.
+
+## 컨테이너 연결
+
+```sh
+docker build -f deploy/docker/Dockerfile -t filegate:dev .
+docker run --rm -p 8080:8080 --env-file .env \
+  -e FILEGATE_BIND=0.0.0.0:8080 \
+  -e FILEGATE_DATABASE_URL=postgres://filegate:filegate@host.docker.internal:55432/filegate \
+  filegate:dev
+```
+
+위 실행 예시는 Docker Desktop 기준이다. storage의 내부 endpoint도 컨테이너에서 접근 가능한 주소로 등록한다.
+
+| 실행 위치 | DB 주소 | MinIO 내부 endpoint |
 |---|---|---|
-| async 런타임 | `tokio` (full), `tokio-util` (io) | |
-| HTTP | `axum` 0.8, `tower-http` 0.6 | limit·timeout·request-id·trace·공유 CORS allowlist (`/blobs`·S3 호환 표면) |
-| DB | `sqlx` 0.8 | `runtime-tokio, tls-rustls, postgres, macros, migrate, uuid, chrono` |
-| 저장소 | `aws-sdk-s3` | **filegate 신규** — 형제엔 없음. aws-config 없이 정적 Credentials + 명시 Config |
-| 설정 | env + `dotenvy` | YAML 설정 파일 없음 — 등록부는 DB (ADR 004) |
-| 에러 | `thiserror` 2, `anyhow` 1 | |
-| 관측 | `tracing`, `tracing-subscriber` (env-filter, json) | 구조화 로그만 — Prometheus 메트릭은 v0 범위에서 제외(필요 시 재도입). 성공 프로브는 로그에서 제외 |
-| 직렬화·타입 | `serde`, `serde_json`, `uuid` v4, `chrono` | |
-| 비밀·암호 | `secrecy`, `aes-gcm`, `hkdf`, `sha2`, `md-5`, `subtle` | 장수 시크릿(storage·S3 자격증명) 암호화·relay secret 파생·운영자 토큰 비교·클라이언트 키 해시. md-5는 중계 스트림 실측 |
+| 호스트 | `127.0.0.1:55432` | `http://127.0.0.1:9000` |
+| Docker Desktop 컨테이너 | `host.docker.internal:55432` | `http://host.docker.internal:9000` |
+| 같은 Compose 네트워크 | `postgres:5432` | `http://minio:9000` |
+| Linux Docker Engine host network | `127.0.0.1:55432` | `http://127.0.0.1:9000` |
 
-## 워크스페이스 레이아웃
+Linux의 기존 Compose loopback 공개 주소는
+`docker run --rm --network host --env-file .env filegate:dev`로 접근한다.
+fs storage에는 컨테이너에서 보이는 데이터 마운트를 제공한다.
 
-실구현은 `backend/crates/{core, db, infra, api}` — 형제의 model·service는 별도 크레이트로 두지 않았다 (타입은 db·api가 각자, 오케스트레이션은 api의 reconciler가 담당).
+## 워커
 
-- **core** 설정·암호·해시, **db** sqlx 접근·도메인 타입, **infra** storage adapter(s3, fs), **api** axum 핸들러·reconciler.
-- 조사 당시 "`infra` 크레이트 또는 `service` 하위" 선택지는 `infra` 크레이트로 결정됐다.
+```mermaid
+flowchart LR
+    Boot["설정 / DB 연결 / migration / storage 검증"] --> Run["HTTP + reconciler"]
+    Run --> Tick["tick"]
+    Tick --> Lock["PostgreSQL advisory transaction lock"]
+    Lock --> Jobs["관찰 / 복구 / 정리 / 사용량 스냅샷"]
+```
 
-## 멀티 파드와 단일 워커 (notegate 검증 패턴)
+| 조건 | 동작 |
+|---|---|
+| 여러 API 프로세스 | DB 트랜잭션으로 전이 직렬화 |
+| 워커 tick | 락을 얻은 프로세스가 공유 저장소 작업 수행 |
+| 연결·프로세스 종료 | 트랜잭션 락 자동 해제 |
+| 로컬 임시 스풀 | 각 프로세스가 자기 임시 영역 정리 |
+| fs를 여러 프로세스가 사용 | 같은 데이터 마운트 공유, 임시→최종 rename은 같은 filesystem |
+| 종료 신호 | HTTP 종료 후 워커 종료 |
 
-여러 파드로 떠도 reconciler는 DB당 하나만 돌아야 한다. notegate의 purge worker 패턴을 그대로 쓴다 (`purge_worker.rs` + `purge_repo.rs`).
+후보 스캔은 작업별 배치로 처리하며, 일별 스냅샷과 일부 filesystem 스캔은 전체 집합을 읽는다.
+작업 순서는 [reconciler.rs](../../backend/crates/api/src/reconciler.rs)에 있다.
 
-- **API 경로는 무상태 수평 확장.** 회계 원자성과 상태 전이 경합은 PG 트랜잭션·조건부 갱신이 담당하므로 파드 수와 무관하다 (ADR 004).
-- **워커는 모든 파드가 spawn하고, 실행은 락이 고른다.** 매 tick마다 트랜잭션을 열고 `pg_try_advisory_xact_lock(고정 i64 키)`을 시도한다. 못 잡으면 다른 파드가 돌고 있다는 뜻 — 조용히 skip. 리더 선출·전용 워커 배포가 따로 없다.
-- **잠금은 자가 회복이다.** xact 락은 트랜잭션 종료(커밋·롤백·커넥션 사망) 시 자동 해제라, 워커 파드가 죽어도 갱신·정리 절차 없이 다음 tick에 다른 파드가 이어받는다.
-- **루프 형태**: `tokio::time::interval` + `MissedTickBehavior::Delay` + `CancellationToken` graceful shutdown.
-- **배치는 유계**: CTE + `LIMIT`으로 한 run에 조금씩. run 결과는 tracing 구조화 로그로.
-- **부팅 배선** (notegate main.rs 순서): config 로드 → PG 연결·마이그레이션 → 상태 구성 → HTTP listen + worker spawn → `tokio::select`로 종료 신호 대기 → HTTP부터 순차 shutdown.
+## 검증
 
-filegate의 reconciler 책임은 단일 PUT 관찰 확정, native/S3 완료 복구, S3 세션 만료·정리, generic pending 만료 회수, deleted purge, read lease 만료 정리, 임시 파일 청소, 종료 lease GC, lease_history 보존 prune, usage_snapshot 일별 기록, 종착 file 행 정리다. 각 작업은 유계 배치이고 완료 복구처럼 외부 상태를 관찰하는 책임은 별도 함수·모듈로 분리한다. tiering은 이후 범위다. 주의: fs/NFS storage를 멀티 파드로 쓰려면 모든 파드가 같은 마운트를 공유해야 한다 — 중계 요청이 어느 파드로 와도 같은 파일에 닿아야 하고, 임시 경로 + rename 원자성은 같은 마운트 안에서만 성립한다.
+```sh
+export DATABASE_URL=postgres://filegate:filegate@127.0.0.1:55432/filegate
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
 
-## 비밀과 설정
+| 검사 | 전제·범위 |
+|---|---|
+| API·core·infra 단위 테스트 | DB 연결 없는 테스트 |
+| `db/tests` | PostgreSQL과 `DATABASE_URL`; sqlx가 테스트 DB 생성 |
+| `migrations.rs` | URL이 있으면 migration 검증, 없으면 조기 반환 |
+| `scripts/e2e-*.sh` | 로컬 전용 DB·MinIO·서버·스크립트별 등록 전제 |
+| `scripts/e2e-registry.sh` | 시작·종료 시 등록부 초기화, 전용 개발 DB에서 실행 |
+| `scripts/s3-capture.py` | S3 endpoint·자격증명·bucket으로 실제 객체·multipart 검증 |
 
-**비밀의 저장 방식은 성격이 정한다** (ADR 004, spec 01 "키와 비밀").
+## 로그
 
-- 서버(프로세스) 설정은 전부 env다: bind, 로그 포맷, DB URL, 커넥션 수. YAML 설정 파일은 두지 않는다.
-- env의 비밀 종류는 셋이다: 마스터 키(`FILEGATE_ENC_ROOT_SECRET`), 운영자 토큰(`FILEGATE_OPERATOR_TOKENS`, 쉼표 목록 — 메인/서브 로테이션), DB URL. 마스터 키 회전 중에는 이전 키(`FILEGATE_ENC_ROOT_SECRET_PREV`)와 그 key id를 임시로 함께 둔다. Terraform이 k8s Secret으로 공급한다.
-- 클라이언트 키(검증 전용)는 sha256 해시로만 DB에 저장한다. 인증 = 제시된 키를 해시해 조회. 회전 = 해시 행 추가·삭제.
-- storage 시크릿(런타임 사용)은 AES-256-GCM으로 암호화해 DB에 저장한다 — AAD에 storage id 바인딩, 마스터 키는 env. opsgate의 credential 보관 방식을 참조한다.
-- S3 자격증명 secret(SigV4 재계산용)도 AES-256-GCM으로 암호화한다 — AAD는 access key id이고, raw는 발급 응답에서 한 번만 반환한다.
-- 메모리의 비밀은 `secrecy::SecretString`으로 Debug 유출을 막는다. 토큰 비교는 상수 시간(`subtle`).
+| 레벨 | 대상 |
+|---|---|
+| info | 부팅·종료·실제 요청 |
+| debug | 반복 tick·락 획득 실패 |
+| warn | 재시도 가능한 이상 |
+| error | 요청·워커·준비 상태 실패 |
 
-형제(notegate/opsgate)에서 가져온 패턴: thiserror 에러 체계, 멀티 파드 워커 락. config 검증은 자체 파서로 충분해 validator·moka는 도입하지 않았다.
-
-## 로그 레벨 정책
-
-기본 필터는 `info`. 평시 로그는 라이프사이클 이벤트만 보이고, 주기적 시스템 틱은 debug로 내려 노이즈를 없앤다.
-
-| 레벨 | 대상 | 예 |
-|---|---|---|
-| **info** | 부팅·종료 마일스톤 (1회성, 운영자에게 의미) | `db.connected`, `storage.connected`, `server.listening`, `reconciler.started`/`stopped`, `server.shutting_down`, `shutdown.complete` |
-| **info** | 실제 클라이언트 요청 (프로브 제외) | `request.end` |
-| **debug** | 주기적 시스템 틱 (반복, 노이즈) | `reconciler.job`, `reconciler.skipped` |
-| **warn** | 이상 징후 (치명적 아님) | `reconciler.join_failed` |
-| **error** | 실패 | `ready.failed`, `reconciler.failed` |
-
-프로브(/healthz, /readyz)의 성공 요청은 로그에서 제외한다. 실패한 프로브는 남긴다.
-
-## 빌드 규율 (형제 공통)
-
-- clippy `warn`: `unwrap_used`, `expect_used`, `panic`, `todo`, `unreachable`, `indexing_slicing`, `unwrap_in_result`, `await_holding_lock`.
-- release: `lto = true`, `codegen-units = 1`, `strip = true`, `debug = 1`.
-- 로컬 개발은 docker-compose(MinIO + PostgreSQL).
+성공한 health/readiness 요청은 로그에서 제외하고 실패를 기록한다.

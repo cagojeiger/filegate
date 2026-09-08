@@ -1,61 +1,43 @@
 # filegate
 
-정책 기반 파일 게이트웨이. 네이티브 표면은 `file_id`, S3 호환 표면은 서비스가 정한 논리키로 파일을 참조하고, 물리(벤더·버킷·수명)는 filegate가 소유한다.
+PostgreSQL에 파일 메타데이터를 기록하고, fs·외부 S3 저장소의 바이트를
+네이티브 API와 S3 호환 API로 제공한다.
 
-- 방향·원칙: [docs/adr/](docs/adr/README.md)
-- 오퍼레이션 계약: [docs/spec/](docs/spec/00-operations.md)
-- 서비스 연동: [docs/guide/](docs/guide/service-integration.md)
-- 기술 선택: [docs/stack/](docs/stack/README.md) · 벤더 사실: [docs/vendors/](docs/vendors/README.md)
+## 개선 계획
 
-## 개발 환경
+관리 CLI·Terraform 관리 이관·독립 Agent는 아직 구현·적용 전이다.
+아래 단계는 로드맵이며 현재 제공 기능은 각 spec의 상태 표시를 따른다.
 
-설정은 전부 **환경 변수**다 (로컬 `.env`, 배포는 Terraform이 만든 k8s Secret): 서버 설정 + 마스터 키 + 운영자 토큰. 등록부(storages·clients·credentials)는 DB에 살고 운영자 API로 관리하며, storage와 S3 자격증명 시크릿은 암호화되어 등록부에 보관된다 ([spec 01](docs/spec/01-registry.md)).
+1차는 외부 S3 presigned 전송을 기반으로 관리 CLI와 등록부 Terraform 관리 이관을
+진행한다. 2차에 사전 마운트된 파일시스템을 사용하는 Storage Server·Agent를 추가한다.
+메타데이터는 PostgreSQL이 중앙 관리하며, FileGate 이름은 후속 이름 변경까지 유지한다.
 
-```sh
-docker compose up -d          # MinIO(9000/9001) + PostgreSQL(55432) + 버킷 프로비저닝
-cp .env.example .env          # 로컬 자격증명
-cargo run --bin filegate      # http://127.0.0.1:8080
-```
+| 문서 | 내용 |
+|---|---|
+| [문서 목차](docs/README.md) | 현재 구현과 제품 방향 |
+| [단계별 제품 결정](docs/adr/007-grove-storage-foundation.md) | 전제·책임·전환 경계 |
+| [코드 구조](docs/development/source-layout.md) | 모듈 책임과 테스트 위치 |
+| [실행·운영](docs/stack/README.md) | 설정·컨테이너·검증 |
+| [S3 연동](docs/guide/s3-onboarding.md) | endpoint·키·버킷·SDK |
+| [네이티브 연동](docs/guide/service-integration.md) | 발급·전송·확정 |
 
-컨테이너도 설정 파일 없이 env로 설정한다. Docker Desktop에서는
-`.env.example`의 호스트용 DB 주소를 `host.docker.internal`로 덮어쓴다:
-
-```sh
-docker run --rm -p 8080:8080 --env-file .env \
-  -e FILEGATE_BIND=0.0.0.0:8080 \
-  -e FILEGATE_DATABASE_URL=postgres://filegate:filegate@host.docker.internal:55432/filegate \
-  filegate:dev
-```
-
-이 구성에서 storage를 등록할 때의 내부 endpoint도 컨테이너에서 도달 가능한
-주소여야 한다. `deploy/local/main.tf`의 `127.0.0.1` endpoint는 filegate를
-호스트에서 실행하는 위 개발 절차를 기준으로 한다. Linux Docker Engine에서 현재
-Compose의 loopback 공개 주소를 그대로 쓰려면 host network로 실행한다:
+## 로컬 실행
 
 ```sh
-docker run --rm --network host --env-file .env filegate:dev
+docker compose up -d
+cp .env.example .env
+cargo run --bin filegate
 ```
 
-같은 Compose 네트워크에서 실행한다면 DB와 storage의 내부 endpoint에는 각각
-`postgres:5432`, `minio:9000`처럼 서비스 이름과 컨테이너 포트를 사용한다.
+Compose는 PostgreSQL(`55432`), MinIO(`9000/9001`), 개발 버킷을 준비한다.
+[운영자 API](docs/spec/01-registry.md)로 storage·client·자격증명을 등록한다.
+기존 [Terraform 예제](deploy/local/main.tf)는 로컬 E2E의 등록 구성을 제공한다.
 
-확인:
+| 확인 | 결과 |
+|---|---|
+| `GET /` | 이름·버전 |
+| `GET /healthz` | 프로세스 생존 |
+| `GET /readyz` | DB 준비 상태 |
 
-```sh
-curl http://127.0.0.1:8080/          # {"name":"filegate","version":...}
-curl http://127.0.0.1:8080/healthz    # {"status":"ok"}   — liveness (무의존)
-curl http://127.0.0.1:8080/readyz     # {"status":"ready"} — readiness (DB 체크)
-```
-
-검사와 이미지 빌드:
-
-```sh
-cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
-docker build -f deploy/docker/Dockerfile -t filegate:dev .
-```
-
-`db` 통합 테스트(`#[sqlx::test]`)는 `DATABASE_URL`이 있어야 돈다 — `docker compose up` 후
-`export DATABASE_URL=postgres://filegate:filegate@127.0.0.1:55432/filegate`. 없으면 그 테스트는
-실패한다 (CI는 PG 서비스로 자동 공급). `migrations.rs`만 예외로 없으면 조용히 스킵한다.
-
-릴리스는 `VERSION` 파일을 올려 main에 머지하면 GitHub Actions가 ghcr 이미지와 태그를 발행한다.
+`VERSION` 갱신을 main에 머지하면 릴리스 워크플로가 태그와 GHCR 이미지를 발행한다.
+실행 환경의 배포는 별도 운영 절차로 수행한다.

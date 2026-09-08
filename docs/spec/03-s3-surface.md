@@ -1,216 +1,141 @@
-# spec 03: S3 호환 표면 오퍼레이션
+# spec 03: S3 호환 API
 
-- Status: Accepted
-- Date: 2026-07-14 (개정 2026-08-26: 구현된 multipart 라우팅·fs 조립 시점 반영)
-- 근거: ADR [006](../adr/006-s3-compat-surface.md) (중계를 수용한 온보딩 계층), [002](../adr/002-lease-model.md) (모든 접근은 lease), [003](../adr/003-url-ownership.md) (논리키 = 서비스 소유 이름)
-- 실측: boto3/botocore (2026-07-14, [scripts/s3-capture.py](../../scripts/s3-capture.py)) — 아래 요청 모양은 관측값이다
+- 상태: 현재 구현 계약
+- 근거: [ADR 006](../adr/006-s3-compat-surface.md)
+- 실행 예: [S3 연동](../guide/s3-onboarding.md)
 
-무수정 S3 SDK가 filegate를 상대로 동작하는 표면의 계약을 정한다. 이
-표면의 바이트는 업로드·다운로드 모두 filegate를 지난다 (ADR 006이
-수용한 비용). 파일·lease·회계는 네이티브 표면과 한 장부다.
+## 지원 오퍼레이션
 
-## 지원 오퍼레이션 — 이것이 전부다
-
-| 오퍼레이션 | 요청 | 성공 | 주요 실패 |
+| 동작 | 요청 | 성공 | 주요 실패 |
 |---|---|---|---|
-| PutObject | `PUT /{bucket}/{key}` | 200, `ETag: "<md5>"` | 403(서명)·404(bucket)·400(본문) |
-| HeadObject | `HEAD /{bucket}/{key}` | 200 + Content-Length·Content-Type·ETag | 404 |
-| GetObject | `GET /{bucket}/{key}` (+`Range`) | 200 스트림 / 206 부분 | 404·416 |
-| DeleteObject | `DELETE /{bucket}/{key}` | 204 — 멱등 | 403 |
-| CreateMultipartUpload | `POST /{bucket}/{key}?uploads` | 200 + XML `<UploadId>` | 403·404 |
-| UploadPart | `PUT /{bucket}/{key}?partNumber=N&uploadId=U` | 200, `ETag: "<md5>"` | 403·404(세션)·400·503(동시 part) |
-| CompleteMultipartUpload | `POST /{bucket}/{key}?uploadId=U` (XML part 목록) | 200 + XML `<ETag>` 합성 | 403·404·400(part 불일치)·503(복구 중) |
-| AbortMultipartUpload | `DELETE /{bucket}/{key}?uploadId=U` | 204 | 403·404(세션)·503(진행 중 part) |
+| PutObject | PUT /{bucket}/{key} | 200·ETag | 403·404·400 |
+| HeadObject | HEAD /{bucket}/{key} | 200·객체 헤더 | 404 |
+| GetObject | GET /{bucket}/{key} | 200·스트림 / 206·Range | 404·416 |
+| DeleteObject | DELETE /{bucket}/{key} | 멱등 204 | 403 |
+| CreateMultipartUpload | POST ?uploads | 200·XML UploadId | 403·404 |
+| UploadPart | PUT ?partNumber=N&uploadId=U | 200·part ETag | 400·403·404·503 |
+| CompleteMultipartUpload | POST ?uploadId=U + XML | 200·합성 ETag | 400·403·404·503 |
+| AbortMultipartUpload | DELETE ?uploadId=U | 204 | 403·404·503 |
 
-단일 객체 넷(put→head→get+Range→delete)은 boto3의 작은 파일 수명 전체다.
-multipart 넷은 `upload_file`의 임계(기본 8MiB) 초과 자동 전환이 요구한다 —
-같은 SDK 호출이 MinIO와 filegate에서 동일하게 도는 것이 목표다. 이 여덟이
-전부다: ListBuckets·HeadBucket·ListMultipartUploads·ListParts 같은 프로브는
-SDK 정상 경로에 나오지 않는다.
+현재 검증 대상은 boto3의 객체 수명·upload_file/download_file·multipart다.
+ListObjectsV2·ListBuckets·HeadBucket·CopyObject·ListParts·클라이언트용
+ListMultipartUploads는 현재 지원 범위 밖이다.
 
-## 결정 사항
+## 주소·인증
 
-### 주소와 어휘
+| 항목 | 계약 |
+|---|---|
+| 리스너 | 컨트롤 API와 FILEGATE_BIND 공유 |
+| 주소 | path-style /{bucket}/{key} |
+| bucket | client_id와 일치; 다른 이름은 404 NoSuchBucket |
+| 예약 경로 | api·blobs·healthz·readyz, 인코딩된 이름도 확인 |
+| 예약 경로 처리 | S3 CORS·인증 전에 404; 실제 컨트롤 라우트는 자체 계약 |
+| key | 디코딩한 서비스 소유 논리키; 재PUT은 매핑 교체 |
+| 인증 | header-signed·query-signed SigV4 |
+| 자격증명 | 운영자 API가 발급한 client 소유 access key·secret |
+| canonical query | raw 인코딩 보존·정렬, X-Amz-Signature 제외 |
+| query-signed | X-Amz-Date·Expires·SignedHeaders 검증 |
+| secret 저장 | AES-GCM, AAD=access key id, enc_key_id로 복호 |
+| 회전 | [등록부](01-registry.md#키와-비밀)의 재발급 절차 |
 
-- 표면은 컨트롤과 **한 리스너**(`FILEGATE_BIND`)를 공유한다 — S3 path-style은
-  루트 경로가 bucket이라, 컨트롤 표면(`/api`·`/blobs`·probes)과 겹치는
-  이름(`api`·`blobs`·`healthz`·`readyz`)은 버킷으로 예약되고, 나머지는
-  `/{bucket}/{key}`로 S3가 받는다. 컨트롤 라우트가 우선하고 그 뒤에 S3를
-  병합한다 (routes::app).
-- path-style만 지원한다: `/{bucket}/{key}`. virtual-host style은 보류.
-- **bucket = client_id** (client가 자기 기반 storage를 소유한다). 인증된
-  client_id와 버킷 이름이 다르면 404 `NoSuchBucket`. 서비스는 자기 client
-  id를 버킷 이름으로 쓴다 (ADR 006).
-- **key = 논리키** — 서비스 소유 이름 (ADR 003). 퍼센트 인코딩·유니코드를
-  수용하고 디코딩된 형태로 보관한다. 같은 키 재PUT은 덮어쓰기다:
-  매핑이 새 file을 가리키고 옛 file은 detach로 넘어간다 — S3의
-  덮어쓰기 시맨틱을 상태 기계로 번역한 것.
+## 객체 전송
 
-### 인증 — SigV4
+| 항목 | 계약 |
+|---|---|
+| 바이트 경로 | Client ↔ FileGate ↔ client의 storage |
+| PUT 계측 | 크기·MD5·SHA256, 서명된 payload hash 대조 |
+| PUT 확정 | 물리 쓰기 후 파일·lease·논리키·옛 파일 detach를 같은 DB transaction으로 처리 |
+| PUT ETag | 실측 MD5, 따옴표 포함 |
+| 단일 PUT 상한 | 5GiB |
+| Range | bytes=a-b·bytes=a-; 시작이 크기 이상이면 416 |
+| 기타 Range 형식 | 전체 응답 |
+| 응답 override | 서명된 response-content-disposition/type/cache-control |
+| override 검증 | percent decode 후 HeaderValue 검증; 제어문자는 400 InvalidArgument |
+| checksum 헤더 | 서명 범위로 검증; CRC32 값의 본문 대조는 현재 제공하지 않음 |
+| 접근 기록 | 내부 lease 원장 사용 |
 
-- 자격증명은 access key id + secret key 쌍이다. 등록부(운영자 API)가
-  client에 발급하며, bearer 클라이언트 키와 별개다. access key id는 공개
-  식별자, secret은 고엔트로피 랜덤이고 발급 응답에서 원문이 딱 한 번 나간다.
-- **secret은 암호화 저장한다** — storage 벤더 시크릿과 같은 기계 (재현이
-  필요한 장수 시크릿은 암호화 저장, 찰나인 relay만 파생). SigV4 검증은
-  access_key_id를 AAD로 복호해 raw로 HMAC을 재계산한다. 마스터 키 회전은
-  `enc_key_id` 라벨 dispatch가 커버하고(spec 01 런북, storages와 함께),
-  유출 반경은 저장된 암호문에 국한되며 자격증명은 행 단위로 폐기·회전한다.
-- **header-signed SigV4를 검증한다.** canonical request의 payload hash는
-  `x-amz-content-sha256` 헤더 값을 그대로 쓴다 — 실측: PUT은 실제
-  본문 SHA256, GET/HEAD/DELETE는 empty-payload hash.
-- `SignedHeaders`에 열거된 헤더 전부가 canonical에 들어간다 — boto3
-  기본 무결성 헤더(`x-amz-checksum-crc32`, `x-amz-sdk-checksum-algorithm`)도
-  서명 범위로 함께 검증된다 (실측: 최신 botocore가 PUT에 기본 첨부).
-- **query-signed(presigned URL)도 검증한다.** 서명·자격이 쿼리스트링
-  (`X-Amz-Credential/Date/Expires/SignedHeaders/Signature`)에 실려 오고,
-  canonical query에서 `X-Amz-Signature`만 제외해 재계산한다. payload hash는
-  `UNSIGNED-PAYLOAD`, 만료는 `X-Amz-Expires` 창으로 본다. 서비스가 자기 S3
-  SDK의 `generate_presigned_url`을 filegate에 그대로 겨누는 경로다.
+## Multipart
 
-### 전송과 검증
+S3는 part 크기를 클라이언트가 정한다. 네이티브의 declared_size 기반 offset 대신
+part별 실측 크기와 완료 목록으로 조립한다.
 
-- PUT은 `Expect: 100-continue`를 수용한다 (실측: boto3 기본 첨부).
-  스트림 실측(크기·MD5)이 검증 재료고 **완료 즉시 확정한다** — 관찰
-  확정(spec 00)과 같은 게이트이며 별도 commit이 없다. S3에도 없으므로
-  대칭이다. ETag = 실측 MD5, 따옴표 포함.
-- GET은 단일 구간 `Range: bytes=a-b`를 지원한다 — 206/416. boto3
-  `download_file`(병렬 Range 다운로드)의 전제다.
-- GET·HEAD의 서명된 `response-content-disposition`·`response-content-type`·
-  `response-cache-control` 쿼리는 응답 헤더를 덮어쓴다. 퍼센트 디코딩 뒤 유효한
-  HTTP 헤더 값이 아니면 400 `InvalidArgument`로 거부한다.
-- checksum 재계산(CRC32 대조)은 하지 않는다 — 무결성은 크기·MD5 실측이
-  담당하고, checksum 헤더는 서명 검증의 일부로만 쓰인다.
-- 모든 접근은 lease 원장을 지난다 (ADR 002) — 표면이 내부적으로 lease를
-  만들어 관찰·회계·이력이 네이티브와 한 장부가 된다.
+| 단계 | 파일·세션 | 물리 처리 |
+|---|---|---|
+| Create | pending + open, (client, key, multipart)에 바인딩 | S3 backend는 vendor 세션 개시; fs는 part 도착 시 저장 |
+| UploadPart | 계측 뒤 claimed 선점·done 기록 | S3 UploadPart 또는 fs part 파일 원자 교체 |
+| Complete | 목록·ETag·실측 합 검증 → completing | S3 Complete 또는 fs partNumber 순 누계 offset 조립 |
+| Abort | open → aborting | vendor 세션·임시·최종 객체 정리 후 DB 회수 |
 
-### multipart — S3 프로토콜 + 크기-비선언 part 모델
+| 경계 | 결과 |
+|---|---|
+| UploadId | file_id; vendor upload_id는 내부 lease에 저장 |
+| 같은 part 순차 재업로드 | 덮어쓰기 |
+| 같은 part 동시 승격 | 하나가 진행, 나머지 503 |
+| 서로 다른 part | 병렬 가능 |
+| part 진행 중 Complete/Abort | 503, 재시도 |
+| Complete 목록 | 번호 오름차순·유일·원장에 존재·ETag 일치 |
+| 객체 크기 | 완료 목록의 실측 합, part_size × 10000 상한 |
+| ETag | part MD5들의 합성 digest + -N |
+| completing 중 재Complete | 503 ServiceUnavailable |
+| 없거나 다른 key·모드의 세션 | 404 NoSuchUpload |
+| Abort가 먼저 선점 | 늦은 part가 물리 승격 전에 404 |
 
-S3 multipart는 spec 02(네이티브 multipart)와 **infra 프리미티브·part 원장·
-합성 ETag(part MD5들의 MD5 + `-N`)를 공유하되, 크기 모델은 다르다**. 네이티브는
-create가 `declared_size`를 받아 part 기하(개수·명목 크기·offset)를 파생하고
-실측을 그 기하에 대조한다. 그러나 S3 multipart는 **create에 크기가 없고 part
-경계를 클라이언트(boto3의 chunksize)가 정한다** — 그래서 declared_size에 매인
-경로(`classify_upload`·`part_count`·`part_expected_size`·`part_offset`·
-`verify_part_sizes`)는 **쓰지 않는다**. 대신 **part별 실측 크기를 저장**해
-조립하고 검증한다. 이 표면은 프로토콜 어댑터이자 **크기-비선언 multipart 경로**다
-(공유 재료 위의 신규 도메인 코드).
+## 완료와 복구
 
-- **CreateMultipartUpload** `?uploads`: 크기 미상의 pending file과 write
-  lease를 만들고 `UploadId`를 돌려준다. `UploadId`는 filegate 핸들(예: file_id
-  기반)이고 벤더 upload_id는 lease에 내부 저장한다 — client는 벤더 id를 보지
-  않는다(filegate 자격으로만 인증). 세션은 생성한 `(client, logical key,
-  multipart mode)`에 묶여 다른 key나 네이티브 file_id로 재사용할 수 없다.
-  s3 백엔드는 벤더 multipart 세션을 열고,
-  fs 백엔드는 이 시점에 파일을 열지 않는다 — part별 임시 저장과 Complete의
-  조립으로 미룬다. **part 크기·개수는 클라이언트가 정한다** — filegate는
-  강제하지 않는다.
-- **UploadPart** `?partNumber=N&uploadId=U`: part 바이트를 스풀로 받아 백엔드로
-  중계하고 **실측 크기·MD5를 part 원장에 기록**한다. s3는 벤더 UploadPart로
-  그대로 넘긴다(클라이언트 part = 벤더 part; boto3 기본 chunk가 S3의 part
-  ≥5MiB 규칙을 충족하므로 filegate가 균일을 보장할 필요가 없다). fs는 각
-  part를 **임시로 저장하고 실측 크기를 기록**만 한다 — 조립(offset 배치)은
-  Complete로 미룬다. boto3가 part를 **동시·비순차로 올리므로** UploadPart
-  시점엔 앞 part 크기를 몰라 offset을 정할 수 없다(네이티브의
-  `(N-1)×part_size` 균일 가정도 비균일 part에 쓸 수 없다). `ETag`(part MD5)
-  반환, 같은 partNumber의 순차 재업로드는 덮어쓰기. 스풀 뒤 물리 승격 전에
-  `claimed`를 기록해 Complete와 직렬화하고, 같은 part의 동시 시도는 하나만
-  진행하며 나머지는 503으로 재시도를 요구한다. 서로 다른 part는 병렬로
-  진행할 수 있다. part 업로드에 확정은 없다.
-- **CompleteMultipartUpload** `?uploadId=U`: 요청 XML의 part 목록(번호+ETag)은
-  **검증 입력**이다 — filegate가 자기 원장의 실측과 대조해(존재·ETag 일치)
-  완성하며, 크기의 진실은 원장(실측 part 합)이다. 클라이언트 목록을 신뢰의
-  근원으로 삼지 않는 것은 spec 02와 같은 원칙이다 (spec 02는 게이트웨이 계약이
-  프로토콜 사정과 갈리는 지점을 이미 밝힌다). s3는 벤더 CompleteMultipart,
-  fs는 이 시점에 part를 **partNumber 순으로 정렬해 실측 크기 누계 offset으로
-  조립**한다(모든 part가 도착한 뒤라야 offset이 정해진다). **이 Complete가 커밋점이다** — 단일 PUT의 관찰
-  확정(no-commit)과 달리 S3 프로토콜이 명시적 완료를 요구하며, spec 00이
-  multipart를 관찰-확정에서 이미 제외한다(00:54). filegate 전용 단계가 아니라
-  SDK가 원래 부르는 호출이다. 응답 ETag는 합성형(`"<hex>-<part수>"`). 파일
-  활성화·write lease 정산·논리키 매핑·overwrite된 옛 file detach는 한 DB
-  트랜잭션으로 확정된다(PutObject도 같은 경계). 외부 Complete 전에 세션을
-  `open → completing`으로 선점하고 예상 크기·ETag를 기록한다. 따라서 동시
-  Abort는 이긴 Complete를 회수할 수 없고, 외부 성공 뒤 DB 확정이 실패해도
-  session·location·lease가 남아 reconciler가 실물을 관찰해 확정을 재시도한다.
-  같은 Complete가 `completing` 복구 중 다시 오면 중복 외부 조립 대신 503
-  `ServiceUnavailable`을 반환한다.
-- **AbortMultipartUpload** `?uploadId=U`: 먼저 `open → aborting`을 선점한 뒤
-  벤더 세션·임시 파일·혹시 만들어진 최종 객체를 멱등 정리한다. 물리 정리가
-  모두 성공한 뒤에만 pending을 reclaimed로 바꾸고 session·location을 지운다.
-  UploadPart가 `claimed`를 먼저 잡았다면 물리 I/O와 cleanup이 교차하지 않도록
-  503을 반환하고 Abort 재시도를 요구한다. Abort가 먼저 이기면 늦은 part는
-  물리 저장소를 건드리기 전에 404로 닫힌다.
-  정리가 실패하면 `aborting`과 vendor upload_id/location이 남아 reconciler가
-  다음 tick에 재시도한다. 없는 세션, 다른 key, Complete가 선점한 세션,
-  네이티브 file_id는 404 `NoSuchUpload`이며 원래 세션을 건드리지 않는다.
-  vendor Create 응답이 불명확하거나 upload_id DB 기록과 즉시 Abort가 모두
-  실패한 경우에는 파일별 고유 physical object_key로 벤더의 열린 multipart를
-  재발견해 중단한다.
-  이 내부 복구 호출은 클라이언트-facing ListMultipartUploads 지원을 뜻하지 않는다.
-
-### 외부 저장소-DB 복구 경계
-
-외부 저장소 호출과 PostgreSQL 트랜잭션은 원자화할 수 없다. `s3_uploads`가 그
-경계를 소유한다: `open`만 UploadPart/Abort/첫 Complete를 받고, Complete는
-`completing(expected_size, expected_etag)`, Abort·만료 회수는 `aborting`으로
-먼저 전이한다. `completing`의 write lease가 지난 뒤 reconciler는 파일별 고유
-object_key를 관찰한다. 예상 실물이 있으면 DB 확정을 재시도하고, 실물이 없는
-multipart는 `open`으로 되돌려 SDK 재시도를 허용한다. 실물이 없거나 예상과 다른
-단일 PUT/완료 객체는 `aborting`으로 보내 멱등 삭제한다. generic commit·관찰 확정·
-generic reclaim은 `s3_uploads` 행을 건드리지 않는다. 요청이 물리 저장소 작업을
-수행하는 동안에는 write lease를 주기적으로 갱신한다. 진행 중 UploadPart의
-`claimed` 원장이 사라질 때까지 Complete는 선점하지 않으며, reconciler는 전이
-직전에 만료를 다시 확인해 오래 걸리는 정상 저장소 작업을 회수하지 않는다.
-
-크기 상한(단일 PUT 5GiB, spec 02의 `part_size × 10000` 한도)은 create에 크기가
-없으므로 **Complete 시점에 실측 합으로 강제**한다. 백엔드 종류는 client 기반
-storage가 결정하며 s3·fs 같은 어댑터를 탄다(NAS 포함). 세션이 lease TTL보다
-오래 걸리면 part 접근은 재발급으로 살아있고, 미완 세션은 reconciler가
-`aborting`으로 선점해 물리 정리 성공 뒤 회수한다.
-
-현재 dispatch는 인증과 `bucket == client_id` 검사를 공통으로 거친 뒤 POST와
-`?uploads`·`?uploadId`·`?partNumber` 조합으로 multipart 4종을, 나머지 메서드로
-단일 객체 4종을 분기한다. 지원하지 않는 조합은 405 `MethodNotAllowed`다.
-
-### 에러 모양
-
-S3 표준 XML 최소형으로 답한다 — SDK가 이걸 파싱한다:
-
-```xml
-<Error><Code>NoSuchKey</Code><Message>…</Message></Error>
+```mermaid
+stateDiagram-v2
+    [*] --> open: 세션 생성
+    open --> completing: 예상 크기·ETag 기록
+    completing --> active: 물리 완료·DB 확정
+    completing --> open: 만료 관찰·multipart 실물 없음
+    completing --> aborting: 실물 불일치 또는 단일 PUT 실물 없음
+    open --> aborting: Abort·만료 선점
+    aborting --> reclaimed: 물리 정리 성공·DB 회수
+    aborting --> aborting: 정리 실패·재시도
 ```
 
-현재 구현의 Code 어휘는 S3 표준을 따른다: `NoSuchBucket`, `NoSuchKey`,
-`AccessDenied`, `InvalidAccessKeyId`, `SignatureDoesNotMatch`,
-`RequestTimeTooSkewed`, `NotImplemented`, `InvalidArgument`,
-`MissingContentLength`, `EntityTooLarge`, `IncompleteBody`, `RequestTimeout`,
-`XAmzContentSHA256Mismatch`, `InvalidRange`, `MalformedXML`,
-`MethodNotAllowed`, `InternalError`, `NoSuchUpload`(없거나 key·모드가 다른
-uploadId), `InvalidPart`(Complete의 part 목록 불일치), `ServiceUnavailable`
-(저장소 실패, 같은 Complete의 결과 복구 또는 part/Abort 경합 중).
+| 조건 | 복구 계약 |
+|---|---|
+| 물리 작업과 DB | s3_uploads에 중간 상태를 기록하고 단계별 실행 |
+| 작업 진행 | heartbeat로 write lease 연장 |
+| 복구 후보 | completing의 만료된 write lease |
+| 실제 전이 | 파일 락 아래 만료 재확인 |
+| 예상 실물 일치 | 파일 활성화·lease 확정·key 교체·옛 파일 detach를 한 transaction으로 처리 |
+| 관찰 근거 | 고유 object_key; fs는 크기, S3는 크기·ETag |
+| 정리 실패 | session·location·lease·vendor upload_id 보존 |
+| generic 회수·관찰·commit | s3_uploads 소유 파일을 제외 |
+| terminal lease GC | 세션이 남은 파일의 복구 재료 보호 |
+| vendor Create 결과 불명확 | 고유 physical object_key로 열린 multipart를 조회·중단 |
 
-### `0005` 전환 조건
+파일이 확정되거나 정리가 성공한 뒤 세션을 제거한다. 내부 vendor multipart 조회는
+복구용 권한이며 클라이언트 API 지원과 별개다.
 
-`0005_s3_upload_sessions` 이전 pending S3 multipart에는 생성 당시 logical key가
-남아 있지 않아 안전한 backfill이 불가능하다. 배포는 구버전 writer를 먼저
-중단하고 진행 요청을 drain한 뒤 전환한다. 남은 multipart는 클라이언트가 새로
-시작하며, 기존 세션은 write lease 만료 후 reconciler가 회수한다. 구버전과
-신버전 writer를 같은 DB에 동시에 두지 않는다. 신버전 부팅 전 storage
-자격증명에 진행 중 multipart 목록 조회 권한도 먼저 부여한다.
+## 에러와 검증
 
-## 다음 범위로 미룬다
+```xml
+<Error><Code>NoSuchKey</Code><Message>...</Message></Error>
+```
 
-- **ListObjectsV2** — 보류. 목록의 진실 원천은 서비스 DB다 (ADR 003).
-- part 내부 오프셋 재개, full-object CRC 합성 검증 — spec 02와 같이 보류.
-- CopyObject·bucket 계열·ListMultipartUploads·ListParts — 계획 없음
-  (SDK 정상 경로에 나오지 않는다).
+| 종류 | 예 |
+|---|---|
+| 인증 | AccessDenied, InvalidAccessKeyId, SignatureDoesNotMatch, RequestTimeTooSkewed |
+| 이름·세션 | NoSuchBucket, NoSuchKey, NoSuchUpload |
+| 요청·본문 | InvalidArgument, MissingContentLength, EntityTooLarge, IncompleteBody, RequestTimeout, XAmzContentSHA256Mismatch |
+| Range·XML·part | InvalidRange, MalformedXML, InvalidPart |
+| 처리 | MethodNotAllowed, NotImplemented, InternalError, ServiceUnavailable |
 
-## 완료 기준
+DB 테스트는 선점·완료·회수·GC 경합을 검증한다. 실제 바이트 경로는
+scripts/s3-capture.py의 단일 객체·Range·자동 multipart·key-bound Abort로 검증한다.
+FileGate에서는 S3_EXPECT_WRONG_KEY_404=1로 다른 key의 Abort가 404인지 확인한다.
 
-[scripts/s3-capture.py](../../scripts/s3-capture.py)에 각 대상의 endpoint,
-자격증명, bucket을 넣었을 때 MinIO와 filegate에서 **동일하게 통과한다** —
-표면 동등성의 실측 정의다. 단일 객체 수명뿐 아니라 임계를 넘긴 파일의
-`upload_file`/`download_file` 자동 multipart, key-bound Abort를 포함한다.
-MinIO는 wrong-key Abort에 204를 반환하되 원 세션을 유지하고, filegate는
-404 `NoSuchUpload`로 닫는다. filegate 검증에는
-`S3_EXPECT_WRONG_KEY_404=1`을 넣어 이 엄격한 계약까지 강제한다.
+## 0005 이전 세션 전환
+
+| 순서 | 작업 |
+|---|---|
+| 1 | 구버전 writer 종료·진행 요청 drain |
+| 2 | storage 자격증명에 열린 multipart 목록 조회 권한 부여 |
+| 3 | 새 writer로 migration 실행·서버 시작 |
+| 4 | 이전 pending multipart는 새 업로드로 재시작, 기존 세션은 만료 회수 |
+
+이전 세션에는 logical key가 없어 backfill 대신 재시작한다. 전환은 같은 DB에
+구버전·신버전 writer가 겹치지 않는 순서로 수행한다.

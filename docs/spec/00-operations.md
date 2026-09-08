@@ -1,216 +1,122 @@
-# spec 00: 단일 파일 오퍼레이션
+# spec 00: 네이티브 파일과 수명주기
 
-- Status: Accepted
-- Date: 2026-07-07 (개정 2026-07-13: 인터페이스 계약 명시 — ADR 005. 2026-08-26: 등록부 정본·복구 계약 정합화)
-- 근거: ADR [000](../adr/000-identity.md), [001](../adr/001-multi-storage.md), [002](../adr/002-lease-model.md), [003](../adr/003-url-ownership.md), [004](../adr/004-config-layers.md), [005](../adr/005-presigned-byte-plane.md)
-- 실측: 2026-07-08, MinIO 싱글노드. "(실측)"은 이 확인에서 나온 사실이다.
+- 상태: 현재 구현 계약
+- 근거: ADR [002](../adr/002-lease-model.md)·[003](../adr/003-url-ownership.md)·[005](../adr/005-presigned-byte-plane.md)
+- S3 요청 계약: [spec 03](03-s3-surface.md)
 
-단일 파일 업로드·다운로드, 그에 필요한 조회·삭제, 운영자 용량 조회를 정한다.
+## API
 
-> **인터페이스 계약** (ADR 005): 바이트 인터페이스는 서명·만료 URL의
-> 발급이다 — create(업로드), read(다운로드), parts(multipart part).
-> s3는 벤더 서명(직결), fs는 filegate 서명(중계). 이것이 전부다.
+인증은 client bearer 키다. 서비스는 사용자 권한을 확인하고 `file_id`를 저장한다.
 
-## 범위
-
-이번 범위: `create`→`commit`(업로드), `read`(다운로드), `stat`, `delete`, `usage`(운영자). 임계값을 넘는 대용량과 갱신·재개는 [spec 02](02-multipart.md)가 확장한다. 무수정 S3 SDK를 받는 호환 표면은 [spec 03](03-s3-surface.md)이 정의한다 (ADR 006).
-
-접근 모드는 둘 다 구현되어 있다 — **직결**(저장소 presigned URL)과 **중계**(filegate 바이트 엔드포인트). 서비스 계약은 두 모드에서 같고(ADR 001·002), 모드는 storage 선언이 정한다: fs는 항상 중계, s3는 기본 직결에 `force_relay`로 중계 강제(CORS 없는 벤더, 사설망 뒤 저장소).
-
-다음 범위로 미룬다:
-
-- OCI 등 외부 벤더 추가.
-- 폴더·배치 업로드 — 폴더는 서비스가 단일 업로드를 반복해 표현한다 (공리 1).
-- 명시적 lease 취소 — pending은 lease 만료로 회수한다.
-- 위임 토큰.
-- 클라이언트별 quota 집행 — 도입해도 운영자 내부 가드레일이며 클라이언트에 노출하지 않는다.
-
-## 공통 원칙
-
-- 권한 검사는 서비스가 호출 전에 한다. 유저 개념은 서비스에 있다 (공리 1).
-- 바이트는 전송 주체와 저장소가 직접 주고받고, filegate는 발급·기록·검증을 한다 (공리 2). 직결이 불가능한 storage는 filegate가 중계하며, 계약은 같다.
-- 서비스는 filegate 산출물 중 file_id만 영속화한다 (ADR 003).
-- 모든 표면은 인증 뒤에 있다: 클라이언트 API는 클라이언트 인증, usage는 운영자 인증, 중계 바이트 엔드포인트는 lease별 secret (ADR 003).
-- 용량은 운영자의 세계다. 클라이언트는 어떤 오퍼레이션에서도 용량 정보를 받지 않고, 자기 사용량은 스스로 관리한다 (공리 1). capacity는 집행이 아니라 **관찰**이다 — object storage는 탄력적이고 fs는 디스크가 스스로 실패를 내므로, filegate가 용량으로 발급을 거부하지 않는다. 사용량은 조회 시점에 files·locations에서 집계하고(저장 카운터 없음), 시계열은 대여 이력(lease_history, 3개월 보존)이 담당한다.
-
-## 오퍼레이션
-
-### create — 쓰기 lease 발급
-
-- 입력: 선언 크기. 선택: content_type, 선언 MD5. 0바이트도 유효한 선언이다.
-  - content_type은 서명에 포함해야 강제된다 (실측).
-  - 선언 MD5는 commit이 ETag와 대조한다. 단일 PUT의 ETag = MD5다 (실측).
-- 처리: 배치 해석 (client의 `storage_id` → storage — [spec 01](01-registry.md), v0는 client가 소유한 단일 storage), file_id 발급, 대여 이력 기록.
-- 출력: file_id, 만료가 있는 PUT URL. URL 구조는 계약이 아니다 (직결이면 저장소 presigned, 중계면 filegate 엔드포인트).
-- capacity로 발급을 거부하지 않는다 — capacity는 usage 조회의 관찰 기준선일 뿐이다. 물리 한계는 저장소가 낸다 (fs는 디스크 풀, object storage는 사실상 무한). 배치·정리 판단은 관찰을 본 운영자의 몫이다.
-- 상태: `pending`. commit 전까지 파일이 아니다.
-
-### commit — 업로드 확정
-
-- 입력: file_id.
-- 처리: 저장소 실물 크기를 선언 크기와 대조하고, 선언 MD5가 있으면 ETag와도 대조한다. 확정 시점 ETag를 기록한다.
-- 상태: `pending` → `active`. 검증 실패면 `pending`에 남아 lease 만료까지 재시도할 수 있다.
-- 쓰기 URL은 확정 후에도 만료 전까지 유효하다 (실측). 쓰기 TTL을 짧게 두고, 변조 의심은 기록된 ETag로 판정한다.
-- **확정은 두 경로다** — 서비스의 선언(commit)과 reconciler의 **관찰 확정**: 단일 PUT pending의 실물이 선언과 일치하면 다음 tick에 자동 확정된다. commit 없이 "URL 주고 잊기"(직결 presigned 패턴)가 성립하고, 즉시 확정이 필요하면 commit을 부른다 (멱등 공존). multipart는 관찰 확정하지 않는다 — 완료는 벤더도 선언(Complete)이다 (spec 02).
-
-### read — 읽기 lease 발급
-
-- 입력: file_id. 선택: 표현(파일명·표시 방식) — RFC 5987(`filename*=UTF-8''…`)로 인코딩한다 (ADR 003, 실측).
-- 처리: 현재 location을 재해석한다 (이동해도 같은 file_id로 접근).
-- 출력: 만료가 있는 GET URL. 서비스가 302 redirect한다. 읽기는 용량을 소비하지 않는다.
-
-### stat — 메타데이터 조회
-
-- 입력: file_id. 클라이언트는 자기 소유 file_id만 조회한다.
-- 출력: 상태(`pending`|`active`|`deleted`), 크기. (location·URL은 제외.)
-- `deleted`의 stat은 **보존 기간(90일)까지** 답한다 — 종착 행 정리(아래 상태 절) 뒤에는 404와 구분되지 않는다.
-
-### delete — 삭제 결정
-
-- 입력: file_id.
-- 처리: 서비스의 detach 결정을 기록한다. 물리 purge는 reconciler가 요청 경로 밖에서 집행한다 (공리 결정·집행 분리).
-- 상태: `active` → `deleted`. 이후 read·commit은 실패한다.
-- purge는 멱등하다 (실측). capacity는 purge 시점에 해제한다.
-
-### usage — 운영자 용량 조회
-
-- 운영자 표면이다. 클라이언트 자격증명으로는 호출할 수 없다. usage 자체는 읽기 전용이고, 등록 변경은 운영자 API를 통해서만 한다. Terraform provider는 그 API의 선언형 클라이언트다.
-- storage별: capacity 한도, 예약량(pending 합), 확정량(active 합), purge 대기 점유(deleted·미purge), 남은 여유(= 한도 − 앞의 셋), 그리고 각 버킷과 짝을 이루는 파일 수(pending·active·purge 대기).
-- (client × storage)별: 활성 점유(파일 수·바이트) — 여러 client가 한 storage를 공유할 때 각자의 몫을 가른다.
-- 전부 조회 시점 집계다 (저장 카운터 없음). 이 관찰이 배치·tiering 판단의 입력이다.
-- 일별 스냅샷(usage_snapshot): 점유(stock)의 과거는 소급 계산이 불가하므로(purge가 행을 지운다) reconciler가 매일 UTC 자정 이후 첫 tick에 어제 종점의 (storage×client) 활성 점유를 박제한다. 멱등이고, 이미 찍힌 날은 불변이다. 자정에 서버가 없었으면 첫 tick에 늦게 찍히는 근사치며, 통째로 놓친 날은 소급하지 않는다 — 지어낼 수 없는 값이다. flow(대여) 시계열은 lease_history 몫. 조회는 `/api/admin/v1/usage/history?days=N`.
-
-## 흐름: 업로드
-
-직결 모드다. 중계 모드는 저장소(O) 자리에 filegate 바이트 엔드포인트가 서고 단계·계약은 같다.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor U as 사용자(브라우저)
-    participant S as 서비스
-    participant F as filegate
-    participant O as 저장소
-
-    U->>S: 업로드 요청
-    S->>S: 유저 권한 확인 (서비스 몫)
-    S->>F: create(크기)
-    F->>F: 선언 해석 + 기록
-    F-->>S: file_id + PUT URL
-    S-->>U: PUT URL 위임
-    U->>O: 바이트 직접 PUT
-    U->>S: 업로드 완료 알림
-    S->>F: commit(file_id)
-    F->>O: 실물 검증 (크기 대조)
-    F-->>S: active 확정
-    S->>S: 자기 DB에 file_id 연결
-```
-
-## 흐름: 다운로드
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor U as 사용자(브라우저)
-    participant S as 서비스
-    participant F as filegate
-    participant O as 저장소
-
-    U->>S: GET 안정 URL (서비스 도메인)
-    S->>S: 유저 권한 확인 (서비스 몫)
-    S->>F: read(file_id)
-    F->>F: 현재 위치 재해석
-    F-->>S: 만료가 있는 GET URL
-    S-->>U: 302 Redirect
-    U->>O: 바이트 직접 GET
-    O-->>U: 파일
-```
-
-## 상태
-
-```text
-create ──▶ pending ──commit──▶ active ──delete──▶ deleted ──purge──▶ (해제)
-             │                                        (reconciler)
-             └── lease 만료 ──▶ 회수
-```
-
-- `pending`: 발급됨·미확정. 검증 실패한 commit도 여기 남아 만료 회수로 정리한다.
-- `active`: 확정됨, read 가능.
-- `deleted`: detach 결정됨, purge 전까지 실물이 남는다.
-- 관찰량에서 빠지는 지점은 location 제거다: pending의 만료 회수, deleted의 purge — "남은 location = 현재 점유"라 별도 정산이 없다.
-- **종착 행 보존**: reclaimed와 purge가 끝난 deleted 행은 90일(대여 이력과 같은 보존 기준) 뒤 reconciler가 정리한다. 점유(location)나 원장(lease)이 남은 행은 정리하지 않는다 — purge와 lease GC가 자연히 먼저다. 행이 모두 정리된 client는 등록 해제가 가능하다.
-
-## 물리 배치와 이름 규약
-
-키는 만들 때 규칙으로 조합하고, **location 행에 저장한다**. 읽기·삭제는
-항상 저장된 키를 따른다 — 규칙이 바뀌어도 기존 객체는 영원히 동작한다.
-DB의 ID는 평범하게 둔다(uuid v4) — 정보 압축은 전부 경로·이름 계층의 일이다.
-
-```text
-s3 계열:  fg/{client}/{yyyy}/{mm}/{file_id}[.ext]
-fs:       fg/{client}/{yyyy}/{mm}/{zz}/{file_id}[.ext]
-임시:     .fg-tmp-{lease_id}-{랜덤}   (fs root 또는 OS temp의 스풀)
-```
-
-- **날짜는 create 시각, UTC** — pod 타임존과 무관하게 같은 파일은 같은 경로다.
-- **zz = file_id 마지막 2 hex** — fs 한 디렉토리에 파일이 무한히 쌓이는 것을
-  막는 팬아웃(월 안에서 256칸). id만으로 재계산 가능하다. s3 계열은 평면
-  그대로다 — 접두사 핫파티션은 2018년 이후 근거가 없다 (조사 확인).
-- **.ext는 허용목록 매핑만** — `image/png → png` 식 고정 표. content_type
-  문자열을 자르지 않는다(경로 오염 차단). 모르는 타입은 확장자 없음.
-  확장자는 선언의 반영일 뿐 검증된 사실이 아니다.
-- 파일명(원본)은 키에 넣지 않는다 — 파일명은 서비스 소유다 (책임 구분).
-- 임시 이름의 lease_id는 디버깅과 진행 중 multipart 보호에 쓴다. 기본 청소
-  판정은 mtime이고, 공유 fs의 multipart 조립 파일은 활성 write lease 목록으로
-  추가 보호한다 (아래).
-
-각 세그먼트가 갖는 뜻: `fg/`가 "filegate 소유"(공유 버킷 안전),
-`{client}`가 소유자(client 단위 감사·통삭제·lifecycle 규칙),
-`{yyyy}/{mm}`이 시기(월 단위 보존·감사 범위), 이름이 정체성(file_id)이다.
-
-### 디버깅과 복구 — 이 규약이 사주는 것
-
-**장부 밖 물리 파일·객체 정리:**
-
-- 임시 파일: `.fg-tmp-*` 중 mtime이 48시간 넘은 것은 삭제한다 (reconciler).
-  pod 로컬 스풀은 mtime만 본다. 공유 fs root의 multipart 조립 파일은 DB의 활성
-  write lease 목록으로 제외하며, 이 목록을 읽지 못하면 해당 sweep을 건너뛴다.
-  공유 마운트는 advisory lock을 얻은 한 파드만 훑는다.
-- 고아 객체 감사: `fg/` 접두사를 나열해 경로의 월이 충분히 지난 객체 중
-  location 행이 없는 것을 지운다 (다음 범위의 감사 잡). 벤더 LastModified가
-  보조 판정.
-
-**DB 유실 시 복구 가능성 (물리 + DB 백업·운영자 선언 + 서비스 장부):**
-
-| 정보 | 복구 | 출처 |
+| 동작 | 요청 | 결과 |
 |---|---|---|
-| 등록부 전체 | 백업 의존 | PostgreSQL 백업 + 마스터 키. Terraform은 선언 관리한 일부만 재적용할 수 있으며 정본은 DB다 |
-| file_id·소유 client·시기 | 완전 | 경로와 이름 |
-| 실제 크기·체크섬 | 완전 | 실물 stat/HEAD/재해싱 (선언값보다 우월한 실측) |
-| 사용량 관찰 | 완전 | 항상 조회 시점 파생 — 저장 카운터가 없어 재구축할 것도 없다 |
-| 점유 시계열(usage_snapshot)·대여 이력(lease_history) | 백업 의존 | 박제·기록된 관찰은 재계산 불가 |
-| 네이티브 파일의 의미(어느 노트의 첨부인지) | 완전 | 서비스 DB의 file_id (ADR 003 — 서비스가 두 번째 장부) |
-| S3 논리키 매핑((client, key) → file) | 백업 의존 | 물리 object key는 불투명 file_id라 논리키를 역산할 수 없다 |
-| 배치(client.storage_id) | 백업·선언 의존 | 객체 키엔 client_id만 있다. DB 백업 또는 운영자 선언으로 복원한다 |
-| S3 자격증명 | 백업·외부 상태 의존 | 암호문은 DB에, 발급 시 raw는 한 번만 반환된다 |
-| deleted(미purge) 결정 | 백업 의존 | detach는 DB에만 있는 결정 — 백업 없이는 active로 과잉 복구되고, 서비스가 재삭제해야 한다 |
+| create | `POST /api/v1/files`, declared_size·선택 content_type/declared_md5 | pending 파일·write lease·PUT URL 또는 multipart 서술자 |
+| commit | `POST /api/v1/files/{id}/commit` | 실측 검증 뒤 active·ETag |
+| read | `POST /api/v1/files/{id}/read`, 선택 filename | 현재 location의 GET URL |
+| stat | `GET /api/v1/files/{id}` | 자기 파일의 pending/active/deleted·크기 |
+| delete | `DELETE /api/v1/files/{id}` | active → deleted, 후속 물리 purge |
 
-DB 백업 없이 물리 객체를 훑으면 바이트는 과잉 복구할 수 있지만, S3 논리키
-매핑·자격증명·배치·삭제 결정 같은 DB 전용 상태는 보장할 수 없다. 따라서
-PostgreSQL 백업과 마스터 키 보존이 복구 계약의 필수 조건이다.
+| 조건 | 처리 |
+|---|---|
+| 크기 0 | 유효한 업로드 |
+| 단일 PUT | 최대 5GiB; 임계 초과는 [multipart](02-multipart.md) |
+| 배치 | client.storage_id |
+| 명시적 commit | 선언 크기·선택 MD5를 실물과 대조 |
+| 검증 실패 | pending 유지, lease 유효기간 내 재시도 |
+| 단일 PUT 관찰 | 실물이 선언과 일치하면 reconciler가 자동 확정 |
+| multipart | 명시적 완료로 확정 |
+| 읽기·쓰기 URL | 기본 TTL 15분; 접근 종류별 원장 검사 |
+| reclaimed 파일 | 네이티브 stat에서 404 |
+| deleted 행 | 보존 기간 중 stat 가능, 정리 후 404 |
 
-**기각 기록** (같은 고민의 반복 방지): UUIDv7 등 시간 내장 ID — 경로 날짜와
-벤더 mtime이 같은 정보를 이미 가지므로 철회. object_key를 저장하지 않고
-파생 — 규칙 진화·이동성 상실로 기각. 회계 카운터 파생 — 경성 상한 집행
-시절엔 "락 지점이라 기각"했으나, capacity를 관찰로 재정의하며(2026-07-13)
-반전: 집행이 없으면 락 지점이 필요 없고, 파생을 저장하지 않으면 어긋날
-것도 없다 — 카운터(storage_usage)를 제거하고 조회 시점 집계로 전환.
-lease의 서명 토큰화 — 폐기·관측 상실로 기각. 내용 주소화 — 바이트 전
-발급이라 구조적 불가.
+```mermaid
+sequenceDiagram
+    participant C as 전송 주체
+    participant A as FileGate API
+    participant S as storage 또는 blobs
+    C->>A: create
+    A-->>C: file_id + PUT URL
+    C->>S: PUT bytes
+    C->>A: commit
+    A->>S: 실물 검증
+    A-->>C: active
+    C->>A: read
+    A-->>C: GET URL
+    C->>S: GET bytes
+```
 
-## 경계선
+## 전송 모드
 
-- 즉시 확정 경로는 create·commit 두 호출이다. 단일 PUT은 reconciler의 관찰 확정으로 명시적 commit을 생략할 수도 있다. multipart는 명시적 완료가 필요하다.
-- 직결 PUT은 크기를 앞단에서 막지 못한다 (실측). commit이 사후 검증 게이트다. 상한을 넘는 실물은 파일이 되지 못하고 reconciler가 회수하며, 회수 전까지 초과 바이트가 잠시 존재한다. 중계 모드는 선언 크기에서 스트림을 끊는다.
-- 전송 주체는 Content-Length를 보낸다. 길이 미상(chunked) 전송은 저장소가 거부한다 (실측).
-- 중계 바이트 엔드포인트(`/blobs/{lease}`)의 확정 사항: 인증은 lease별 secret(URL에만, 서버는 해시), Content-Length 필수(411)·선언 크기와 일치(400)·초과 시 스트림 차단(413), CORS 응대, fs는 임시 경로 + rename 원자성. 중계 쓰기는 스트림 중 크기·MD5를 직접 계산해 기록하고 commit이 그것을 대조한다.
+| 모드 | 바이트 경로 | 크기·확정 조건 |
+|---|---|---|
+| S3 직결 | 전송 주체 ↔ 외부 저장소 | commit/관찰 시 검증; 발급된 URL은 vendor TTL까지 유효 |
+| fs·force_relay | 전송 주체 ↔ FileGate ↔ 저장소 | 스트림 크기·MD5 계측 후 확정 |
+| blobs 인증 | `/blobs/{lease}?s=...` | lease secret·상태·만료 |
+| blobs Content-Length | 필수 | 누락 411, 선언과 불일치 400, 초과 413 |
+| 브라우저 | 설정된 CORS allowlist | preflight 처리 |
+| fs 쓰기 | 같은 filesystem의 임시 파일 → rename | 원자적 이름 전환 |
+
+파일명 표현은 RFC 5987로 인코딩한다. 서비스 URL은 서비스가 소유하고,
+발급된 접근 URL을 유효기간 내 전달한다.
+
+## 상태와 정리
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: create
+    pending --> active: 검증·확정
+    pending --> reclaimed: 만료·회수
+    active --> deleted: detach
+    deleted --> [*]: purge·보존 기간 종료
+    reclaimed --> [*]: 보존 기간 종료
+```
+
+| 작업 | 보존·제거 조건 |
+|---|---|
+| generic 회수 | native/S3 완료 소유 행을 제외하고 pending을 선점 |
+| purge | 물리 삭제 성공 뒤 location 제거 |
+| 완료 복구 | [native multipart](02-multipart.md#완료와-복구)·[S3](03-s3-surface.md#완료와-복구) |
+| read lease 정리 | 만료를 expired로 기록 |
+| terminal lease GC | 24시간 보존, S3 세션·native completion 소유 파일 보호 |
+| terminal file GC | 90일 보존, location·lease 정리가 끝난 reclaimed/deleted 행 |
+| lease_history | 90일 보존 |
+
+## 사용량
+
+운영자 API의 `/usage`, `/usage/clients`, `/usage/history?days=N`에서 관찰한다.
+
+| 관찰 | 계산 |
+|---|---|
+| reserved | pending 선언 크기 합 |
+| active | 활성 점유 |
+| purge_pending | deleted 중 location이 남은 점유 |
+| remaining | 등록 capacity − reserved − active − purge_pending |
+| client × storage | 활성 파일 수·바이트 |
+| history | 일별 활성 점유 스냅샷 |
+
+capacity는 등록 기준선이고 실제 filesystem 여유 공간과 구분한다.
+점유는 files·locations에서 조회 시 집계한다. 일별 스냅샷은 UTC 자정 이후 첫 tick의
+관찰을 전날 값으로 기록하며, 늦게 실행된 값은 근사치다. 빠진 날은 비어 있고
+이미 기록한 날은 유지한다.
+
+## 물리 이름과 복구
+
+```text
+S3:   fg/{client}/{yyyy}/{mm}/{file_id}[.ext]
+fs:   fg/{client}/{yyyy}/{mm}/{zz}/{file_id}[.ext]
+temp: .fg-tmp-{lease_id}-{random}
+```
+
+create 시각은 UTC, `zz`는 file_id 마지막 두 hex다. 확장자는 content_type 허용목록에서
+선택한다. 읽기·삭제는 location에 저장한 경로를 사용한다.
+
+| 재료 | 복구 범위 |
+|---|---|
+| 물리 경로·파일 | file_id·client·시기·실제 크기·재해싱 |
+| PostgreSQL 백업 | 논리키 매핑·배치·상태·삭제 결정·사용량 스냅샷·대여 이력 |
+| DB 암호문 + 마스터 키 | storage·S3 자격증명 |
+| 서비스 DB | 네이티브 file_id의 업무 의미 |
+
+논리키와 삭제 결정은 물리 파일명에서 복원되지 않으므로 DB·데이터·마스터 키를 함께 보존한다.
+48시간 지난 임시는 sweep 대상으로 삼고, 공유 fs의 multipart 임시는 활성 lease 목록으로
+보호한다. 보호 목록 조회가 실패하면 해당 sweep을 건너뛴다. 일반 고아 객체 감사는 후속 범위다.

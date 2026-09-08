@@ -1,55 +1,71 @@
 # spec 01: 등록부와 운영자 제어
 
-- Status: Accepted
-- Date: 2026-07-09 (선언형 파일 설정안을 대체 — 등록부는 DB로, ADR 004 개정판 기준. 2026-08-26: client 소유 storage 모델과 현재 운영자 API 반영)
-- 근거: ADR [000](../adr/000-identity.md), [001](../adr/001-multi-storage.md), [004](../adr/004-config-layers.md)
+- 상태: 현재 구현 계약
+- 근거: [ADR 004](../adr/004-config-layers.md)
+- 관리 CLI 확장안: [spec 04](04-cli.md) (Draft, 미구현)
 
-등록부의 모양, 검증 시점, v0 배치 규칙, 운영자 제어의 방향만 정한다. 테이블 필드·엔드포인트 세부는 구현이 확정한다.
+## 등록 관계
 
-## 등록부
+```mermaid
+flowchart LR
+    Client["client"] --> Storage["storage"]
+    Key["client key hash"] --> Client
+    Credential["S3 credential"] --> Client
+    File["file"] --> Client
+    Location["location"] --> Storage
+```
 
-- 정본은 DB다. client 행은 자기 기반 storage 하나를 `storage_id`로 직접 참조한다. S3 표면 자격증명은 client 아래 1:N이다.
-- id는 운영자가 정하는 안정 슬러그다 (`oci-std`, `notegate`). 생성 후 불변 — Terraform·API 모두 이 id로 참조한다.
-- storage는 내부 접근 주소(`endpoint`)와 전송 주체가 쓰는 공개 주소(`public_endpoint`)를 구분한다. 같으면 같은 값을 둔다.
-- 검증은 쓰기 시점이다: 참조 무결성은 FK가, storage 등록은 제출된 자격증명으로 저장 공간 접근을 즉석 확인해 지킨다. 실패한 등록은 거부된다.
-- S3 storage 자격증명은 객체 읽기·쓰기·삭제와 multipart 생성·part 조회/쓰기·완료·중단뿐 아니라 **진행 중 multipart 목록 조회** 권한도 가져야 한다. vendor Create 응답이 불명확하거나 upload_id 기록과 즉시 Abort가 모두 실패하면 reconciler가 파일별 고유 object_key로 열린 세션을 재발견해 중단하는 복구 경로에 쓴다.
-- 삭제는 참조부터다: client가 참조하는 storage는 삭제가 거부된다 (FK). Terraform destroy는 의존 역순이라 이 순서를 자동으로 지킨다.
-- 부팅은 등록된 storage들의 접근을 재검증한다. 실패하면 부팅 중단 (ADR 001).
+PostgreSQL이 정본이고 운영자 API가 변경 경계다. API 클라이언트로 직접 등록하거나
+기존 Terraform 예제를 사용할 수 있다.
+
+| 리소스 | `/api/admin/v1` 아래 경로 | 동작 |
+|---|---|---|
+| storage | `/storages`, `/storages/{id}` | 생성·목록·조회·갱신·삭제 |
+| client | `/clients`, `/clients/{id}` | 생성·목록·조회·삭제 |
+| client key | `/clients/{id}/keys[/{key_hash}]` | 해시 등록·목록·조회·삭제 |
+| S3 credential | `/clients/{id}/s3-credentials[/{access_key_id}]` | 발급·목록·삭제 |
+| usage | `/usage`, `/usage/clients`, `/usage/history` | 조회 |
+
+## 저장소와 배치
+
+| 조건 | 계약 |
+|---|---|
+| id | 운영자가 지정한 안정 슬러그, 생성 후 고정 |
+| fs | 준비된 root_path·capacity_bytes |
+| S3 | endpoint·public_endpoint·region·bucket·자격증명 |
+| 중계 storage | 서버에 FILEGATE_PUBLIC_URL 설정 |
+| 등록·부팅 | 저장소 접근 검증 |
+| client 배치 | 생성 시 storage_id 하나 지정 |
+| storage 삭제 | client·location 참조가 정리된 뒤 수행 |
+| client 삭제 | 파일 정리 후 수행, 키·S3 자격증명·논리키는 cascade |
+
+현재 fs 검증은 디렉터리 존재·쓰기 가능 확인이다. mount 식별·상실 정책은
+[Grove 경계](../adr/007-grove-storage-foundation.md)에서 추가로 정한다.
+
+외부 S3 자격증명은 객체 I/O와 multipart 생성·part 조회/쓰기·완료·중단·열린 multipart
+목록 조회 권한을 가진다. 열린 목록 조회는 불명확한 Create 결과에서 object_key로
+vendor 세션을 재발견하는 내부 복구에 사용한다.
 
 ## 키와 비밀
 
-- **운영자 토큰**: `FILEGATE_OPERATOR_TOKENS`(env, 쉼표 목록). 목록 중 하나와 일치하면 인증(상수시간 비교). 로테이션 = 새 토큰을 서브로 추가 → 클라이언트(TF) 전환 → 옛 토큰 제거. 무중단.
-- **클라이언트 키**: filegate가 생성을 통제하지 않는 고엔트로피 랜덤(`fg_` 접두사 권장). 등록·저장은 sha256 해시만(`sha256:<64hex>`) — raw는 서버에 도달하지 않는다. 회전 = 해시 행 추가·삭제. raw의 배달은 생성자(Terraform)가 대상 서비스의 기존 시크릿 경로로 한다.
-- **S3 자격증명**: filegate가 access key id와 secret을 생성하고 발급 응답에서 raw secret을 한 번만 반환한다. secret은 SigV4 검증에 원문이 필요하므로 AES-256-GCM으로 암호화해 저장한다(AAD는 access key id). 회전 = 새 자격증명 발급 → 소비자 전환 → 옛 자격증명 삭제.
-- **storage 시크릿**: 등록 요청에 원문이 담긴다 → 즉석 접근 검증 → AES-256-GCM으로 암호화 저장 (AAD에 storage id 바인딩, 마스터 키는 `FILEGATE_ENC_ROOT_SECRET` env). filegate가 서명에 원문을 써야 하므로 해시가 아니라 암호화다 — opsgate의 credential 보관 방식. 벤더 키 로테이션 = 벤더에서 새 키 발급 → 등록 갱신 (재시작 없음).
-- **마스터 키 회전**: 모든 암호문 행은 `enc_key_id` 라벨을 가지며, 복호는 라벨로 키를 고른다 (dispatch — 시행착오 fallback이 아니라 조회. 복호 실패 = 변조라는 신호가 보존된다). 절차:
-  1. 현재 키를 PREV 쌍(`FILEGATE_ENC_ROOT_SECRET_PREV`/`FILEGATE_ENC_KEY_ID_PREV`)으로 옮기고, 새 키를 활성으로 설정해 롤아웃한다 — 모든 행이 계속 복호되고, 새 쓰기는 활성 키로만 잠긴다.
-  2. `terraform apply`로 storage 시크릿을 갱신한다 — 갱신은 쓰기이므로 활성 키로 재암호화된다 (원문은 TF state에 있다).
-  3. S3 자격증명은 새로 발급해 소비자를 전환하고 옛 자격증명을 삭제한다 — 현재 API는 기존 secret의 재암호화 갱신을 제공하지 않는다.
-  4. storages와 s3_credentials의 모든 라벨이 새 key_id가 되면 PREV 쌍을 제거하고 롤아웃한다.
-  storage 암호문 오류는 부팅 재검증이 잡고, S3 자격증명 암호문 오류는 SigV4 인증 시 드러난다. PREV 제거 전 두 테이블의 라벨을 확인한다 — 별도 key-epoch 테이블은 두지 않는다.
-- **시크릿의 출생지와 배달**: 프로세스 시크릿과 클라이언트 raw 키는 운영 자동화가 만들고, storage 자격증명은 벤더에서 발급받아 운영자 API로 전달한다. S3 자격증명은 filegate가 생성해 발급 응답으로 한 번 전달한다. Terraform을 쓰면 state와 k8s Secret 백엔드 보호가 전제고, DB 암호문은 PostgreSQL 백업과 마스터 키를 함께 보존한다.
+| 비밀 | 공급·저장 | 회전 |
+|---|---|---|
+| 운영자 토큰 | env FILEGATE_OPERATOR_TOKENS, 쉼표 목록·상수시간 비교 | 새 토큰 추가 → 소비자 전환 → 옛 토큰 제거 |
+| client 키 | 생성자가 raw 전달, API에는 sha256:64hex 등록 | 해시 추가 → 소비자 전환 → 옛 해시 삭제 |
+| S3 secret | 서버 생성·발급 시 1회 반환, AES-GCM 저장 | 재발급 → 소비자 전환 → 옛 자격증명 삭제 |
+| storage secret | 운영자가 제출, 접근 검증 후 AES-GCM 저장 | 새 vendor 키로 storage 갱신 |
+| 마스터 키 | env FILEGATE_ENC_ROOT_SECRET·ENC_KEY_ID | 아래 절차 |
 
-## v0 배치: 명시 선언만
+암호문은 enc_key_id로 복호 키를 선택한다. AAD는 storage id 또는 S3 access key id다.
+메모리 비밀은 SecretString으로 다룬다.
 
-- client는 storage **하나**를 소유한다. create는 client의 `storage_id`를 해석해 그곳에만 저장한다.
-- 자동 선택 없음, 자동 이동 없음. 현재 운영자 API에서 `storage_id`는 client 생성 시 정하고 갱신하지 않는다. 기존 파일을 유지한 채 새 배치를 바꾸는 계약은 자동 배치·이동 범위에서 함께 정한다 (ADR 001의 방향).
-- 여러 client가 같은 storage를 참조할 수 있지만 각 참조는 독립된 등록이다.
+| 마스터 키 회전 단계 | 완료 조건 |
+|---|---|
+| 현재 키를 PREV 쌍으로, 새 키를 활성으로 롤아웃 | 이전·현재 암호문 복호 가능 |
+| storage secret을 운영자 API로 다시 제출 | 활성 키로 재암호화 |
+| S3 자격증명 재발급·소비자 전환·옛 행 삭제 | 새 자격증명 사용 |
+| 두 테이블의 enc_key_id 확인 후 PREV 제거 | 모든 암호문이 새 키 사용 |
 
-## 자동화 단계 (방향)
-
-- **Level 0 (v0)**: 이동 없음.
-- **Level 1**: reconciler가 이동 계획만 계산해 기록하고, 운영자 승인 후에만 집행한다 (plan/approve).
-- **Level 2**: 명시적으로 켠 배치만 승인 없이 자동 수렴한다. 기본은 manual이다.
-
-## 운영자 제어
-
-- **운영자 API가 유일한 제어점이다.** 등록 CRUD와 운영 동사(usage, 이후 plan/approve/pause)가 여기 산다. 인증은 정적 운영자 토큰(env).
-- Terraform provider·CLI·화면은 모두 같은 운영자 API의 클라이언트다. 선언형 관리 여부와 무관하게 런타임 정본은 DB이고, API가 유일한 변경 경계다.
-- API는 클라이언트-친화 CRUD로 만든다: 안정 id, id 단건 조회, 명확한 404, 멱등 삭제 — Terraform의 Read/plan이 요구하는 성질이다.
-
-## 경계선
-
-- 이 문서는 모양과 방향을 정한다. 현재 운영자 API는 storage CRUD, client 생성·조회·삭제, client key와 S3 자격증명 수명주기, usage 조회를 제공한다. client 갱신은 제공하지 않는다.
-- 클라이언트 인증 미들웨어는 제시된 키를 해시해 client 신원을 붙인다. filegate 자체 키이며 authgate에 의존하지 않는다 (공리 3).
-- SQL 직접 변경은 지원되는 제어 표면이 아니다. 등록부 복구는 PostgreSQL 백업과 운영자 선언을 함께 다룬다 ([spec 00](00-operations.md)).
+기존 API는 S3 secret 재암호화 갱신 대신 재발급을 제공한다.
+storage 복호 오류는 부팅 검증에서, S3 credential 오류는 인증 시 드러난다.
+DB 백업·마스터 키·소비자 시크릿을 각 공급 경로에서 보존한다.
