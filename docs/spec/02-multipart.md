@@ -66,7 +66,7 @@ stateDiagram-v2
 | terminal lease GC | 완료 소유 파일의 복구 재료 보호 |
 
 파일 행 잠금 획득 후 별도 쿼리로 완료 소유권·lease 상태를 다시 읽는다.
-part 허용·heartbeat는 잠금 대기 후의 현재 상태로 판단한다.
+part 허용·heartbeat·최종 확정은 잠금 대기 후의 현재 상태로 판단한다.
 
 직결 presigned part는 vendor TTL까지 유효하다. DB 소유권은 회수·재발급을 제어하고,
 실제 외부 part 변경과 Complete의 경합은 vendor 세션이 결정한다.

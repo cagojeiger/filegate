@@ -149,6 +149,15 @@ pub async fn finalize_completion(
     etag: &str,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
+    let locked: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM files WHERE id = $1 AND state = 'pending' FOR UPDATE")
+            .bind(file_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if locked.is_none() {
+        return Ok(false);
+    }
+    // Check the completion row after any recovery holding this file lock has committed.
     let transitioned = sqlx::query(
         "UPDATE files f SET state = 'active', etag = $2, committed_at = now() \
          FROM native_multipart_completions c \
