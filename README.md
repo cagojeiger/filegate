@@ -3,6 +3,11 @@
 PostgreSQL에 파일 메타데이터를 기록하고, fs·외부 S3 저장소의 바이트를
 네이티브 API와 S3 호환 API로 제공한다.
 
+## 개선 계획
+
+관리 CLI·Terraform 관리 이관·독립 Agent는 아직 구현·적용 전이다.
+아래 단계는 로드맵이며 현재 제공 기능은 각 spec의 상태 표시를 따른다.
+
 1차는 외부 S3 presigned 전송을 기반으로 관리 CLI와 등록부 Terraform 관리 이관을
 진행한다. 2차에 사전 마운트된 파일시스템을 사용하는 Storage Server·Agent를 추가한다.
 메타데이터는 PostgreSQL이 중앙 관리하며, FileGate 이름은 후속 이름 변경까지 유지한다.
