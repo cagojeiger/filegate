@@ -97,7 +97,7 @@ stateDiagram-v2
 | 조건 | 복구 계약 |
 |---|---|
 | 물리 작업과 DB | s3_uploads에 중간 상태를 기록하고 단계별 실행 |
-| 작업 진행 | heartbeat로 write lease 연장 |
+| 작업 진행 | 파일 락 획득 후 별도 쿼리로 completing 확인, heartbeat로 write lease 연장 |
 | 복구 후보 | completing의 만료된 write lease |
 | 실제 전이 | 파일 락 아래 만료 재확인 |
 | 예상 실물 일치 | 파일 활성화·lease 확정·key 교체·옛 파일 detach를 한 transaction으로 처리 |
@@ -126,6 +126,7 @@ stateDiagram-v2
 
 DB 테스트는 선점·완료·회수·GC 경합을 검증한다. 실제 바이트 경로는
 scripts/s3-capture.py의 단일 객체·Range·자동 multipart·key-bound Abort로 검증한다.
+잠금 대기 중 복구 전이는 db/tests/s3_heartbeat_fencing.rs에서 실행 순서를 고정해 검증한다.
 FileGate에서는 S3_EXPECT_WRONG_KEY_404=1로 다른 key의 Abort가 404인지 확인한다.
 
 ## 0005 이전 세션 전환

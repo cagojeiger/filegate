@@ -6,6 +6,11 @@ use filegate_db::files::{self, CompletionStart, CreateOutcome, CreateSpec, Creat
 use filegate_db::registry::{self, StorageRow};
 use sqlx::PgPool;
 
+#[path = "native_multipart_completion/mod.rs"]
+mod fencing;
+#[path = "support/lock_wait.rs"]
+mod lock_wait;
+
 fn storage() -> StorageRow {
     StorageRow {
         id: "s".to_owned(),
