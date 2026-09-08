@@ -1,6 +1,5 @@
-//! S3 오퍼레이션 핸들러 (spec 03) — PutObject·GetObject·HeadObject·
-//! DeleteObject. 바이트는 스풀을 통과하고(항상 중계), 확정은 스트림 실측
-//! 관찰이다. 파일·lease·회계는 네이티브 표면과 한 장부다.
+//! S3 객체 I/O와 파일·논리키 확정을 조율한다.
+//! 응답 프로토콜은 object_response, 물리 접근은 storage_access·infra가 담당한다.
 
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -13,6 +12,9 @@ use uuid::Uuid;
 
 use super::S3Result;
 use super::header_str;
+use super::object_response::{
+    RangeReq, ResponseOverrides, invalid_response_override, parse_range, range_not_satisfiable,
+};
 use super::xml::{no_such_key, xml_error, xml_internal, xml_storage_error};
 use crate::lease::{WRITE_LEASE_TTL, run_with_completion_heartbeat};
 use crate::routes::AppState;
@@ -282,114 +284,6 @@ async fn resolve(
     Ok((file_id, file))
 }
 
-/// 단일 구간 Range (spec 03): `bytes=a-b`·`bytes=a-`. 그 외 형태는 무시하고
-/// 전체를 준다 (RFC 9110 — 서버는 Range를 무시할 수 있다). 시작이 크기를
-/// 넘으면 416이다.
-enum RangeReq {
-    Full,
-    Span(i64, i64),
-    Unsatisfiable,
-}
-
-#[derive(Default)]
-struct ResponseOverrides {
-    cache_control: Option<HeaderValue>,
-    content_disposition: Option<HeaderValue>,
-    content_type: Option<HeaderValue>,
-}
-
-#[derive(Debug)]
-struct InvalidResponseOverride;
-
-impl ResponseOverrides {
-    fn from_query(query: &str) -> Result<Self, InvalidResponseOverride> {
-        Ok(Self {
-            cache_control: response_override(query, "response-cache-control")?,
-            content_disposition: response_override(query, "response-content-disposition")?,
-            content_type: response_override(query, "response-content-type")?,
-        })
-    }
-
-    fn apply(self, headers: &mut HeaderMap) {
-        if let Some(value) = self.cache_control {
-            headers.insert(header::CACHE_CONTROL, value);
-        }
-        if let Some(value) = self.content_disposition {
-            headers.insert(header::CONTENT_DISPOSITION, value);
-        }
-        if let Some(value) = self.content_type {
-            headers.insert(header::CONTENT_TYPE, value);
-        }
-    }
-}
-
-/// S3 object response overrides are signed query parameters. Authentication
-/// has already validated the raw query before this decoded value becomes a
-/// response header. HeaderValue rejects controls such as percent-encoded CRLF.
-fn response_override(
-    query: &str,
-    name: &str,
-) -> Result<Option<HeaderValue>, InvalidResponseOverride> {
-    let Some(raw) = query
-        .split('&')
-        .filter_map(|pair| pair.split_once('='))
-        .find(|(key, _)| *key == name)
-        .map(|(_, value)| value)
-    else {
-        return Ok(None);
-    };
-    let decoded = percent_encoding::percent_decode_str(raw).collect::<Vec<_>>();
-    HeaderValue::from_bytes(&decoded)
-        .map(Some)
-        .map_err(|_| InvalidResponseOverride)
-}
-
-fn invalid_response_override() -> Response {
-    xml_error(
-        StatusCode::BAD_REQUEST,
-        "InvalidArgument",
-        "invalid object response header override",
-    )
-}
-
-fn parse_range(headers: &HeaderMap, total: i64) -> RangeReq {
-    let Some(raw) = header_str(headers, "range") else {
-        return RangeReq::Full;
-    };
-    let Some(spec) = raw.strip_prefix("bytes=") else {
-        return RangeReq::Full;
-    };
-    let Some((start, end)) = spec.split_once('-') else {
-        return RangeReq::Full;
-    };
-    let Ok(start) = start.parse::<i64>() else {
-        return RangeReq::Full; // suffix form(-n) 포함 — 전체로 답한다.
-    };
-    if start >= total {
-        return RangeReq::Unsatisfiable;
-    }
-    let end = match end {
-        "" => total - 1,
-        explicit => match explicit.parse::<i64>() {
-            Ok(end) if end >= start => end.min(total - 1),
-            _ => return RangeReq::Full,
-        },
-    };
-    RangeReq::Span(start, end)
-}
-
-fn range_not_satisfiable(total: i64) -> Response {
-    let mut response = xml_error(
-        StatusCode::RANGE_NOT_SATISFIABLE,
-        "InvalidRange",
-        "the requested range is not satisfiable",
-    );
-    if let Ok(value) = HeaderValue::from_str(&format!("bytes */{total}")) {
-        response.headers_mut().insert(header::CONTENT_RANGE, value);
-    }
-    response
-}
-
 pub(super) async fn get_object(
     state: &AppState,
     client_id: &str,
@@ -519,118 +413,4 @@ pub(super) async fn delete_object(
         tracing::info!(event = "s3.delete", client = %client_id, bucket, key, file = %file_id);
     }
     Ok(StatusCode::NO_CONTENT.into_response())
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-
-    use super::*;
-
-    fn with_range(value: &str) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert("range", HeaderValue::from_str(value).unwrap());
-        headers
-    }
-
-    #[test]
-    fn no_range_header_reads_the_whole_object() {
-        assert!(matches!(
-            parse_range(&HeaderMap::new(), 100),
-            RangeReq::Full
-        ));
-    }
-
-    #[test]
-    fn byte_span_is_parsed_inclusive() {
-        assert!(matches!(
-            parse_range(&with_range("bytes=0-4"), 100),
-            RangeReq::Span(0, 4)
-        ));
-    }
-
-    #[test]
-    fn open_ended_span_runs_to_the_last_byte() {
-        // bytes=N- → 끝은 total-1 (마지막 바이트).
-        assert!(matches!(
-            parse_range(&with_range("bytes=5-"), 100),
-            RangeReq::Span(5, 99)
-        ));
-    }
-
-    #[test]
-    fn start_at_or_past_total_is_unsatisfiable() {
-        assert!(matches!(
-            parse_range(&with_range("bytes=100-"), 100),
-            RangeReq::Unsatisfiable
-        ));
-    }
-
-    #[test]
-    fn malformed_range_falls_back_to_full() {
-        // 접두 없음·start 비정수·suffix(-n) 형태는 모두 전체로 답한다.
-        assert!(matches!(
-            parse_range(&with_range("weird"), 100),
-            RangeReq::Full
-        ));
-        assert!(matches!(
-            parse_range(&with_range("bytes=abc-5"), 100),
-            RangeReq::Full
-        ));
-        assert!(matches!(
-            parse_range(&with_range("bytes=-20"), 100),
-            RangeReq::Full
-        ));
-    }
-
-    #[test]
-    fn empty_object_range_is_unsatisfiable() {
-        // total=0에선 start=0도 0 >= 0이라 만족 불가다 (416).
-        assert!(matches!(
-            parse_range(&with_range("bytes=0-"), 0),
-            RangeReq::Unsatisfiable
-        ));
-    }
-
-    #[test]
-    fn response_overrides_decode_rfc5987_and_replace_object_headers() {
-        let query = "response-content-disposition=attachment%3B%20filename%2A%3DUTF-8%27%27meeting%2520notes.webm\
-                     &response-content-type=audio%2Fwebm%3B%20codecs%3Dopus\
-                     &response-cache-control=private%2C%20no-store";
-        let overrides = ResponseOverrides::from_query(query).unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/octet-stream"),
-        );
-
-        overrides.apply(&mut headers);
-
-        assert_eq!(
-            headers.get(header::CONTENT_DISPOSITION).unwrap(),
-            "attachment; filename*=UTF-8''meeting%20notes.webm"
-        );
-        assert_eq!(
-            headers.get(header::CONTENT_TYPE).unwrap(),
-            "audio/webm; codecs=opus"
-        );
-        assert_eq!(
-            headers.get(header::CACHE_CONTROL).unwrap(),
-            "private, no-store"
-        );
-    }
-
-    #[test]
-    fn response_override_rejects_percent_encoded_crlf() {
-        assert!(
-            ResponseOverrides::from_query(
-                "response-content-disposition=attachment%0D%0AX-Injected%3A%20yes",
-            )
-            .is_err()
-        );
-        assert_eq!(
-            invalid_response_override().status(),
-            StatusCode::BAD_REQUEST
-        );
-    }
 }

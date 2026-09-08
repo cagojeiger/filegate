@@ -1,11 +1,5 @@
-//! 운영자 API — 등록부 제어의 유일한 표면 (ADR 004, spec 01).
-//!
-//! 인증은 정적 운영자 토큰(`Authorization: Bearer <token>`, env 목록과
-//! 상수시간 비교). CRUD는 TF-친화로 만든다: 안정 id, 단건 조회, 명확한
-//! 404, 멱등 삭제 — Terraform provider의 Read/plan이 요구하는 성질이다.
-//!
-//! 이 모듈은 경로 배선과 인증만 안다. 리소스 규칙은 각 하위 모듈에,
-//! 상태 코드 번역은 error에 산다.
+//! 운영자 API의 경로 배선과 bearer 토큰 인증.
+//! 리소스 규칙은 하위 모듈, 상태 코드 번역은 error가 담당한다.
 
 mod clients;
 mod storages;

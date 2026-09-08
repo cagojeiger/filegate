@@ -1,9 +1,5 @@
-//! usage — 운영자 용량 조회 (spec 00). 클라이언트 자격증명으로는 못 부른다.
-//! 이 관찰이 배치·tiering 판단의 입력이다 (capacity는 집행이 아니라 관찰).
-//!
-//! 읽기 전용이다 — 쓰기 표면은 Terraform 단독이다 (이중 관리 경로 금지).
-//! storage별 3버킷 장부 + 버킷과 짝을 이루는 파일 수, 그리고 (client×storage)
-//! 활성 점유(한 storage를 여러 client가 공유할 때 몫을 가른다)를 돌려준다.
+//! 운영자용 storage·client 점유 조회와 일별 사용량 이력.
+//! capacity는 등록 기준선이며, 등록 변경은 운영자 리소스 API가 담당한다.
 
 use axum::Json;
 use axum::extract::{Query, State};

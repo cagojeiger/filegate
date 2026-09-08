@@ -1,19 +1,13 @@
-//! 로컬/NFS 파일시스템 storage adapter (ADR 001: 파일시스템도 storage다).
-//!
-//! presigned 개념이 없으므로 항상 중계다 — 바이트는 filegate의 바이트
-//! 엔드포인트를 지나 여기로 온다. 쓰기는 임시 경로 + rename 원자성
-//! (spec 00): 같은 마운트 안에서만 성립하므로 멀티 파드는 같은 마운트를
-//! 공유해야 한다 (docs/stack).
+//! 준비된 filesystem root의 객체·multipart I/O.
+//! 임시 파일과 최종 파일은 같은 filesystem에서 rename한다.
+//! 여러 프로세스가 같은 storage를 사용할 때 데이터 마운트를 공유한다.
 
 use std::path::{Path, PathBuf};
 
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
-/// 접근 검증 — s3의 head_bucket 등가물. 디렉토리 존재 + 쓰기 가능을
-/// 프로브 파일로 확인한다 (등록 거부 또는 부팅 중단, ADR 001). fs는
-/// 캐시할 커넥션이 없어 핸들을 돌려주지 않는다 — 실제 작업은 root 경로를
-/// 직접 받는다 (s3의 connect가 client를 돌려주는 것과 다른 점).
+/// 디렉터리 존재와 프로브 쓰기로 접근을 검증한다. mount 식별은 별도 계약이다.
 pub async fn connect(root_path: &str) -> anyhow::Result<()> {
     let root = PathBuf::from(root_path);
     let meta = fs::metadata(&root)
@@ -30,10 +24,7 @@ pub async fn connect(root_path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// object_key를 root 아래 경로로 잇는다 — 방어선: 절대 경로나 `..` 성분은
-/// root를 벗어난다(`Path::join`은 절대 경로를 주면 root를 버린다). 키는
-/// filegate 생성값이라 오늘은 안전하지만, s3 어댑터가 구조적으로 탈출
-/// 불가한 것과 대칭이 되도록 여기서도 봉인한다.
+/// 상대 키를 root에 결합한다. 절대 경로와 부모 경로 성분을 거부한다.
 fn object_path(root: &Path, object_key: &str) -> anyhow::Result<PathBuf> {
     let key = Path::new(object_key);
     let escapes = key.is_absolute()
@@ -180,9 +171,8 @@ pub async fn delete(root: &Path, object_key: &str) -> anyhow::Result<()> {
 
 // ---- multipart (spec 02) ----
 
-/// multipart 대상 임시 파일 경로 — 결정적 이름이라 승격·commit·회수가
-/// 같은 파일을 본다. `.fg-tmp-` 접두사를 상속하므로 버려지면 mtime sweep이
-/// 줍는다 (진행 중엔 part 쓰기가 mtime을 갱신해 걸리지 않는다).
+/// 승격·commit·회수가 공유하는 multipart 임시 경로.
+/// sweep은 활성 lease로 보호하고, 보호 대상 밖의 오래된 임시를 정리한다.
 pub fn multipart_temp(root: &Path, lease_id: &str) -> PathBuf {
     root.join(format!(".fg-tmp-mp-{lease_id}"))
 }
@@ -230,7 +220,7 @@ pub async fn rename_into(source: &Path, target: &Path) -> anyhow::Result<()> {
 /// 직렬화는 호출자의 part claim(행 락) 몫이다 (spec 02).
 pub async fn write_part_at(target: &Path, offset: u64, source: &Path) -> anyhow::Result<()> {
     use tokio::io::AsyncSeekExt;
-    // truncate 금지 — 다른 part들의 offset 기록이 이미 이 파일에 있다.
+    // 다른 part의 offset 기록을 유지하도록 기존 파일 내용을 보존한다.
     let mut dst = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
