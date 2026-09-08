@@ -1,32 +1,32 @@
-# ADR 003: 안정 URL은 서비스가 소유하고, filegate URL은 저장하지 않는다
+# ADR 003: 서비스는 안정 이름을 소유한다
 
-- Status: Accepted
-- Date: 2026-07-03
-- 부모: [000](000-identity.md) 공리 1+2의 교차, [002](002-lease-model.md)
-
-## 문제
-
-filegate가 발급한 접근 수단은 수명이 짧고 계속 바뀐다. 사용자는 안정적인 URL을 필요로 한다. filegate가 공개 다운로드 URL을 제공하면 서비스 권한 검사를 우회할 수 있다.
+- 상태: Accepted
+- 최초 결정: 2026-07-03
+- 근거: [000](000-identity.md), [002](002-lease-model.md)
 
 ## 결정
 
-- **사용자 URL은 서비스 도메인에 둔다.** 서비스가 인증과 권한 확인을 한 뒤 읽기 lease를 받고 저장소로 redirect한다.
-- **filegate에는 익명 API가 없다.** 클라이언트 API는 모두 등록된 클라이언트 인증 뒤에 있다. 클라이언트 인증의 예외는 둘 — 중계 모드의 바이트 엔드포인트(lease별 secret)와 운영자 표면(usage, 운영자 인증)이다. 어느 쪽도 익명은 아니다.
-- **filegate URL은 일회용이다.** 서비스는 file_id만 저장한다 — filegate URL은 임베드·캐시 대상이 아니다.
-- **표현은 lease 요청 때 지정한다.** 파일명과 표시 방식은 서비스가 넘긴다. filegate는 메타데이터를 해석하지 않는다.
+| 이름·접근 | 소유자 |
+|---|---|
+| 사용자 URL·업무 권한 | 서비스 |
+| 네이티브 파일 참조 | 서비스가 `file_id` 저장 |
+| S3 파일 참조 | 서비스가 bucket·logical key 저장 |
+| 물리 위치 | FileGate의 location |
+| 만료 URL | 요청 시 발급, 유효기간 내 전달 |
+| 파일명·표시 방식 | 서비스가 요청에서 지정 |
 
-## 흐름
+접근 URL의 수명과 위치가 바뀌어도 서비스의 안정 참조는 유지한다.
+업무 권한을 확인한 서비스가 파일 접근을 위임한다.
 
-다운로드의 단계별 시퀀스(안정 URL → 읽기 lease → redirect)는 [spec 00](../spec/00-operations.md)에 둔다. 사용자에게 보이는 URL은 고정되고, 실제 접근 수단은 요청마다 새로 만든다.
+## 인증 경계
 
-## 경계선
+| 표면 | 인증 |
+|---|---|
+| 네이티브 API | client bearer 키 |
+| S3 API | SigV4 |
+| 중계 URL | lease secret |
+| 운영자 API | operator bearer 토큰 |
+| 루트·health·readiness | 공개 상태 조회 |
 
-- 병목이 확인되면 위임 토큰을 추가할 수 있다.
-- filegate에는 "공개 파일" 개념이 없다. 공개 여부는 서비스 권한 정책의 결과이며, filegate는 유저 토큰을 검증하지 않는다.
-
-## 결과
-
-- filegate 도입이 서비스의 URL 체계를 바꾸지 않는다.
-- URL 유출의 피해 범위는 lease 수명으로 제한된다.
-- 위치 이동은 사용자에게 보이지 않는다.
-- 서비스 DB에 file_id 외의 filegate 산출물이 있으면 계약 위반이다.
+상세 흐름은 [네이티브 가이드](../guide/service-integration.md)와
+[S3 가이드](../guide/s3-onboarding.md)가 정본이다.

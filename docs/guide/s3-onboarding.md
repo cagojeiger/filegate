@@ -1,20 +1,18 @@
-# S3 호환 온보딩 — filegate를 "S3 하나 더"로 쓴다
+# S3 연동
 
-기존 S3 코드를 가진 서비스가 filegate에 붙는 가장 짧은 길이다. 코드는
-그대로 두고 endpoint·자격증명·버킷 이름만 바꾼다. 대가는 바이트가
-filegate를 지나는 것이다 (ADR [006](../adr/006-s3-compat-surface.md) —
-온보딩 계층). 트래픽 비용이 중요해지면 [네이티브 연동](service-integration.md)으로
-서비스 단위로 갈아탄다 — 파일 장부는 그대로다.
+계약: [S3 spec](../spec/03-s3-surface.md)
 
-## 받는 것 (운영자에게 요청)
+## 연결 정보
 
 | 항목 | 예 |
 |---|---|
-| endpoint | `https://filegate.internal` (컨트롤과 같은 리스너 — 전용 포트 없음) |
-| access key id / secret key | 등록부가 발급 |
-| 버킷 이름 | 서비스의 client id (버킷 = client id, 예: `notegate`) |
+| endpoint | https://filegate.internal |
+| access key·secret | 운영자 API에서 client에 발급 |
+| bucket | client id |
+| 주소 방식 | path-style |
+| region | us-east-1; SigV4 scope에서 일관되게 사용 |
 
-## 붙는 법 (boto3)
+## boto3
 
 ```python
 import boto3
@@ -25,7 +23,7 @@ s3 = boto3.client(
     endpoint_url=FILEGATE_S3_ENDPOINT,
     aws_access_key_id=ACCESS_KEY,
     aws_secret_access_key=SECRET_KEY,
-    region_name="us-east-1",          # SigV4 scope 값 — 일관되게 보내면 다른 값도 허용
+    region_name="us-east-1",
     config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
 )
 
@@ -36,25 +34,19 @@ s3.get_object(Bucket=BUCKET, Key="reports/2026/07.pdf")
 s3.delete_object(Bucket=BUCKET, Key="reports/2026/07.pdf")
 ```
 
-key는 서비스가 정한다 — 유니코드·공백·특수문자 그대로 쓴다. 같은 key에
-다시 PUT하면 덮어쓰기다 (S3와 동일).
+서비스는 bucket·logical key를 저장한다. 같은 key에 PUT하면 새 객체로 교체한다.
+바이트는 FileGate를 거쳐 저장소에 기록된다.
 
-## 지원 범위 ([spec 03](../spec/03-s3-surface.md))
+| 사용 | 현재 계약 |
+|---|---|
+| 작은 객체 | Put·Head·Get·Delete |
+| 큰 객체 | SDK upload_file/download_file의 multipart·Range |
+| 중단·재시도 | Complete·Abort 상태와 복구 재료를 원장에 보존 |
+| presigned URL | SDK가 생성한 query-signed SigV4 검증 |
+| 목록·버킷 관리 API | 지원 범위 밖; 사용할 클라이언트의 요구 확인 |
 
-- **PutObject / HeadObject / GetObject(+Range) / DeleteObject** — 작은 파일의
-  전체 수명에 충분함이 실측이다.
-- **multipart 지원** — `upload_file`의 임계 초과 자동 전환(Create/UploadPart/
-  Complete/Abort)이 그대로 동작한다. part 크기·개수는 SDK가 정하며 filegate가
-  실측으로 검증한다 — 큰 파일 업로드·다운로드(`upload_file`/`download_file`)를
-  기본값으로 쓰면 된다. Complete/Abort 중 외부 저장소나 DB 한쪽이 일시 실패해도
-  세션 복구 재료를 보존하고 reconciler가 확정·정리를 재시도한다.
-- **ListObjects는 없다** — 어떤 key를 썼는지는 서비스 DB가 안다. 목록이
-  필요한 설계라면 네이티브 연동이 맞다.
+## 검증
 
-## 확인
-
-[scripts/s3-capture.py](../../scripts/s3-capture.py)에 대상의 `S3_ENDPOINT`,
-`S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`을 넣어 실행하면 단일 객체
-수명(업로드→확인→다운로드→Range→삭제→404), 자동 multipart
-upload/download, key-bound Abort가 함께 검증된다. filegate 자체 검증에는
-`S3_EXPECT_WRONG_KEY_404=1`을 더해 wrong-key Abort의 404 계약도 강제한다.
+[s3-capture.py](../../scripts/s3-capture.py)에 S3_ENDPOINT, S3_ACCESS_KEY,
+S3_SECRET_KEY, S3_BUCKET을 공급한다. 객체 수명·Range·자동 multipart·Abort를 확인하며,
+FileGate에는 S3_EXPECT_WRONG_KEY_404=1을 더해 다른 key의 Abort 계약을 검증한다.

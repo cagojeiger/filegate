@@ -1,68 +1,30 @@
-# ADR 005: 바이트 평면은 presigned URL 발급이다
+# ADR 005: 네이티브 전송은 서명 URL을 발급한다
 
-- Status: Accepted
-- Date: 2026-07-13 (개정 같은 날: 인터페이스 계약으로 승격 — 보조 S3 표면 옵션 철회. 개정 2026-07-14: S3 호환 표면이 [ADR 006](006-s3-compat-surface.md)의 별도 계층으로 도입 — 이 문서는 네이티브 평면의 계약이다)
-- 부모: [000](000-identity.md) 공리 2 (바이트 직결이 기본), [002](002-lease-model.md)
-
-## 문제
-
-공리 2는 "바이트 직결"을 선언하지만 두 가지가 열려 있었다: 직결의 구체적
-수단, 그리고 "기존 S3 코드가 무수정으로 붙는 S3 호환 표면을 제공하면 안
-되나"라는 반복 재론. 호환 표면은 온보딩 매력이 커서 문서 근거만으로는
-계속 되살아난다 — 실측으로 닫는다.
+- 상태: Accepted (네이티브 표면)
+- 최초 결정: 2026-07-13
+- 근거: [002](002-lease-model.md); S3 표면은 [006](006-s3-compat-surface.md)
 
 ## 결정
 
-> **인터페이스 계약 (최상위):** filegate의 바이트 인터페이스는 **서명·만료
-> URL의 발급이다** — 업로드(create), 다운로드(read), multipart part(parts).
-> s3는 벤더 서명(presigned, 바이트 직결), fs는 filegate 서명(중계 URL,
-> NAS의 통로) — 발급 계약은 하나다. **이것이 전부다.**
+| 요청 | 발급 결과 | 전송 |
+|---|---|---|
+| create | PUT URL | 업로드 |
+| read | GET URL | 다운로드 |
+| parts | part별 PUT URL | multipart 전송 |
+| storage가 S3 직결 | vendor presigned URL | 클라이언트 ↔ 저장소 |
+| fs·force_relay | FileGate lease URL | 클라이언트 ↔ FileGate ↔ 저장소 |
 
-- **모든 바이트 전송의 수단은 filegate가 발급하는 presigned URL이다.**
-  업로드(create → PUT URL), 다운로드(read → GET URL), multipart(parts →
-  part별 URL) 전부 같은 형태다. filegate는 URL을 만들고 검증·관찰할 뿐
-  바이트를 만지지 않는다. 트래픽 비용의 기본값이 0인 구조다.
-- **중계 URL은 presigned의 등가물이다.** 서명 능력이 없는 storage(fs)와
-  직결이 막힌 선언(force_relay·CORS 불가)에서만 filegate 바이트
-  엔드포인트가 같은 계약(발급→전송→확정)으로 대신 선다. 예외 경로지
-  두 번째 프로토콜이 아니다.
-- **S3 호환 표면은 이 평면의 일부가 아니다.** S3 GetObject의 계약은
-  "응답 본문 = 파일 내용"이라 URL을 건넬 방법이 307 리다이렉트뿐인데,
-  표준 SDK(botocore)는 이를 따라가지 않는다 — 2026-07-13 실측. 따라서
-  SDK 호환은 업로드·다운로드 **양방향** 바이트 중계를 강제한다. 이
-  실측은 유효하다 — 그래서 호환 표면은 [ADR 006](006-s3-compat-surface.md)이
-  그 중계 비용을 명시적으로 수용한 **별도 온보딩 계층**으로 제공한다.
-- **클라이언트 협조가 이 구조의 전제다.** "URL을 받아 직접 전송하고
-  완료를 알린다"는 협조는 브라우저·자체 클라이언트만 가능하다 (표준 S3
-  SDK는 불가능 — 그래서 위 결정이 성립한다). 협조를 한 줄로 줄이는 것은
-  얇은 클라이언트 라이브러리의 몫이며 프로토콜 변경이 아니다.
+네이티브 클라이언트는 발급된 URL로 전송하고 확정 결과를 확인한다.
+URL 발급과 바이트 I/O를 분리해 직결 storage에서 FileGate의 전송 부하를 줄인다.
 
-## 실측 기록 (2026-07-13 — aws-cli/botocore ↔ SigV4 게이트웨이 스파이크)
+## 선택 근거
 
-| 검증 | 결과 |
-|---|---|
-| 네이티브 create·read의 URL 호스트 | 벤더 직결 — filegate를 지난 바이트 0 |
-| SDK PutObject (SigV4 검증→중계→auto-commit) | 동작 — 단 바이트가 filegate 통과 |
-| SDK GetObject ← 307 presigned 리다이렉트 | **거부** — 다운로드 직결 오프로드 불가 |
-| 두 경로의 파일이 한 장부(usage·lease_history)로 | 확인 |
-
-셋 중 둘만 고를 수 있다: ① 바이트 직결 ② 무수정 S3 SDK ③ 검증(commit).
-filegate는 ①+③이다. 스파이크 코드는 `spike/s3-gateway` 브랜치에 보존
-(SigV4 header 검증, 논리키 매핑, 상세는 notegate v006).
-
-## 경계선
-
-- 일회성 유입(기존 버킷 마이그레이션)은 네이티브 프로토콜 스크립트
-  (create→PUT→commit 루프)로 처리한다 — S3 표면이 필요한 일이 아니다.
-- S3 호환 표면의 도입은 [ADR 006](006-s3-compat-surface.md)으로
-  결정됐고 (2026-07-14), 스파이크(SigV4 검증·논리키 매핑)를 승격해
-  구현됐다 (api/src/s3, spec 03).
-- 이 계약은 바이트 평면에 관한 것이다 — 등록·상태·관찰 관리는 별도
-  운영자 표면(/api/admin/v1, ADR 004)이 담당하며 이 결정과 독립이다.
+2026-07-13 aws-cli/botocore 스파이크에서 GetObject의 307 응답으로 다운로드를
+오프로드하는 경로가 동작하지 않았다. 해당 실측에 따라 네이티브 URL 발급과
+S3 응답 본문 전송을 별도 계약으로 채택했다.
 
 ## 결과
 
-- 업로드·다운로드·multipart가 하나의 문법(URL 발급)으로 통일된다.
-- "S3 호환으로 하면 안 되나"의 답이 문서가 아니라 측정이다.
-- 서비스 연동의 다음 실용 단위는 create→PUT→commit을 감싸는 얇은
-  클라이언트다 — 서버는 그대로.
+네이티브 계약은 [파일 spec](../spec/00-operations.md)과
+[multipart spec](../spec/02-multipart.md)이 정의한다.
+S3 SDK는 [S3 spec](../spec/03-s3-surface.md)의 바이트 응답을 사용한다.
