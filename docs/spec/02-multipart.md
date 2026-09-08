@@ -65,6 +65,9 @@ stateDiagram-v2
 | 정리 실패 | completion·location·lease·upload_id 보존 |
 | terminal lease GC | 완료 소유 파일의 복구 재료 보호 |
 
+파일 행 잠금 획득 후 별도 쿼리로 완료 소유권·lease 상태를 다시 읽는다.
+part 허용·heartbeat·최종 확정은 잠금 대기 후의 현재 상태로 판단한다.
+
 직결 presigned part는 vendor TTL까지 유효하다. DB 소유권은 회수·재발급을 제어하고,
 실제 외부 part 변경과 Complete의 경합은 vendor 세션이 결정한다.
 부족한 part·크기 불일치의 commit은 400으로 pending을 유지한다.
@@ -74,6 +77,7 @@ stateDiagram-v2
 | 범위 | 근거 |
 |---|---|
 | 완료·회수 경합, 새 part 차단, 재개·정리, GC | db/tests/native_multipart_completion.rs |
+| 잠금 대기 중 소유권 변경 | db/tests/native_multipart_completion/ |
 | S3 중계 part·완료 직렬화 | db/tests의 S3 multipart 테스트 |
 | 실제 fs·S3 바이트 동등성 | scripts/e2e-multipart.sh |
 | part 내부 오프셋 재개·전체 CRC 합성 | 후속 범위 |

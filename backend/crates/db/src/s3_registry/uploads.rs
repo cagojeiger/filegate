@@ -846,15 +846,22 @@ pub async fn renew_completion_lease(
     lease_ttl_secs: i64,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let locked: Option<Uuid> = sqlx::query_scalar(
-        "SELECT f.id FROM files f JOIN s3_uploads u ON u.file_id = f.id \
-         WHERE f.id = $1 AND f.state = 'pending' AND u.state = 'completing' \
-         FOR UPDATE OF f",
+    let locked: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM files WHERE id = $1 AND state = 'pending' FOR UPDATE")
+            .bind(file_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if locked.is_none() {
+        return Ok(false);
+    }
+    // Recovery may change the upload while this transaction waits for the file lock.
+    let completing: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM s3_uploads WHERE file_id = $1 AND state = 'completing')",
     )
     .bind(file_id)
-    .fetch_optional(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
-    if locked.is_none() {
+    if !completing {
         return Ok(false);
     }
     let renewed = sqlx::query(

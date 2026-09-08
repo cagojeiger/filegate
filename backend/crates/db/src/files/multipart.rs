@@ -6,7 +6,7 @@
 //! 직렬화 상태(claimed/done)뿐이다. 중계 secret은 lease id에서 파생하므로
 //! 원문을 저장하지 않는다 — 인증용 해시만 남는다 (spec 02).
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 /// 직결 multipart의 벤더 세션 핸들을 write lease에 기록한다 (발급 직후 한 번).
@@ -23,6 +23,32 @@ pub async fn attach_upload_id(
         .map(|_| ())
 }
 
+async fn lock_issued_part_lease(
+    tx: &mut Transaction<'_, Postgres>,
+    lease_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        "SELECT f.id FROM files f JOIN leases le ON le.file_id = f.id \
+         WHERE le.id = $1 AND f.state = 'pending' FOR UPDATE OF f",
+    )
+    .bind(lease_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(file_id) = locked else {
+        return Ok(false);
+    };
+    // The file lock can wait past a completion claim; re-read related state afterward.
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM leases le \
+         WHERE le.id = $1 AND le.file_id = $2 AND le.kind = 'write' AND le.state = 'issued' \
+         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions WHERE file_id = $2))",
+    )
+    .bind(lease_id)
+    .bind(file_id)
+    .fetch_one(&mut **tx)
+    .await
+}
+
 /// 이미 직렬화된 경로에서 part 완료를 원장에 즉시 기록한다. 외부 네트워크
 /// 업로드는 완료와 경합하므로 `claim_relay_part`/`finish_relay_part`를 사용한다.
 pub async fn record_part_done(
@@ -33,17 +59,7 @@ pub async fn record_part_done(
     md5: &str,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let locked: Option<Uuid> = sqlx::query_scalar(
-        "SELECT f.id FROM files f JOIN leases le ON le.file_id = f.id \
-         WHERE le.id = $1 AND le.kind = 'write' AND le.state = 'issued' \
-         AND f.state = 'pending' \
-         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions c \
-                         WHERE c.file_id = f.id) FOR UPDATE OF f",
-    )
-    .bind(lease_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if locked.is_none() {
+    if !lock_issued_part_lease(&mut tx, lease_id).await? {
         return Ok(false);
     }
     let recorded = sqlx::query(
@@ -81,10 +97,7 @@ pub async fn claim_relay_part(
     let mut tx = pool.begin().await?;
     let locked: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM files WHERE id = $1 AND state = 'pending' \
-         AND part_size IS NOT NULL \
-         AND NOT EXISTS (SELECT 1 FROM s3_uploads WHERE file_id = $1) \
-         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions WHERE file_id = $1) \
-         FOR UPDATE",
+         AND part_size IS NOT NULL FOR UPDATE",
     )
     .bind(file_id)
     .fetch_optional(&mut *tx)
@@ -96,7 +109,9 @@ pub async fn claim_relay_part(
         "UPDATE leases SET expires_at = GREATEST( \
              expires_at, now() + $3 * interval '1 second') \
          WHERE id = $1 AND file_id = $2 AND kind = 'write' \
-         AND state = 'issued' AND expires_at > now()",
+         AND state = 'issued' AND expires_at > now() \
+         AND NOT EXISTS (SELECT 1 FROM s3_uploads WHERE file_id = $2) \
+         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions WHERE file_id = $2)",
     )
     .bind(lease_id)
     .bind(file_id)
@@ -131,14 +146,11 @@ pub async fn renew_relay_part_lease(
     lease_ttl_secs: i64,
 ) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let locked: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM files WHERE id = $1 AND state = 'pending' \
-         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions WHERE file_id = $1) \
-         FOR UPDATE",
-    )
-    .bind(file_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let locked: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM files WHERE id = $1 AND state = 'pending' FOR UPDATE")
+            .bind(file_id)
+            .fetch_optional(&mut *tx)
+            .await?;
     if locked.is_none() {
         return Ok(false);
     }
@@ -147,7 +159,8 @@ pub async fn renew_relay_part_lease(
          FROM lease_parts lp \
          WHERE le.id = $2 AND le.file_id = $1 AND le.kind = 'write' \
          AND le.state = 'issued' AND lp.lease_id = le.id \
-         AND lp.part_no = $3 AND lp.state = 'claimed'",
+         AND lp.part_no = $3 AND lp.state = 'claimed' \
+         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions WHERE file_id = $1)",
     )
     .bind(file_id)
     .bind(lease_id)
@@ -273,9 +286,7 @@ pub async fn extend_write_lease(
     let mut tx = pool.begin().await?;
     let locked: Option<Uuid> = sqlx::query_scalar(
         "SELECT f.id FROM files f JOIN leases le ON le.file_id = f.id \
-         WHERE le.id = $1 AND f.state = 'pending' \
-         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions c \
-                         WHERE c.file_id = f.id) FOR UPDATE OF f",
+         WHERE le.id = $1 AND f.state = 'pending' FOR UPDATE OF f",
     )
     .bind(lease_id)
     .fetch_optional(&mut *tx)
@@ -285,7 +296,9 @@ pub async fn extend_write_lease(
     }
     let updated = sqlx::query(
         "UPDATE leases SET expires_at = GREATEST(expires_at, now() + $2 * interval '1 second') \
-         WHERE id = $1 AND state = 'issued' AND expires_at > now()",
+         WHERE id = $1 AND state = 'issued' AND expires_at > now() \
+         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions c \
+                         WHERE c.file_id = leases.file_id)",
     )
     .bind(lease_id)
     .bind(ttl_secs)
@@ -314,17 +327,7 @@ pub async fn claim_part(
     part_no: i32,
 ) -> Result<Option<PartClaim>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let locked: Option<Uuid> = sqlx::query_scalar(
-        "SELECT f.id FROM files f JOIN leases le ON le.file_id = f.id \
-         WHERE le.id = $1 AND le.kind = 'write' AND le.state = 'issued' \
-         AND f.state = 'pending' \
-         AND NOT EXISTS (SELECT 1 FROM native_multipart_completions c \
-                         WHERE c.file_id = f.id) FOR UPDATE OF f",
-    )
-    .bind(lease_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if locked.is_none() {
+    if !lock_issued_part_lease(&mut tx, lease_id).await? {
         return Ok(None);
     }
     sqlx::query(
