@@ -1,9 +1,14 @@
-use crate::args::{ClientList, Command, Resource, Usage};
+mod read;
+mod write;
+
+use crate::args::{ClientCommand, ClientKeyCommand, Command, CredentialCommand, StorageCommand};
 use crate::error::Error;
 use crate::http::Api;
-use crate::model::{self, Data};
+use crate::model::Data;
 
-pub async fn run(api: &Api, command: &Command) -> Result<(Data, Option<Error>), Error> {
+pub(super) type CommandResult = Result<(Data, Option<Error>), Error>;
+
+pub async fn run(api: &Api, command: &Command) -> CommandResult {
     match command {
         Command::Update { .. } | Command::Install { .. } => Err(Error::input(
             "Local commands execute without the management API",
@@ -12,70 +17,47 @@ pub async fn run(api: &Api, command: &Command) -> Result<(Data, Option<Error>), 
             let (status, error) = crate::status::inspect(api).await;
             Ok((Data::Status(status), error))
         }
-        Command::Storage(Resource::List) => {
-            let mut rows = api
-                .get::<Vec<model::Storage>>(&["storages"], &[], true)
-                .await?;
-            rows.sort_by(|a, b| a.id.cmp(&b.id));
-            Ok((Data::Storages(rows), None))
+        Command::Storage(StorageCommand::List) => read::storage_list(api).await,
+        Command::Storage(StorageCommand::Show { id }) => read::storage_show(api, id).await,
+        Command::Storage(StorageCommand::Create { id, from }) => {
+            write::storage_create(api, id, from).await
         }
-        Command::Storage(Resource::Show { id }) => {
-            let row: model::Storage = api.get(&["storages", id], &[], true).await?;
-            if &row.id != id {
-                return Err(Error::invalid_response());
-            }
-            Ok((Data::Storage(row), None))
+        Command::Storage(StorageCommand::Replace { id, from, yes }) => {
+            write::storage_replace(api, id, from, *yes).await
         }
-        Command::Client(Resource::List) => strings(api, &["clients"]).await,
-        Command::Client(Resource::Show { id }) => {
-            let row: model::Client = api.get(&["clients", id], &[], true).await?;
-            if &row.id != id {
-                return Err(Error::invalid_response());
-            }
-            Ok((Data::Client(row), None))
+        Command::Storage(StorageCommand::Delete { id, yes }) => {
+            write::storage_delete(api, id, *yes).await
         }
-        Command::Credential(ClientList::List { client }) => {
-            strings(api, &["clients", client, "s3-credentials"]).await
+        Command::Client(ClientCommand::List) => read::client_list(api).await,
+        Command::Client(ClientCommand::Show { id }) => read::client_show(api, id).await,
+        Command::Client(ClientCommand::Create { id, storage }) => {
+            write::client_create(api, id, storage).await
         }
-        Command::ClientKey(ClientList::List { client }) => {
-            strings(api, &["clients", client, "keys"]).await
+        Command::Client(ClientCommand::Delete { id, yes }) => {
+            write::client_delete(api, id, *yes).await
         }
-        Command::Usage(Usage::Storages) => {
-            let mut rows = api
-                .get::<Vec<model::StorageUsage>>(&["usage"], &[], true)
-                .await?;
-            rows.sort_by(|a, b| a.storage_id.cmp(&b.storage_id));
-            Ok((Data::StorageUsage(rows), None))
+        Command::Credential(CredentialCommand::List { client }) => {
+            read::credential_list(api, client).await
         }
-        Command::Usage(Usage::Clients) => {
-            let mut rows = api
-                .get::<Vec<model::ClientUsage>>(&["usage", "clients"], &[], true)
-                .await?;
-            rows.sort_by(|a, b| {
-                a.client_id
-                    .cmp(&b.client_id)
-                    .then(a.storage_id.cmp(&b.storage_id))
-            });
-            Ok((Data::ClientUsage(rows), None))
+        Command::Credential(CredentialCommand::Create { client, secret_out }) => {
+            write::credential_create(api, client, secret_out).await
         }
-        Command::Usage(Usage::History { days }) => {
-            let mut rows = api
-                .get::<Vec<model::Snapshot>>(
-                    &["usage", "history"],
-                    &[("days", days.to_string())],
-                    true,
-                )
-                .await?;
-            rows.sort_by(|a, b| {
-                (&a.day, &a.storage_id, &a.client_id).cmp(&(&b.day, &b.storage_id, &b.client_id))
-            });
-            Ok((Data::History(rows), None))
+        Command::Credential(CredentialCommand::Delete {
+            client,
+            access_key_id,
+            yes,
+        }) => write::credential_delete(api, client, access_key_id, *yes).await,
+        Command::ClientKey(ClientKeyCommand::List { client }) => {
+            read::client_key_list(api, client).await
         }
+        Command::ClientKey(ClientKeyCommand::Register { client, key_file }) => {
+            write::client_key_register(api, client, key_file).await
+        }
+        Command::ClientKey(ClientKeyCommand::Delete {
+            client,
+            key_hash,
+            yes,
+        }) => write::client_key_delete(api, client, key_hash, *yes).await,
+        Command::Usage(usage) => read::usage(api, usage).await,
     }
-}
-
-async fn strings(api: &Api, path: &[&str]) -> Result<(Data, Option<Error>), Error> {
-    let mut rows = api.get::<Vec<String>>(path, &[], true).await?;
-    rows.sort();
-    Ok((Data::Strings(rows), None))
 }
