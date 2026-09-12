@@ -1,0 +1,25 @@
+[package]
+name = "gscli"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Grove Storage administration CLI"
+license = "Apache-2.0"
+repository = "https://github.com/cagojeiger/filegate"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "env"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+semver = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "process", "io-util"] }
+
+[dev-dependencies]
+axum = { workspace = true }
+tokio = { version = "1", features = ["net", "sync"] }
+
+[lints]
+workspace = true

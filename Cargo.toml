@@ -5,10 +5,11 @@ members = [
     "backend/crates/db",
     "backend/crates/infra",
     "backend/crates/api",
+    "backend/crates/cli",
 ]
 
 [workspace.package]
-version = "0.3.10"
+version = "0.4.0"
 edition = "2024"
 
 [workspace.dependencies]

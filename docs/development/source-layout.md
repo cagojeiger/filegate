@@ -2,6 +2,10 @@
 
 ```text
 backend/crates/
+├── cli/                   gscli: 원격 관리자 API 읽기 명령
+│   ├── src/               인자·설정·HTTP·응답 모델·출력
+│   │   └── update/        업데이트 흐름·다운로드·설치 기록·파일 교체, 분리된 tests/
+│   └── tests/             설정·조회·오류·status HTTP·update 진입점 테스트
 ├── api/src/
 │   ├── admin/              등록부·운영자 인증·usage
 │   ├── s3/                 SigV4·라우팅·객체·multipart
@@ -35,6 +39,8 @@ backend/crates/
 | `infra/fs`, `infra/s3` | 물리 주소 → 바이트 I/O | filesystem·vendor 계약 |
 | `api/reconciler` | DB 후보·실물 관찰 → 복구 | 보존된 소유권·재시도 |
 | `api/status` | 로컬 Config → DB·저장소 접근·요약 | HTTP 독립, 부팅과 같은 storage 검사 |
+| `cli` | 운영자 인자 → 관리자 HTTP API → table·JSON | DB 의존성 없음, 기존 서버·로컬 status와 분리 |
+| `cli/update` | 공식 Release → 검증된 실행 파일 | 서버 인증 독립, 설치·업데이트의 동일 잠금·교체 |
 | `core` | 값 → 검증·계산 | 프로토콜·DB에서 독립된 계산 |
 
 `uploads`의 크기보다 상태 전이의 원자성을 우선한다. 논리키 교체와 옛 파일
@@ -51,6 +57,9 @@ detach는 같은 트랜잭션을 공유한다.
 | S3 원자적 교체·완료·회수 | `db/tests/s3_*` |
 | filesystem 조립·임시 보호 | `infra/src/fs.rs` |
 | 현재 CLI 표현 | `api/src/status.rs` (바이트·용량 2개) |
+| 원격 CLI | `cli/tests/{config,reads,failures,status}.rs`, `cli/src/output_tests.rs` |
+| CLI·서버 응답 계약 | `scripts/e2e-cli.py` (CI, 격리 DB·실제 서버) |
+| CLI 설치·릴리스 계약 | `deploy/tests/test_{installer,manifest,version}.py` |
 | 실제 바이트 경로 | `scripts/e2e-*.sh`, `scripts/s3-capture.py` |
 
 실행 명령은 [기술·운영](../stack/README.md#검증)을 따른다.
