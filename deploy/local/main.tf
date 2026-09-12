@@ -1,9 +1,10 @@
-# 로컬 등록 그래프 — published 프로바이더(cagojeiger/filegate)로 등록부 전체를
-# 한 번의 apply로 세운다. e2e 스크립트(scripts/e2e-*.sh)의 전제 상태다.
+# 이관 전 로컬 등록 그래프 — published 프로바이더(cagojeiger/filegate)와
+# gscli inventory를 비교할 때 유지하는 fixture다. 기존 e2e-upload/e2e-relay가
+# 아직 이 상태를 전제로 하며, 새 등록 흐름은 docs/guide/registry-management.md다.
 #
 #   storage ◀── client ── client_key
 #
-# 실행:
+# 기존 fixture 재현:
 #   docker compose up -d && cargo run --bin filegate   # 서버 기동
 #   mkdir -p /tmp/filegate-fs-demo
 #   export FILEGATE_OPERATOR_TOKEN=fgop_local-dev

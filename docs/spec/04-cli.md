@@ -1,6 +1,6 @@
 # spec 04: 운영 CLI
 
-- 상태: Partial (gscli 읽기·자체 업데이트 구현, 등록부 변경 명령·운영 이관은 Draft)
+- 상태: Partial (gscli 조회·변경·자체 업데이트 구현, 운영 이관은 Draft)
 - 원격 관리 CLI: `gscli`; 서버·기존 로컬 진단: `filegate`
 - 관련 계약: [등록부](01-registry.md), [제품 경계](../adr/007-grove-storage-foundation.md)
 - 첫 목표: 기존 등록·키·데이터를 보존하면서 FileGate 등록부의 Terraform 관리를 대체한다.
@@ -12,9 +12,9 @@
 | 서버 진입점 | `filegate`·`filegate serve` 유지 | 서버 이름 전환은 별도 릴리스 |
 | 원격 진단 | `gscli status`: HTTP 상태·등록부 요약 | 지원 서버 계약 확장 |
 | 로컬 진단 | `filegate status`: DB·복호 키·저장소 접근 | doctor 명칭·probe 개선은 서버 측 별도 변경 |
-| 관리 명령 | list·show·usage | create·replace·delete·register |
-| 인자·출력 | 중첩 명령 검증, table·버전 있는 JSON | 변경 확인·일회성 비밀 저장 |
-| 테스트 | 설정·HTTP·오류·출력·status 분리 | 등록·전송 E2E·운영 이관 |
+| 관리 명령 | list·show·usage·create·replace·delete·register | Node·Agent 명령은 2차 |
+| 인자·출력 | 변경 확인, table·버전 있는 JSON, 일회성 비밀 파일 | 연결 profile은 후속 |
+| 테스트 | 설정·입력·HTTP·비밀·변경 결과·status 분리 | 실제 전송·운영 이관 |
 
 근거: [main.rs](../../backend/crates/api/src/main.rs), [status.rs](../../backend/crates/api/src/status.rs).
 기존 `filegate status`는 HTTP 서버 없이 실행되며 migration을 수행하지 않는다.
@@ -51,8 +51,8 @@ HTTP 응답 모델을 소유하며, 등록부 정본과 변경 규칙은 API·Po
 
 ## 명령 구조
 
-현재 소스에서 제공하는 읽기 명령이다. 소스 설치와 GitHub Release 바이너리 배포를 지원한다.
-첫 CLI 자산 발행은 새 버전 릴리스에서 수행한다. 서버 이미지는 `filegate`만 포함한다.
+현재 소스가 제공하는 원격 관리 명령이다. 소스 설치와 GitHub Release 바이너리 배포를 지원한다.
+CLI 자산은 v0.4.0부터 발행한다. 서버 이미지는 `filegate`만 포함한다.
 패키지 버전·설치·업데이트는 [릴리스 계약](../development/releases.md)을 따른다.
 
 ```text
@@ -61,21 +61,29 @@ gscli
 ├── status
 ├── storage
 │   ├── list
-│   └── show ID
+│   ├── show ID
+│   ├── create ID --from PATH
+│   ├── replace ID --from PATH [--yes]
+│   └── delete ID [--yes]
 ├── client
 │   ├── list
-│   └── show ID
+│   ├── show ID
+│   ├── create ID --storage STORAGE_ID
+│   └── delete ID [--yes]
 ├── credential
-│   └── list --client CLIENT_ID
+│   ├── list --client CLIENT_ID
+│   ├── create --client CLIENT_ID --secret-out PATH
+│   └── delete --client CLIENT_ID ACCESS_KEY_ID [--yes]
 ├── client-key
-│   └── list --client CLIENT_ID
+│   ├── list --client CLIENT_ID
+│   ├── register --client CLIENT_ID --key-file PATH
+│   └── delete --client CLIENT_ID SHA256_HASH [--yes]
 └── usage
     ├── storages
     ├── clients
     └── history [--days N]
 ```
 
-아래 표의 create·replace·delete·register는 후속 계약이다. 현재 등록부 명령은 읽기만 제공한다.
 `update`는 서버 인증과 독립적으로 최신 CLI를 설치하며, `--check`는 확인만 한다.
 설치 기록·실패·출력 계약은 [업데이트](../development/releases.md#업데이트)를 따른다.
 
@@ -84,9 +92,9 @@ gscli
 | storage list/show | GET /storages[/ID] | 응답의 secret 제외 유지 |
 | storage create/replace | POST /storages, PUT /storages/ID | `--from`은 JSON spec, ID는 위치 인자로만 받음 |
 | storage delete | DELETE /storages/ID | 참조 제약은 서버가 집행 |
-| client list/show/create/delete | /clients[/ID] | list는 ID 목록; show는 storage_id 포함 |
-| credential list/create/delete | /clients/ID/s3-credentials[/KEY] | 서버가 secret을 생성하고 발급 때 1회 반환 |
-| client-key list/register/delete | /clients/ID/keys[/HASH] | 기존 raw 키의 sha256 해시를 등록 |
+| client list/show/create/delete | /clients[/ID] | create는 `--storage`; list는 ID 목록 |
+| credential list/create/delete | /clients/ID/s3-credentials[/KEY] | `--secret-out`에 일회성 secret 저장 |
+| client-key list/register/delete | /clients/ID/keys[/HASH] | `--key-file`의 raw key를 로컬 sha256 처리 |
 | usage storages/clients/history | /usage[/clients 또는 /history] | history 기본 90일, 입력은 1–3650일 |
 
 위 HTTP 경로의 prefix는 `/api/admin/v1`이다.
@@ -94,6 +102,8 @@ gscli
 입력 JSON에 `id`가 있으면 값의 일치 여부와 관계없이 요청 전에 거부한다.
 create는 CLI가 위치 인자 ID를 JSON의 `id`에 추가해 POST하고, replace는 spec만 PUT한다.
 `replace`는 전체 PUT이다. S3 secret을 다시 공급하며, show 결과만으로 원문 secret을 복구하지 않는다.
+storage JSON은 최대 1 MiB이고 알 수 없는 필드·누락된 capacity_bytes를 요청 전에 거부한다.
+client key 파일은 최대 8 KiB의 단일 ASCII bearer 값이며 끝의 LF 또는 CRLF 하나를 제외하고 해시한다.
 client list는 현재 ID 배열을 표시하고, 자동 N+1 조회로 storage 정보를 채우지 않는다.
 리소스 ID·키 해시는 URL 경로 세그먼트로 인코딩한다.
 
@@ -142,7 +152,7 @@ registry는 두 검사 모두 ok면 ok, 하나라도 failed면 failed, 나머지
 | redirect | 자동 추적 없이 실패; 다른 호스트에 bearer를 재전송하지 않음 |
 | timeout | HTTP 명령 전체 기본 30초, `--timeout SECONDS` 1–86400초; status의 미실행 항목은 unknown |
 | 응답 크기 | 요청별 최대 8 MiB, 초과하면 실패 |
-| 재시도 | 첫 버전은 CLI 차원의 자동 재시도를 수행하지 않음 |
+| 재시도 | 조회·변경 모두 CLI 차원의 자동 재시도 없음 |
 
 CLI 설정은 자동으로 cwd의 .env를 읽지 않는다. 토큰 원문을 인자로 받는 옵션도 두지 않는다.
 연결 프로필·로그인·OS 키체인·추가 인증 방식은 첫 Terraform 대체 이후의 범위다.
@@ -171,7 +181,7 @@ JSON 모드의 실행 결과는 성공·실패 모두 stdout에 아래 envelope 
 |---|---|
 | command | 전체 명령을 점으로 연결, 예: credential.create |
 | endpoint | 검증된 원격 대상 origin; endpoint 입력 오류·자체 업데이트는 null |
-| data | 조회 결과; status는 실패 시에도 관찰된 항목 포함 |
+| data | 조회·변경의 공개 결과; status와 credential 실패는 관찰된 항목 포함 |
 | error | 실패 시 code·message·http_status·outcome, 성공 시 null |
 | outcome | 실패 시 not_applied·unknown·applied 중 하나; 관측 근거에 따라 결정 |
 | 비밀 | token·secret·암호문·인증 헤더는 envelope·로그에서 제외 |
@@ -185,18 +195,16 @@ JSON 모드의 실행 결과는 성공·실패 모두 stdout에 아래 envelope 
 | 2 | 인자·설정 오류 또는 사용자 취소 |
 | 3 | HTTP 401/403 |
 | 4 | HTTP 404 |
-| 5 | 연결·TLS·timeout·redirect·서버 5xx·응답 형식 오류, readiness 실패 |
+| 5 | 조회의 연결·TLS·timeout·redirect·서버 5xx·응답 형식 오류, readiness 실패 |
 | 6 | HTTP 409 또는 로컬 설치·업데이트 잠금 충돌 |
 | 7 | 기타 HTTP 4xx |
-| 8 | CLI 교체 후 설치 메타데이터·동기화·출력 실패; 후속 변경 명령의 결과 불명확·비밀 저장 실패 |
+| 8 | 변경 결과 unknown·applied 실패, 비밀 저장 실패, CLI 교체 후 후속 실패 |
 
 파서 오류는 stderr와 코드 2로 종료하며 JSON envelope를 보장하지 않는다.
 status는 위 집계 규칙으로 종료하고, 나머지 원격 명령은 HTTP 오류 표를 따른다.
 HTTP 2xx만으로 성공을 결정하지 않고 명령별 응답 본문까지 확인한다. DELETE 204는 본문 없는 성공이다.
 
-## 후속 변경 명령과 비밀 (Draft)
-
-아래 계약은 아직 구현되지 않았다. 현재 읽기 명령의 outcome은 항상 not_applied다.
+## 변경 명령과 비밀
 
 | 작업·실패 | 처리 |
 |---|---|
@@ -211,12 +219,16 @@ HTTP 2xx만으로 성공을 결정하지 않고 명령별 응답 본문까지 �
 | 출력 파일 사전 실패 | HTTP 변경 요청 0회 |
 | 발급 응답 유실 | 코드 8, outcome=unknown; 자동 재발급·다른 키 삭제 없이 운영자가 등록 목록 대조 |
 | 응답 후 비밀 저장 실패 | 코드 8, outcome=applied; 알려진 access_key_id를 보고하고 명시적 폐기·재발급 |
-| 변경 timeout·연결 단절·5xx | 적용 여부를 증명할 수 없으면 코드 8·unknown; 자동 재시도 0회 |
+| 변경 timeout·연결 단절·redirect·5xx | 코드 8·unknown; 자동 재시도 0회 |
 | storage JSON 입력 | 비밀 포함 가능; 파일·stdin을 읽고 본문과 비밀을 로그에 남기지 않음 |
 
 secret-out은 stdout을 뜻하는 `-`를 받지 않는다. 비밀 파일은 사용자 지정 보관 경로에 만들고 출력에 원문을 싣지 않는다.
 확정 실패 시 CLI가 만든 빈 파일만 정리하고, 결과 불명확·부분 기록 파일은 경로와 상태를 알린다.
 등록부 조회 결과는 secret이 없는 inventory다. 백업·복원 파일이나 Terraform state의 대체물로 취급하지 않는다.
+
+credential 파일은 `schema_version`, `client_id`, `access_key_id`, `secret_key`를 가진 JSON이다.
+성공 출력은 공개 ID·경로·`saved` 상태만 포함한다. `unknown`은 빈 marker를 유지하고,
+성공 응답 뒤 저장 실패는 공개 ID와 `empty|partial` 상태를 반환한다.
 
 ## 구현·검증 순서
 
@@ -225,12 +237,12 @@ secret-out은 stdout을 뜻하는 `-`를 받지 않는다. 비밀 파일은 사�
 | 명령 기반 (구현) | 파서·연결 설정·HTTP·출력 | help가 DB 없이 동작; 잘못된 인자·설정에서 HTTP 0회 |
 | 읽기 명령 (구현) | status·목록·show·usage | DB·마스터 키 없는 환경에서 0.3.10 관리자 API fixture와 통합 통과 |
 | 로컬 진단 (후속) | 서버 측 doctor·공통 검사 | 기존 status 유지, probe 충돌·timeout·정리 실패 검증 |
-| 변경 명령 | storage·client·키 | 401/404/409·비TTY·비밀 파일 실패·응답 유실 테스트 통과 |
+| 변경 명령 (구현) | storage·client·키 | 401/404/409·비TTY·비밀 파일·응답 유실 테스트 통과 |
 | 등록 전환 | 전용 개발환경 초기화·E2E | Terraform 없이 등록 → 실제 S3/네이티브 업로드·다운로드 성공 |
 | 운영 해제 | state 백업·관리 책임 전환 | 리소스 삭제 0건, 기존 키·논리키·데이터 유지, 롤백 절차 확인 |
 
 세부 작업과 운영 중단 조건은 구현 계획에 둔다. drain·repair·rebalance·파일 이전·관리자 UI는 후속 스펙으로 정의한다.
 
-현재 테스트는 [CLI tests](../../backend/crates/cli/tests/)에서 설정·조회·오류·status로 나눈다.
-CI의 [실제 API 계약 검사](../../scripts/e2e-cli.py)는 임시 PostgreSQL·서버·fs 등록부를 만들고,
-10개 CLI 조회 결과를 실제 API JSON과 대조한다. 종료 시 테스트 프로세스·컨테이너·파일을 정리한다.
+현재 테스트는 [CLI tests](../../backend/crates/cli/tests/)에서 설정·조회·입력·변경·비밀·결과·status로 나눈다.
+CI의 [실제 API 계약 검사](../../scripts/e2e-cli.py)는 임시 PostgreSQL·서버에서 Terraform 없이
+등록·교체·10개 조회·역순 삭제를 수행한다. 종료 시 테스트 프로세스·컨테이너·파일을 정리한다.

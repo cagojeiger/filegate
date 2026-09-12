@@ -33,12 +33,74 @@ impl Error {
             400..=499 => ("request_rejected", "The API rejected the request", 7),
             300..=399 => ("redirect", "Redirects are not followed", 5),
             500..=599 => ("server_error", "The API returned a server error", 5),
-            _ => ("invalid_response", "Expected HTTP 200", 5),
+            _ => ("invalid_response", "Unexpected HTTP status", 5),
         };
         Self {
             http_status: Some(status),
             ..Self::new(code, message, exit)
         }
+    }
+
+    pub fn mutation_response(status: u16) -> Self {
+        let mut error = Self::response(status);
+        if (200..=299).contains(&status) {
+            error.exit = 8;
+            error.outcome = "applied";
+        } else if !(400..=499).contains(&status) {
+            error.exit = 8;
+            error.outcome = "unknown";
+        }
+        error
+    }
+
+    pub fn mutation_transport() -> Self {
+        let mut error = Self::new("transport", "HTTP connection, TLS, or transport failure", 8);
+        error.outcome = "unknown";
+        error
+    }
+
+    pub fn mutation_timeout() -> Self {
+        let mut error = Self::new("timeout", "The command HTTP deadline was exceeded", 8);
+        error.outcome = "unknown";
+        error
+    }
+
+    pub fn applied_invalid_response(status: u16) -> Self {
+        let mut error = Self::new(
+            "invalid_response",
+            "Response does not match the API contract",
+            8,
+        );
+        error.http_status = Some(status);
+        error.outcome = "applied";
+        error
+    }
+
+    pub fn applied_timeout(status: u16) -> Self {
+        let mut error = Self::new("timeout", "The command HTTP deadline was exceeded", 8);
+        error.http_status = Some(status);
+        error.outcome = "applied";
+        error
+    }
+
+    pub fn applied_secret_write() -> Self {
+        let mut error = Self::new(
+            "secret_write_failed",
+            "Credential was issued but its secret file is incomplete",
+            8,
+        );
+        error.outcome = "applied";
+        error
+    }
+
+    pub fn response_too_large(status: u16, applied: bool) -> Self {
+        let mut error = Self::new("response_too_large", "Response exceeds 8 MiB", 5);
+        error.http_status = Some(status);
+        if applied {
+            error.exit = 8;
+            error.outcome = "applied";
+        }
+        error
     }
 
     pub fn invalid_response() -> Self {

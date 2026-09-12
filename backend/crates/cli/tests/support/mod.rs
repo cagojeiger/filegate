@@ -8,7 +8,7 @@
 
 use axum::{
     Router,
-    body::Body,
+    body::{Body, to_bytes},
     extract::{Request, State},
     response::Response,
 };
@@ -49,6 +49,22 @@ impl Reply {
             delay_ms: 0,
         }
     }
+    pub fn status(status: u16, value: Value) -> Self {
+        Self {
+            status,
+            body: value.to_string(),
+            location: None,
+            delay_ms: 0,
+        }
+    }
+    pub fn empty(status: u16) -> Self {
+        Self {
+            status,
+            body: String::new(),
+            location: None,
+            delay_ms: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +72,7 @@ pub struct Seen {
     pub method: String,
     pub path: String,
     pub authorization: Option<String>,
+    pub body: String,
 }
 
 #[derive(Clone)]
@@ -73,14 +90,25 @@ pub struct Server {
 
 impl Server {
     pub fn new(replies: Vec<(&str, Reply)>) -> Self {
+        Self::start(
+            replies
+                .into_iter()
+                .map(|(path, reply)| (format!("* {path}"), reply))
+                .collect(),
+        )
+    }
+    pub fn routes(replies: Vec<(&str, &str, Reply)>) -> Self {
+        Self::start(
+            replies
+                .into_iter()
+                .map(|(method, path, reply)| (format!("{method} {path}"), reply))
+                .collect(),
+        )
+    }
+    fn start(replies: HashMap<String, Reply>) -> Self {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let app = App {
-            replies: Arc::new(
-                replies
-                    .into_iter()
-                    .map(|(p, r)| (p.to_owned(), r))
-                    .collect(),
-            ),
+            replies: Arc::new(replies),
             seen: seen.clone(),
         };
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -135,18 +163,26 @@ impl Drop for Server {
 }
 
 async fn reply(State(app): State<App>, request: Request) -> Response {
+    let method = request.method().to_string();
     let path = request.uri().to_string();
+    let authorization = request
+        .headers()
+        .get("authorization")
+        .map(|v| v.to_str().unwrap().to_owned());
+    let body = to_bytes(request.into_body(), 2 * 1024 * 1024)
+        .await
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
     app.seen.lock().unwrap().push(Seen {
-        method: request.method().to_string(),
+        method: method.clone(),
         path: path.clone(),
-        authorization: request
-            .headers()
-            .get("authorization")
-            .map(|v| v.to_str().unwrap().to_owned()),
+        authorization,
+        body,
     });
     let reply = app
         .replies
-        .get(&path)
+        .get(&format!("{method} {path}"))
+        .or_else(|| app.replies.get(&format!("* {path}")))
         .cloned()
         .unwrap_or_else(|| Reply::error(500));
     tokio::time::sleep(Duration::from_millis(reply.delay_ms)).await;
@@ -188,6 +224,10 @@ pub fn envelope(output: &Output, code: i32) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+pub fn at<'a>(value: &'a Value, pointer: &str) -> &'a Value {
+    value.pointer(pointer).unwrap()
 }
 
 pub fn usage() -> Value {

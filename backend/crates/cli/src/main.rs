@@ -1,10 +1,13 @@
 mod args;
 mod commands;
 mod config;
+mod confirm;
 mod error;
 mod http;
+mod input;
 mod model;
 mod output;
+mod secret;
 mod status;
 mod update;
 
@@ -32,13 +35,20 @@ async fn main() -> ExitCode {
     }
     let exit = envelope.error.as_ref().map_or(0, |error| error.exit);
     if output::emit(&envelope, args.output).is_err() {
-        let applied = envelope.applied();
-        if applied {
-            eprintln!("gscli: CLI was changed, but command output failed");
+        let consequential = envelope.consequential();
+        if consequential {
+            if matches!(
+                args.command,
+                args::Command::Update { .. } | args::Command::Install { .. }
+            ) {
+                eprintln!("gscli: CLI was changed, but command output failed");
+            } else {
+                eprintln!("gscli: command state may have changed, but output failed");
+            }
         } else {
             eprintln!("gscli: cannot write command output");
         }
-        return ExitCode::from(if applied { 8 } else { 1 });
+        return ExitCode::from(if consequential { 8 } else { 1 });
     }
     ExitCode::from(exit)
 }
