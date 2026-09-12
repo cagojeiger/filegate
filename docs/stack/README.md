@@ -4,7 +4,8 @@
 
 | 역할 | 구현 |
 |---|---|
-| 프로세스 | Rust 단일 바이너리, axum, tokio |
+| 서버 프로세스 | Rust filegate 바이너리, axum, tokio |
+| 원격 관리 CLI | 독립 gscli 바이너리, clap·reqwest, 관리자 HTTP API |
 | 메타데이터 | PostgreSQL + sqlx, 부팅 시 마이그레이션 |
 | 바이트 | tokio filesystem I/O, aws-sdk-s3 |
 | 스트림 | axum body, 임시 스풀, 크기·MD5·SHA256 계측 |
@@ -35,11 +36,16 @@ Terraform 제거와 대체 등록 절차는 후속 변경에서 함께 적용한
 | `filegate`, `filegate serve` | 서버 기동·migration·등록 저장소 검증 |
 | `filegate status` | 로컬 설정으로 DB·저장소 접근 검사, usage·client 수 출력 |
 | `filegate --help` | 명령 도움말 |
+| `gscli status` | 원격 HTTP 상태·등록부 요약, 물리 접근은 not_checked |
+| `gscli storage/client ...`, `credential/client-key list`, `usage ...` | 관리자 API 읽기 명령 |
+| `gscli update [--check]` | 서버 연결 없이 최신 CLI 확인·설치, 공식 설치 기록 검증 |
 
-현재 status는 HTTP 서버 없이 동작하고 DB URL·마스터 키를 포함한 서버 설정을 읽는다.
+`filegate status`는 HTTP 서버 없이 동작하고 DB URL·마스터 키를 포함한 서버 설정을 읽는다.
 DB migration은 수행하지 않으며, fs 접근 검사는 probe 파일 쓰기·삭제를 포함한다.
 검사 성공은 exit 0, storage 실패는 exit 1이다. 테스트는 바이트·용량 표현 2개다.
-원격 status·로컬 doctor·관리 명령은 [CLI 스펙 초안](../spec/04-cli.md)의 후속 구현이다.
+`gscli`은 DB·마스터 키 없이 `GROVE_ENDPOINT`·운영자 토큰으로 연결한다.
+`cargo install --path backend/crates/cli --locked`로 소스에서 설치한다.
+변경 명령·로컬 doctor 개편·Terraform 이관은 [CLI 스펙](../spec/04-cli.md)의 후속 작업이다.
 
 ## 컨테이너 연결
 

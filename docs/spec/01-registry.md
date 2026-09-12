@@ -2,7 +2,7 @@
 
 - 상태: 현재 구현 계약
 - 근거: [ADR 004](../adr/004-config-layers.md)
-- 관리 CLI 확장안: [spec 04](04-cli.md) (Draft, 미구현)
+- 관리 CLI: [spec 04](04-cli.md) (gscli 읽기 구현, 변경 명령은 Draft)
 
 ## 등록 관계
 

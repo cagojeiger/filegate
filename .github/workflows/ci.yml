@@ -24,6 +24,11 @@ jobs:
       - name: Diff check
         run: git diff --check
 
+      - name: Release version and installer contracts
+        run: |
+          python3 deploy/ci/check-version.py
+          python3 -B -m unittest discover -s deploy/tests -v
+
   rust:
     name: Rust
     runs-on: ubuntu-latest
@@ -61,6 +66,11 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      - name: CLI API contract
+        run: |
+          cargo build --bin filegate --bin gscli --locked
+          python3 scripts/e2e-cli.py
 
   audit:
     name: Audit
