@@ -26,8 +26,8 @@
 | storage·client·키·S3 자격증명 | PostgreSQL, 운영자 API |
 
 프로세스는 환경 변수를 읽는다. 배포 도구가 env 또는 Secret을 공급한다.
-`deploy/local/main.tf`와 E2E의 Terraform 등록 절차는 현재 유지한다.
-Terraform 제거와 대체 등록 절차는 후속 변경에서 함께 적용한다.
+`scripts/e2e-cli.py`는 Terraform 없이 임시 등록부의 전체 수명주기를 검증한다.
+`deploy/local/main.tf`는 운영 이관 완료까지 비교용으로 유지한다.
 
 ## 현재 CLI
 
@@ -37,7 +37,9 @@ Terraform 제거와 대체 등록 절차는 후속 변경에서 함께 적용한
 | `filegate status` | 로컬 설정으로 DB·저장소 접근 검사, usage·client 수 출력 |
 | `filegate --help` | 명령 도움말 |
 | `gscli status` | 원격 HTTP 상태·등록부 요약, 물리 접근은 not_checked |
-| `gscli storage/client ...`, `credential/client-key list`, `usage ...` | 관리자 API 읽기 명령 |
+| `gscli storage/client ...` | 등록부 조회·생성·교체·삭제 |
+| `gscli credential/client-key ...` | 자격증명 발급·키 해시 등록·목록·삭제 |
+| `gscli usage ...` | storage·client·일별 사용량 조회 |
 | `gscli update [--check]` | 서버 연결 없이 최신 CLI 확인·설치, 공식 설치 기록 검증 |
 
 `filegate status`는 HTTP 서버 없이 동작하고 DB URL·마스터 키를 포함한 서버 설정을 읽는다.
@@ -45,7 +47,8 @@ DB migration은 수행하지 않으며, fs 접근 검사는 probe 파일 쓰기�
 검사 성공은 exit 0, storage 실패는 exit 1이다. 테스트는 바이트·용량 표현 2개다.
 `gscli`은 DB·마스터 키 없이 `GROVE_ENDPOINT`·운영자 토큰으로 연결한다.
 `cargo install --path backend/crates/cli --locked`로 소스에서 설치한다.
-변경 명령·로컬 doctor 개편·Terraform 이관은 [CLI 스펙](../spec/04-cli.md)의 후속 작업이다.
+명령 계약은 [CLI 스펙](../spec/04-cli.md), 운영 이관은
+[등록부 운영](../guide/registry-management.md)을 따른다. 로컬 doctor 개편은 후속 작업이다.
 
 ## 컨테이너 연결
 
@@ -108,6 +111,7 @@ cargo test --workspace
 | `migrations.rs` | URL이 있으면 migration 검증, 없으면 조기 반환 |
 | `scripts/e2e-*.sh` | 로컬 전용 DB·MinIO·서버·스크립트별 등록 전제 |
 | `scripts/e2e-registry.sh` | 시작·종료 시 등록부 초기화, 전용 개발 DB에서 실행 |
+| `scripts/e2e-cli.py` | 임시 PostgreSQL·실제 서버에서 CLI 등록·조회·삭제 수명주기 |
 | `scripts/s3-capture.py` | S3 endpoint·자격증명·bucket으로 실제 객체·multipart 검증 |
 
 ## 로그

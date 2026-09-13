@@ -16,9 +16,15 @@
 | 버전 고정·이전 버전 | 설치 스크립트의 `--version X.Y.Z`로 명시적 재설치 |
 | 자동 업데이트 | 일반 명령은 설치된 버전으로 실행; 업데이트는 명시적 명령에서 수행 |
 
+| 릴리스 계열 | 관리 기준 |
+|---|---|
+| `0.3.x` | Terraform provider가 등록부를 관리 |
+| `0.4.x` | `gscli`가 등록부를 관리하며 CLI 전환 기능을 이 계열에서 안정화 |
+
 NoteGate CLI의 workspace 버전·GitHub Release 바이너리 패턴을 따른다.
 첫 배포에 수동 업데이트를 포함한다. 프로필·키체인은 후속 범위다.
-첫 CLI 자산은 `v0.4.0`에서 발행한다. 기존 `v0.3.10`에는 CLI 자산이 없다.
+첫 CLI 자산은 `v0.4.0`에서 발행한다. 현재 개발 버전은 `v0.4.1`이다.
+기존 `v0.3.10`에는 CLI 자산이 없다.
 
 ## 설치
 
@@ -150,6 +156,6 @@ manifest는 `schema_version`, `version`, `repository`, target별 `name/sha256/si
 | 업데이트 명령·인증 독립성 | `backend/crates/cli/tests/update.rs` |
 | 실제 바이너리 설치 | Release의 각 네이티브 빌드, 임시 디렉터리·다운로드 fixture |
 | 실제 바이너리 업데이트 | Release의 `native_release_artifact` 테스트, 로컬 HTTP fixture → 검증·교체·실행 |
-| 원격 읽기 계약 | `backend/crates/cli/tests`, `scripts/e2e-cli.py` |
+| 원격 조회·변경 계약 | `backend/crates/cli/tests`, `scripts/e2e-cli.py` |
 
 릴리스 보조 도구·테스트는 Python 3.11+를 사용하며, 사용자 설치는 Python 없이 동작한다.

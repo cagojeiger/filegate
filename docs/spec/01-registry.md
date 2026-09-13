@@ -2,7 +2,7 @@
 
 - 상태: 현재 구현 계약
 - 근거: [ADR 004](../adr/004-config-layers.md)
-- 관리 CLI: [spec 04](04-cli.md) (gscli 읽기 구현, 변경 명령은 Draft)
+- 관리 CLI: [spec 04](04-cli.md) (gscli 조회·변경 구현)
 
 ## 등록 관계
 
@@ -15,8 +15,8 @@ flowchart LR
     Location["location"] --> Storage
 ```
 
-PostgreSQL이 정본이고 운영자 API가 변경 경계다. API 클라이언트로 직접 등록하거나
-기존 Terraform 예제를 사용할 수 있다.
+PostgreSQL이 정본이고 운영자 API가 변경 경계다. `gscli`과 API 클라이언트가
+같은 변경 계약을 사용한다. 기존 Terraform 예제는 운영 이관 전 비교 기준이다.
 
 | 리소스 | `/api/admin/v1` 아래 경로 | 동작 |
 |---|---|---|

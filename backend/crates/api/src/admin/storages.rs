@@ -114,7 +114,7 @@ async fn verified_s3_row(
 ) -> Result<StorageRow, ApiError> {
     let submission = validated_s3_submission(relay_base_ready, body)?;
     if let Err(error) = s3_connect(&submission.spec).await {
-        // 운영자 표면·설정 시점이라 실패 사유를 응답에 실어 TF 디버깅을 돕는다.
+        // 운영자 표면·설정 시점이라 실패 사유를 응답에 실어 등록 디버깅을 돕는다.
         // 다른 표면처럼 상세는 로그로도 남긴다 ("내부 상세는 항상 로그" 불변).
         tracing::error!(event = "storage.verify_failed", storage = %id, kind = "s3", %error);
         return Err(bad_request(&format!(
@@ -212,6 +212,7 @@ async fn verified_fs_row(
         || present(&body.access_key)
         || body.secret_key.is_some()
         || body.force_relay
+        || body.force_path_style
     {
         return Err(bad_request(
             "fs storage takes only root_path and capacity_bytes",
@@ -383,6 +384,22 @@ fn require_http_url(value: &str, field: &str) -> Result<(), ApiError> {
 mod tests {
     use super::*;
 
+    fn fs_body(force_path_style: bool) -> StorageSpecBody {
+        StorageSpecBody {
+            kind: "fs".to_owned(),
+            force_relay: false,
+            root_path: Some("/unused".to_owned()),
+            endpoint: None,
+            public_endpoint: None,
+            region: None,
+            bucket: None,
+            force_path_style,
+            access_key: None,
+            secret_key: None,
+            capacity_bytes: 1,
+        }
+    }
+
     #[test]
     fn require_http_url_accepts_http_https_only() {
         assert!(require_http_url("http://minio:9000", "endpoint").is_ok());
@@ -391,5 +408,14 @@ mod tests {
         assert!(require_http_url("minio:9000", "endpoint").is_err()); // 스킴 없음
         // 빈 host(authority)는 presign이 붙을 곳이 없다 — 거부한다.
         assert!(require_http_url("http:///path", "endpoint").is_err());
+    }
+
+    #[tokio::test]
+    async fn fs_rejects_s3_only_force_path_style() {
+        assert!(
+            verified_fs_row(true, "fs-test", fs_body(true))
+                .await
+                .is_err()
+        );
     }
 }

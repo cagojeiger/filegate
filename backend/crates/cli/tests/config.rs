@@ -23,7 +23,7 @@ fn help_and_version_need_no_server_configuration() {
 fn invalid_commands_and_values_make_no_http_requests() {
     let server = Server::new(vec![]);
     for args in [
-        vec!["storage", "delete", "r2"],
+        vec!["storage", "destroy", "r2"],
         vec!["client", "show"],
         vec!["credential", "list"],
         vec!["client", "show", ".."],

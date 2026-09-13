@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Check CLI reads against real server serialization using a disposable local DB."""
+"""Exercise the gscli registry lifecycle against a disposable FileGate API."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,7 +25,7 @@ def docker(*args):
     return subprocess.check_output(["docker", *args], text=True, timeout=90).strip()
 
 
-def check_reads(endpoint, directory):
+def check_lifecycle(endpoint, directory):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def request(method, path, body=None):
@@ -51,18 +52,55 @@ def check_reads(endpoint, directory):
     admin = "/api/admin/v1"
     root = Path(directory) / "objects"
     root.mkdir()
-    request("POST", admin + "/storages", {
-        "id": "cli-test-fs", "kind": "fs", "root_path": str(root), "capacity_bytes": 1073741824,
-    })
-    request("POST", admin + "/clients", {"id": "cli-test", "storage_id": "cli-test-fs"})
-    key = "sha256:" + "a" * 64
-    request("POST", admin + "/clients/cli-test/keys", {"key_hash": key})
-    credential = request("POST", admin + "/clients/cli-test/s3-credentials")
-    paths = ["/storages", "/clients", "/clients/cli-test/keys", "/clients/cli-test/s3-credentials"]
-    before = [request("GET", admin + path) for path in paths]
     env = {k: v for k, v in os.environ.items() if not k.startswith(("FILEGATE_", "GROVE_"))}
     env.pop("DATABASE_URL", None)
     env.update(GROVE_ENDPOINT=endpoint, GROVE_OPERATOR_TOKEN=TOKEN, NO_PROXY="127.0.0.1")
+
+    def run_cli(*args):
+        result = subprocess.run(
+            [str(CLI), "--output", "json", "--timeout", "5", *args],
+            cwd=directory, env=env, capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, (args, result.stdout, result.stderr)
+        assert not result.stderr
+        output = json.loads(result.stdout)
+        assert output["ok"] and output["error"] is None
+        assert TOKEN not in result.stdout
+        print("PASS", " ".join(args))
+        return output, result
+
+    storage_spec = Path(directory) / "storage.json"
+    storage_spec.write_text(json.dumps({
+        "kind": "fs", "root_path": str(root), "capacity_bytes": 1073741824,
+    }))
+    run_cli("storage", "create", "cli-test-fs", "--from", str(storage_spec))
+    run_cli("client", "create", "cli-test", "--storage", "cli-test-fs")
+
+    raw_key = "cli-test-native-key"
+    key_file = Path(directory) / "client-key"
+    key_file.write_text(raw_key + "\n")
+    key = "sha256:" + hashlib.sha256(raw_key.encode()).hexdigest()
+    output, result = run_cli(
+        "client-key", "register", "--client", "cli-test", "--key-file", str(key_file),
+    )
+    assert output["data"]["key_hash"] == key
+    assert raw_key not in result.stdout
+
+    secret_file = Path(directory) / "s3-credential.json"
+    output, result = run_cli(
+        "credential", "create", "--client", "cli-test", "--secret-out", str(secret_file),
+    )
+    credential = json.loads(secret_file.read_text())
+    assert output["data"]["access_key_id"] == credential["access_key_id"]
+    assert output["data"]["file_state"] == "saved"
+    assert credential["secret_key"] not in result.stdout
+    assert secret_file.stat().st_mode & 0o777 == 0o600
+
+    storage_spec.write_text(json.dumps({
+        "kind": "fs", "root_path": str(root), "capacity_bytes": 2147483648,
+    }))
+    run_cli("storage", "replace", "cli-test-fs", "--from", str(storage_spec), "--yes")
+
     cases = [
         (["status"], None),
         (["storage", "list"], "/storages"),
@@ -76,23 +114,23 @@ def check_reads(endpoint, directory):
         (["usage", "history", "--days", "7"], "/usage/history?days=7"),
     ]
     for args, path in cases:
-        result = subprocess.run(
-            [str(CLI), "--output", "json", "--timeout", "5", *args],
-            cwd=directory, env=env, capture_output=True, text=True, timeout=10, check=True,
-        )
-        assert not result.stderr
-        output = json.loads(result.stdout)
-        assert output["ok"] and output["error"] is None
-        assert TOKEN not in result.stdout and credential["secret_key"] not in result.stdout
+        output, result = run_cli(*args)
+        assert credential["secret_key"] not in result.stdout
         if path is not None:
             assert output["data"] == request("GET", admin + path), args
         else:
             assert output["data"]["registry"]["storage_count"] == 1
             assert output["data"]["registry"]["client_count"] == 1
             assert output["data"]["storage_access"] == "not_checked"
-        print("PASS", " ".join(args))
-    assert before == [request("GET", admin + path) for path in paths]
-    print("PASS registry unchanged across CLI reads")
+
+    access_key_id = credential["access_key_id"]
+    run_cli("credential", "delete", "--client", "cli-test", access_key_id, "--yes")
+    run_cli("client-key", "delete", "--client", "cli-test", key, "--yes")
+    run_cli("client", "delete", "cli-test", "--yes")
+    run_cli("storage", "delete", "cli-test-fs", "--yes")
+    assert request("GET", admin + "/clients") == []
+    assert request("GET", admin + "/storages") == []
+    print("PASS registry lifecycle completed without Terraform")
 
 
 def main():
@@ -125,7 +163,7 @@ def main():
             with tempfile.TemporaryFile() as log:
                 server = subprocess.Popen([str(SERVER)], env=env, cwd=directory, stdout=log, stderr=log)
                 try:
-                    check_reads(endpoint, directory)
+                    check_lifecycle(endpoint, directory)
                 finally:
                     server.terminate()
                     try:

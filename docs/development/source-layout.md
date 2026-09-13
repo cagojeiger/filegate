@@ -2,10 +2,11 @@
 
 ```text
 backend/crates/
-├── cli/                   gscli: 원격 관리자 API 읽기 명령
-│   ├── src/               인자·설정·HTTP·응답 모델·출력
+├── cli/                   gscli: 원격 관리자 API 조회·변경
+│   ├── src/               인자·설정·HTTP·입력·확인·비밀 출력·응답 출력
+│   │   ├── commands/      조회·변경 실행
 │   │   └── update/        업데이트 흐름·다운로드·설치 기록·파일 교체, 분리된 tests/
-│   └── tests/             설정·조회·오류·status HTTP·update 진입점 테스트
+│   └── tests/             설정·조회·변경·비밀·실패·status·update 테스트
 ├── api/src/
 │   ├── admin/              등록부·운영자 인증·usage
 │   ├── s3/                 SigV4·라우팅·객체·multipart
@@ -57,7 +58,8 @@ detach는 같은 트랜잭션을 공유한다.
 | S3 원자적 교체·완료·회수 | `db/tests/s3_*` |
 | filesystem 조립·임시 보호 | `infra/src/fs.rs` |
 | 현재 CLI 표현 | `api/src/status.rs` (바이트·용량 2개) |
-| 원격 CLI | `cli/tests/{config,reads,failures,status}.rs`, `cli/src/output_tests.rs` |
+| 원격 CLI 조회·상태 | `cli/tests/{config,reads,failures,status}.rs`, `cli/src/output_tests.rs` |
+| 원격 CLI 변경 | `cli/tests/{inputs,storage_writes,identity_writes,confirmations,secrets,mutation_failures}.rs` |
 | CLI·서버 응답 계약 | `scripts/e2e-cli.py` (CI, 격리 DB·실제 서버) |
 | CLI 설치·릴리스 계약 | `deploy/tests/test_{installer,manifest,version}.py` |
 | 실제 바이트 경로 | `scripts/e2e-*.sh`, `scripts/s3-capture.py` |

@@ -16,13 +16,25 @@ pub struct Envelope {
 }
 
 impl Envelope {
-    pub fn applied(&self) -> bool {
+    pub fn consequential(&self) -> bool {
         self.error
             .as_ref()
-            .is_some_and(|error| error.outcome == "applied")
+            .is_some_and(|error| matches!(error.outcome, "applied" | "unknown"))
             || match &self.data {
                 Some(Data::Installation { .. }) => true,
                 Some(Data::Update(result)) => result.updated,
+                Some(_) if self.error.is_none() => matches!(
+                    self.command,
+                    "storage.create"
+                        | "storage.replace"
+                        | "storage.delete"
+                        | "client.create"
+                        | "client.delete"
+                        | "credential.create"
+                        | "credential.delete"
+                        | "client-key.register"
+                        | "client-key.delete"
+                ),
                 _ => false,
             }
     }
